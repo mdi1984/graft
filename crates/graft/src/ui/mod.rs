@@ -1,5 +1,6 @@
 pub mod confirm;
 pub mod console;
+pub mod dialog;
 pub mod diff_view;
 pub mod file_status;
 pub mod history;

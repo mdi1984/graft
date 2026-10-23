@@ -8,6 +8,7 @@ use egui::{
 };
 use graft_core::details::{CommitDetails, FileChange};
 use graft_core::history::{Commit, GraphRow, History, LineKind};
+use graft_core::refs::ResetMode;
 use graft_core::short;
 use graft_core::status::Change;
 
@@ -15,7 +16,7 @@ use super::icons::Icon;
 use super::widgets::{
     ButtonKind, button, chip, elided, empty_state, icon_button, paint_galley_left, spinner,
 };
-use crate::project::{Action, Project, RefKind, RefLabel};
+use crate::project::{Action, DialogKind, Project, RefKind, RefLabel};
 use crate::theme::{self, color};
 use crate::time;
 
@@ -135,7 +136,7 @@ fn commit_list(ui: &mut Ui, project: &Project, history: &History, actions: &mut 
                 actions.push(Action::ShowFileStatus);
             }
             if !commit.is_worktree() {
-                response.context_menu(|ui| commit_menu(ui, commit));
+                response.context_menu(|ui| commit_menu(ui, project, commit, actions));
             }
         }
     });
@@ -415,7 +416,78 @@ fn curve(painter: &egui::Painter, from: Pos2, to: Pos2, vertical_first: bool, st
     ));
 }
 
-fn commit_menu(ui: &mut Ui, commit: &Commit) {
+fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Vec<Action>) {
+    let busy = project.is_operating();
+    let wt = project.worktree();
+    let branch = wt.and_then(|wt| wt.branch.clone());
+    let is_head = wt.and_then(|wt| wt.head) == Some(commit.id);
+    let short_id = short(&commit.id);
+    let mut item = |ui: &mut Ui, label: &str, enabled: bool, action: Action| {
+        if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+            actions.push(action);
+            ui.close();
+        }
+    };
+
+    item(
+        ui,
+        "New branch here…",
+        !busy,
+        Action::OpenDialog(DialogKind::NewBranch {
+            name: String::new(),
+            start: commit.id.to_string(),
+            start_label: format!("{short_id} {}", commit.summary),
+            checkout: true,
+        }),
+    );
+    item(
+        ui,
+        "New tag here…",
+        !busy,
+        Action::OpenDialog(DialogKind::NewTag {
+            name: String::new(),
+            message: String::new(),
+            target: commit.id.to_string(),
+            target_label: format!("{short_id} {}", commit.summary),
+        }),
+    );
+    item(
+        ui,
+        "Check out this commit (detached)",
+        !busy && !is_head,
+        Action::CheckoutDetached(commit.id),
+    );
+    ui.separator();
+    let onto = branch.as_deref().unwrap_or("HEAD");
+    item(
+        ui,
+        &format!("Cherry-pick onto {onto}"),
+        !busy && !is_head,
+        Action::CherryPick(commit.id),
+    );
+    item(ui, "Revert this commit", !busy, Action::Revert(commit.id));
+    if let Some(branch) = &branch {
+        item(
+            ui,
+            &format!("Reset {branch} to here…"),
+            !busy && !is_head,
+            Action::OpenDialog(DialogKind::Reset {
+                target: commit.id.to_string(),
+                target_label: short_id.clone(),
+                branch: branch.clone(),
+                mode: ResetMode::Mixed,
+            }),
+        );
+    }
+    if is_head && commit.parents.len() == 1 {
+        item(
+            ui,
+            "Undo this commit (keep changes)",
+            !busy,
+            Action::UndoCommit,
+        );
+    }
+    ui.separator();
     if ui.button("Copy commit hash").clicked() {
         ui.ctx().copy_text(commit.id.to_string());
         ui.close();

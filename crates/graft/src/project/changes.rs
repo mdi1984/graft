@@ -7,10 +7,10 @@ use std::sync::{Arc, Mutex};
 
 use graft_core::diff::{self, FileDiff, Source};
 use graft_core::ops::{self, LineOp};
-use graft_core::remote;
 use graft_core::repo::Progress;
 use graft_core::status::{EntryKind, StatusEntry};
 use graft_core::{CancelToken, Git};
+use graft_core::{refs, remote};
 
 use super::{Action, Event, Project};
 
@@ -95,19 +95,34 @@ pub struct Confirm {
     pub action: Action,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemoteOp {
     Fetch,
     Pull,
     Push,
+    /// Push over a diverged upstream, with lease.
+    ForcePush,
+    PushTag {
+        remote: String,
+        tag: String,
+    },
+    DeleteRemoteBranch {
+        remote: String,
+        branch: String,
+    },
 }
 
 impl RemoteOp {
-    fn label(self) -> &'static str {
+    fn label(&self) -> String {
         match self {
-            Self::Fetch => "Fetching",
-            Self::Pull => "Pulling",
-            Self::Push => "Pushing",
+            Self::Fetch => "Fetching".to_owned(),
+            Self::Pull => "Pulling".to_owned(),
+            Self::Push => "Pushing".to_owned(),
+            Self::ForcePush => "Force pushing".to_owned(),
+            Self::PushTag { tag, .. } => format!("Pushing tag {tag}"),
+            Self::DeleteRemoteBranch { remote, branch } => {
+                format!("Deleting {remote}/{branch}")
+            }
         }
     }
 }
@@ -115,6 +130,12 @@ impl RemoteOp {
 /// What happens when an operation finishes successfully.
 pub(super) enum Then {
     Nothing,
+    /// A plain push: if the remote rejects it, offer to force push.
+    Pushed,
+    /// Deleting this branch: if it is not merged, offer to force it.
+    DeletedBranch(String),
+    /// Submitted from the open dialog: close it on success, show errors in it.
+    Dialog(String),
     /// Select this worktree as soon as a snapshot contains it.
     OpenWorktree(std::path::PathBuf),
     Committed {
@@ -420,10 +441,17 @@ impl Project {
             cancel: Some(cancel.clone()),
         });
         let git = self.wt_git();
-        let then = match op {
+        let then = match &op {
             RemoteOp::Fetch => Then::Nothing,
             RemoteOp::Pull => Then::Info("Pulled".to_owned()),
-            RemoteOp::Push => Then::Info("Pushed".to_owned()),
+            RemoteOp::Push => Then::Pushed,
+            RemoteOp::ForcePush => Then::Info("Force pushed".to_owned()),
+            RemoteOp::PushTag { remote, tag } => {
+                Then::Info(format!("Pushed tag {tag} to {remote}"))
+            }
+            RemoteOp::DeleteRemoteBranch { remote, branch } => {
+                Then::Info(format!("Deleted {remote}/{branch}"))
+            }
         };
         self.pool.spawn_long(&self.tx, move |waker| {
             let report = |p: Progress| {
@@ -436,6 +464,13 @@ impl Project {
                 RemoteOp::Fetch => remote::fetch(&git, &cancel, report),
                 RemoteOp::Pull => remote::pull(&git, &cancel, report),
                 RemoteOp::Push => remote::push(&git, &cancel, report),
+                RemoteOp::ForcePush => remote::force_push(&git, &cancel, report),
+                RemoteOp::PushTag { remote, tag } => {
+                    refs::push_tag(&git, &remote, &tag, &cancel, report)
+                }
+                RemoteOp::DeleteRemoteBranch { remote, branch } => {
+                    refs::delete_remote_branch(&git, &remote, &branch, &cancel, report)
+                }
             };
             Event::OpDone {
                 then,
@@ -445,7 +480,7 @@ impl Project {
     }
 
     /// Run a quick git operation on the selected worktree, then refresh.
-    fn run_op(
+    pub(super) fn run_op(
         &mut self,
         label: &str,
         then: Then,
@@ -483,16 +518,14 @@ impl Project {
         self.refresh();
         match result {
             Err(e) if e == "Cancelled" => {}
-            Err(e) => match &mut self.new_worktree {
-                // Show it in the dialog, where the user can fix it.
-                Some(form) if form.creating => {
-                    form.creating = false;
-                    form.error = Some(e);
-                }
-                _ => self.notices.push(e),
-            },
+            Err(e) => self.on_op_error(then, e),
             Ok(extra) => match then {
-                Then::Nothing => self.infos.extend(extra),
+                Then::Nothing | Then::DeletedBranch(_) => self.infos.extend(extra),
+                Then::Pushed => self.infos.push("Pushed".to_owned()),
+                Then::Dialog(text) => {
+                    self.dialog = None;
+                    self.infos.push(text);
+                }
                 Then::Info(text) => self.infos.push(match extra {
                     Some(extra) => format!("{text}. {extra}"),
                     None => text,
