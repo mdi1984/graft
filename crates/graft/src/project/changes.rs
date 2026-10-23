@@ -54,6 +54,8 @@ pub struct DiffView {
     /// Selected changed lines as (hunk, line).
     pub selection: BTreeSet<(usize, usize)>,
     pub anchor: Option<(usize, usize)>,
+    /// No staging, discarding or line selection (commits, stashes, review).
+    pub read_only: bool,
     generation: u64,
 }
 
@@ -170,6 +172,7 @@ impl Project {
             loading: true,
             selection: BTreeSet::new(),
             anchor: None,
+            read_only: false,
             generation: 0,
         });
         self.load_diff();
@@ -191,9 +194,14 @@ impl Project {
             loading: true,
             selection: BTreeSet::new(),
             anchor: None,
+            read_only: true,
             generation,
         });
-        let git = self.git.clone();
+        // Commits are the same everywhere; the rest reads the worktree.
+        let git = match key.source {
+            Source::Commit(_) => self.git.clone(),
+            _ => self.wt_git(),
+        };
         self.pool.spawn(&self.tx, move || {
             let result = diff::load(&git, &key.source, &key.path)
                 .map(|d| {

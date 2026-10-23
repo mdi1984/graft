@@ -6,7 +6,7 @@ use std::ops::Range;
 
 use anyhow::{Result, bail};
 
-use crate::cli::{Git, failure_message};
+use crate::cli::{Git, Output, failure_message};
 use crate::model::Oid;
 
 /// Which pair of trees a diff compares.
@@ -20,6 +20,8 @@ pub enum Source {
     Untracked,
     /// A commit against its first parent (or nothing, for a root commit).
     Commit(Oid),
+    /// A commit (a review's merge-base) → working tree.
+    Base(Oid),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -128,6 +130,7 @@ pub fn load(git: &Git, source: &Source, path: &str) -> Result<FileDiff> {
             args.push(base);
             args.push(id.to_string());
         }
+        Source::Base(id) => args.push(id.to_string()),
     }
     args.push("--".into());
     if *source == Source::Untracked {
@@ -135,9 +138,10 @@ pub fn load(git: &Git, source: &Source, path: &str) -> Result<FileDiff> {
     }
     args.push(path.to_owned());
 
-    let out = git.run_raw(&args)?;
     // `--no-index` exits with 1 when the files differ, which is the point.
-    let ok = out.success() || (*source == Source::Untracked && out.status == 1);
+    let expected = |o: &Output| o.success() || (*source == Source::Untracked && o.status == 1);
+    let out = git.run_expecting(&args, None, expected)?;
+    let ok = expected(&out);
     if !ok {
         bail!(failure_message(&out));
     }

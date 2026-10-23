@@ -102,7 +102,7 @@ fn load_files(git: &Git, from: &str, to: &str) -> Result<Vec<FileChange>> {
     Ok(files)
 }
 
-fn parse_name_status(bytes: &[u8]) -> Vec<FileChange> {
+pub(crate) fn parse_name_status(bytes: &[u8]) -> Vec<FileChange> {
     let mut files = Vec::new();
     let mut fields = bytes
         .split(|&b| b == 0)
@@ -139,7 +139,7 @@ fn parse_name_status(bytes: &[u8]) -> Vec<FileChange> {
 
 /// `--numstat -z`: "added\tremoved\tpath\0", or for renames
 /// "added\tremoved\t\0old\0new\0". Binary files show "-".
-fn apply_numstat(files: &mut [FileChange], bytes: &[u8]) {
+pub(crate) fn apply_numstat(files: &mut [FileChange], bytes: &[u8]) {
     let mut fields = bytes
         .split(|&b| b == 0)
         .map(|f| String::from_utf8_lossy(f).into_owned());

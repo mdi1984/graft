@@ -329,3 +329,23 @@ pub fn open_terminal(dir: &Path) {
             .spawn();
     }
 }
+
+/// Open a folder or file in VS Code (`code` on the PATH); without it, open the
+/// path with its default program.
+pub fn open_in_ide(path: &Path) {
+    let path = path.to_path_buf();
+    std::thread::spawn(move || {
+        let mut cmd = std::process::Command::new("cmd.exe");
+        cmd.args(["/c", "code"]).arg(&path);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let ok = cmd.status().is_ok_and(|s| s.success());
+        if !ok {
+            let _ = open::that_detached(&path);
+        }
+    });
+}

@@ -316,9 +316,10 @@ pub fn button(ui: &mut Ui, label: &str, kind: ButtonKind, enabled: bool) -> Resp
         ButtonKind::Primary => theme::semibold(theme::BODY_SIZE),
         ButtonKind::Secondary => theme::body(),
     };
+    // Placeholder color: `galley()` below paints it in the state's color.
     let text = ui
         .painter()
-        .layout_no_wrap(label.to_owned(), font, color::TEXT);
+        .layout_no_wrap(label.to_owned(), font, Color32::PLACEHOLDER);
     let size = vec2(text.size().x + 2.0 * PAD_X, HEIGHT);
     let sense = if enabled {
         Sense::click()
