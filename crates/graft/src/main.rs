@@ -19,7 +19,8 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("Graft")
             .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([960.0, 560.0]),
+            .with_min_inner_size([960.0, 560.0])
+            .with_icon(window_icon()),
         ..Default::default()
     };
     eframe::run_native(
@@ -27,4 +28,9 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(app::GraftApp::new(cc)))),
     )
+}
+
+fn window_icon() -> egui::IconData {
+    eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon/graft-256.png"))
+        .expect("bundled icon is a valid PNG")
 }
