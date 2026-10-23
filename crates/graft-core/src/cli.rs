@@ -40,6 +40,8 @@ impl Output {
 pub struct Git {
     cwd: PathBuf,
     console: Console,
+    /// Use this index file instead of the worktree's (`GIT_INDEX_FILE`).
+    index_file: Option<PathBuf>,
 }
 
 impl Git {
@@ -47,6 +49,7 @@ impl Git {
         Self {
             cwd: cwd.into(),
             console,
+            index_file: None,
         }
     }
 
@@ -61,6 +64,15 @@ impl Git {
     /// Same console, other directory (e.g. another worktree).
     pub fn at(&self, cwd: impl Into<PathBuf>) -> Self {
         Self::new(cwd, self.console.clone())
+    }
+
+    /// Same directory, but every command uses `index` as the index, leaving
+    /// the real one alone.
+    pub fn with_index(&self, index: impl Into<PathBuf>) -> Self {
+        Self {
+            index_file: Some(index.into()),
+            ..self.clone()
+        }
     }
 
     /// Run git and return its output whatever the exit code.
@@ -96,6 +108,9 @@ impl Git {
         let args: Vec<_> = args.into_iter().map(|a| a.as_ref().to_owned()).collect();
         let started = Instant::now();
         let mut cmd = command(&self.cwd);
+        if let Some(index) = &self.index_file {
+            cmd.env("GIT_INDEX_FILE", index);
+        }
         cmd.args(&args);
         cmd.stdin(if input.is_some() {
             Stdio::piped()

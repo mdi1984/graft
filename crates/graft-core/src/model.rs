@@ -16,6 +16,8 @@ pub struct RepoSnapshot {
     pub tags: Vec<Tag>,
     pub remotes: Vec<Remote>,
     pub stash_count: usize,
+    /// Another worktree shown in the main worktree ("Preview in main").
+    pub preview: Option<crate::preview::Preview>,
 }
 
 impl RepoSnapshot {

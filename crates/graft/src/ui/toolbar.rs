@@ -8,8 +8,6 @@ use super::widgets::{Tone, tool_button, toolbar_divider};
 use crate::project::{Action, DialogKind, Project, RemoteOp, Tab, merge_dialog};
 use crate::theme::{RADIUS, color};
 
-const LATER: &str = "Coming in a later step";
-
 pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>, search: &mut String) {
     let ahead = project.worktree().map_or(0, |wt| wt.ahead());
 
@@ -110,7 +108,32 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>, search: &
         }
         toolbar_divider(ui);
 
-        tool_button(ui, None, "Preview in main", None, Tone::Normal).on_hover_text(LATER);
+        let preview = project.snapshot.as_ref().and_then(|s| s.preview.as_ref());
+        let (preview_hint, preview_action) = match (preview, wt) {
+            (Some(p), Some(wt)) if graft_core::same_path(&p.source, &wt.path) => (
+                "Main shows this worktree: show its current state again",
+                Some(Action::UpdatePreview),
+            ),
+            (Some(_), _) => ("Main already shows a preview. Restore main first.", None),
+            (None, Some(wt)) if wt.is_main => (
+                "Select another worktree to show its state in the main worktree",
+                None,
+            ),
+            (None, Some(wt)) => (
+                "Check out this worktree's commit plus its uncommitted changes in the \
+                 main worktree, e.g. to run it from there. Main must be clean.",
+                Some(Action::PreviewInMain(wt.path.clone())),
+            ),
+            (None, None) => ("Select a worktree first", None),
+        };
+        if tool_button(ui, None, "Preview in main", None, Tone::Normal)
+            .on_hover_text(preview_hint)
+            .clicked()
+            && !busy
+            && let Some(action) = preview_action
+        {
+            actions.push(action);
+        }
         if tool_button(ui, Some(Icon::Slash), "Slash", None, Tone::Danger)
             .on_hover_text("Clean up finished branches and worktrees (shows a preview first)")
             .clicked()

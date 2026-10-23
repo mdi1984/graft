@@ -4,6 +4,7 @@
 
 mod changes;
 mod conflicts;
+mod preview;
 mod refs;
 mod review;
 mod slash;
@@ -220,6 +221,13 @@ pub enum Action {
     RunSlash,
     /// Bring back an entry of "Recently slashed".
     RestoreSlashed(usize),
+
+    // Preview in main
+    /// Show this worktree's state (commit + uncommitted changes) in main.
+    PreviewInMain(PathBuf),
+    /// Show the previewed worktree's current state again.
+    UpdatePreview,
+    RestoreMain,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -770,6 +778,9 @@ impl Project {
             | Action::ToggleSlashItem(_)
             | Action::RunSlash
             | Action::RestoreSlashed(_) => self.apply_slash_action(action),
+            Action::PreviewInMain(_) | Action::UpdatePreview | Action::RestoreMain => {
+                self.apply_preview_action(action)
+            }
             other => self.apply_change(other),
         }
     }
