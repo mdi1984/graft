@@ -13,9 +13,11 @@ use graft_core::{CancelToken, Console, same_path};
 use serde::{Deserialize, Serialize};
 
 use crate::project::{Action, Project, ReviewState, SlashedBranch};
+use crate::settings::Settings;
 use crate::theme::color;
 use crate::ui::console::{self as console_ui, ConsoleView, STATUS_HEIGHT};
 use crate::ui::project_tabs::{self, TabAction, TabInfo};
+use crate::ui::settings::{self as settings_ui, SettingsForm};
 use crate::ui::start::{Busy, Recent, StartAction, StartPage};
 use crate::ui::toasts::Toasts;
 use crate::{fonts, theme, ui};
@@ -36,6 +38,7 @@ struct Persisted {
     reviews: HashMap<PathBuf, HashMap<PathBuf, ReviewState>>,
     /// "Recently slashed" per repository root.
     slashed: HashMap<PathBuf, Vec<SlashedBranch>>,
+    settings: Settings,
 }
 
 #[derive(Clone, Copy)]
@@ -72,6 +75,8 @@ pub struct GraftApp {
     reviews: HashMap<PathBuf, HashMap<PathBuf, ReviewState>>,
     /// "Recently slashed" of repositories that are not open.
     slashed: HashMap<PathBuf, Vec<SlashedBranch>>,
+    settings: Settings,
+    settings_form: Option<SettingsForm>,
 }
 
 impl GraftApp {
@@ -105,6 +110,7 @@ impl GraftApp {
             .unwrap_or_else(default_clone_parent);
         let mut reviews = persisted.reviews;
         let mut slashed = persisted.slashed;
+        let settings = persisted.settings;
         let projects: Vec<Project> = persisted
             .open
             .iter()
@@ -113,6 +119,7 @@ impl GraftApp {
                     Project::new(root.clone(), root.clone(), console.clone(), pool.clone());
                 project.reviews = take_reviews(&mut reviews, root);
                 project.slashed = take_reviews(&mut slashed, root);
+                project.settings = settings.clone();
                 project
             })
             .collect();
@@ -139,6 +146,8 @@ impl GraftApp {
             was_focused: true,
             reviews,
             slashed,
+            settings,
+            settings_form: None,
         };
         for folder in folders {
             let folder = std::path::absolute(&folder).unwrap_or(folder);
@@ -218,6 +227,7 @@ impl GraftApp {
         );
         project.reviews = take_reviews(&mut self.reviews, &project.root);
         project.slashed = take_reviews(&mut self.slashed, &project.root);
+        project.settings = self.settings.clone();
         self.projects.push(project);
         self.activate(Some(self.projects.len() - 1));
     }
@@ -300,6 +310,7 @@ impl GraftApp {
             }
             TabAction::NewTab => self.activate(None),
             TabAction::CloseStart => self.close_start(),
+            TabAction::OpenSettings => self.open_settings(),
         }
     }
 
@@ -364,10 +375,48 @@ impl GraftApp {
         });
     }
 
+    fn open_settings(&mut self) {
+        if self.settings_form.is_some() {
+            return;
+        }
+        self.settings_form = Some(SettingsForm::new(&self.settings));
+        if let Some(i) = self.active {
+            self.projects[i].apply(Action::LoadIdentity);
+        }
+    }
+
+    fn settings_ui(&mut self, ctx: &egui::Context) {
+        let Some(form) = &mut self.settings_form else {
+            return;
+        };
+        let repo = self.active.map(|i| {
+            let p = &self.projects[i];
+            (p.name.as_str(), p.identity.as_ref())
+        });
+        match ui::settings::show(ctx, form, repo) {
+            settings_ui::Outcome::Open => {}
+            settings_ui::Outcome::Cancel => self.settings_form = None,
+            settings_ui::Outcome::Save(settings, identity) => {
+                self.settings_form = None;
+                self.settings = settings;
+                for p in &mut self.projects {
+                    p.settings = self.settings.clone();
+                }
+                if let (Some(identity), Some(i)) = (identity, self.active) {
+                    self.projects[i].apply(Action::SaveIdentity(identity));
+                }
+            }
+        }
+    }
+
     fn shortcuts(&mut self, ctx: &egui::Context) {
         let ctrl = Modifiers::COMMAND;
         let ctrl_shift = Modifiers::COMMAND | Modifiers::SHIFT;
         let pressed = |mods, key| ctx.input_mut(|i| i.consume_key(mods, key));
+
+        if pressed(ctrl, Key::Comma) {
+            self.open_settings();
+        }
 
         if pressed(ctrl, Key::T) {
             self.activate(None);
@@ -579,6 +628,10 @@ impl eframe::App for GraftApp {
         self.handle_drops(&ctx);
         self.refresh_on_focus(&ctx);
         self.sync_window_title(&ctx);
+        self.settings_ui(&ctx);
+        if self.settings.auto_fetch_minutes > 0 && !self.projects.is_empty() {
+            ctx.request_repaint_after(std::time::Duration::from_secs(20));
+        }
 
         let infos: Vec<TabInfo> = self
             .projects
@@ -678,6 +731,7 @@ impl eframe::App for GraftApp {
             console_open: self.console_open,
             reviews,
             slashed,
+            settings: self.settings.clone(),
         };
         eframe::set_value(storage, STORAGE_KEY, &persisted);
     }

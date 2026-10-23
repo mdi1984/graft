@@ -7,6 +7,7 @@ mod conflicts;
 mod preview;
 mod refs;
 mod review;
+mod settings;
 mod slash;
 mod stashes;
 mod worktrees;
@@ -228,6 +229,10 @@ pub enum Action {
     /// Show the previewed worktree's current state again.
     UpdatePreview,
     RestoreMain,
+
+    // Settings
+    LoadIdentity,
+    SaveIdentity(graft_core::identity::Identity),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -280,6 +285,8 @@ enum Event {
     },
     SlashPlan(Result<graft_core::slash::Plan, String>),
     SlashDone(graft_core::slash::Outcome),
+    Identity(Result<graft_core::identity::Identity, String>),
+    AutoFetched(Result<(), String>),
     /// The file watcher saw a change that matters.
     Changed,
     PickedFolder(Option<PathBuf>),
@@ -338,6 +345,12 @@ pub struct Project {
     pub slash: Option<SlashView>,
     /// Deleted branches, newest first. Saved by the app.
     pub slashed: Vec<SlashedBranch>,
+    /// The app's settings; the app keeps this copy current.
+    pub settings: crate::settings::Settings,
+    /// The commit identity, loaded for the Settings dialog.
+    pub identity: Option<Result<graft_core::identity::Identity, String>>,
+    last_fetch: std::time::Instant,
+    auto_fetching: bool,
     diff_generation: u64,
     pub commit_form: CommitForm,
     /// A git command that changes things, while it runs.
@@ -408,6 +421,10 @@ impl Project {
             pending_conflicts: None,
             slash: None,
             slashed: Vec::new(),
+            settings: crate::settings::Settings::default(),
+            identity: None,
+            last_fetch: std::time::Instant::now(),
+            auto_fetching: false,
             diff_generation: 0,
             commit_form: CommitForm::default(),
             op: None,
@@ -451,6 +468,7 @@ impl Project {
 
     /// Apply results of finished jobs. Call once per frame.
     pub fn poll(&mut self) {
+        self.maybe_auto_fetch();
         while let Ok(event) = self.rx.try_recv() {
             match event {
                 Event::Snapshot(result) => self.on_snapshot(result),
@@ -464,6 +482,8 @@ impl Project {
                 Event::Review { generation, result } => self.on_review(generation, result),
                 Event::SlashPlan(result) => self.on_slash_plan(result),
                 Event::SlashDone(outcome) => self.on_slash_done(outcome),
+                Event::Identity(result) => self.on_identity(result),
+                Event::AutoFetched(result) => self.on_auto_fetched(result),
                 Event::StashFiles(id, result) => {
                     if self.selected_stash == Some(id) {
                         self.stash_files = Some(result);
@@ -767,7 +787,7 @@ impl Project {
             | Action::MarkResolved(_)
             | Action::ContinueOp(_)
             | Action::AbortOp { .. } => self.apply_conflict_action(action),
-            Action::OpenInIde(path) => open_in_ide(&path),
+            Action::OpenInIde(path) => open_in_ide(&path, &self.settings.ide_command),
             Action::SelectReviewFile(_)
             | Action::ToggleViewed(_)
             | Action::SetReviewBase(_)
@@ -781,6 +801,7 @@ impl Project {
             Action::PreviewInMain(_) | Action::UpdatePreview | Action::RestoreMain => {
                 self.apply_preview_action(action)
             }
+            Action::LoadIdentity | Action::SaveIdentity(_) => self.apply_settings_action(action),
             other => self.apply_change(other),
         }
     }

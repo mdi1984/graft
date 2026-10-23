@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use graft_core::watch::Watcher;
-use graft_core::worktree::{self, DEFAULT_COPY_PATTERNS, Start};
+use graft_core::worktree::{self, Start};
 use graft_core::{RepoSnapshot, same_path};
 
 use super::changes::Then;
@@ -158,7 +158,7 @@ impl Project {
             path: String::new(),
             path_edited: false,
             copy_ignored: true,
-            patterns: DEFAULT_COPY_PATTERNS.to_owned(),
+            patterns: self.settings.copy_patterns.clone(),
             error: None,
             creating: false,
             focus: true,
@@ -332,18 +332,19 @@ pub fn open_terminal(dir: &Path) {
 
 /// Open a folder or file in VS Code (`code` on the PATH); without it, open the
 /// path with its default program.
-pub fn open_in_ide(path: &Path) {
+pub fn open_in_ide(path: &Path, command: &str) {
     let path = path.to_path_buf();
+    let command = command.trim().to_owned();
     std::thread::spawn(move || {
         let mut cmd = std::process::Command::new("cmd.exe");
-        cmd.args(["/c", "code"]).arg(&path);
+        cmd.arg("/c").args(command.split_whitespace()).arg(&path);
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
-        let ok = cmd.status().is_ok_and(|s| s.success());
+        let ok = !command.is_empty() && cmd.status().is_ok_and(|s| s.success());
         if !ok {
             let _ = open::that_detached(&path);
         }

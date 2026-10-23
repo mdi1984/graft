@@ -25,6 +25,7 @@ pub enum Icon {
     Cloud,
     ChevronRight,
     Merge,
+    Settings,
 }
 
 pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
@@ -104,6 +105,17 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             line(&[(5.0, 12.0), (19.0, 12.0)]);
         }
         Icon::Minus => line(&[(5.0, 12.0), (19.0, 12.0)]),
+        Icon::Settings => {
+            circle(12.0, 12.0, 2.5);
+            circle(12.0, 12.0, 6.5);
+            for k in 0..6 {
+                let (s, c) = (k as f32 * std::f32::consts::TAU / 6.0).sin_cos();
+                line(&[
+                    (12.0 + 6.5 * c, 12.0 + 6.5 * s),
+                    (12.0 + 9.5 * c, 12.0 + 9.5 * s),
+                ]);
+            }
+        }
         Icon::Close => {
             line(&[(6.0, 6.0), (18.0, 18.0)]);
             line(&[(18.0, 6.0), (6.0, 18.0)]);

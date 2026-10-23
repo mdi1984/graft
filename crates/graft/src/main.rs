@@ -4,6 +4,7 @@
 mod app;
 mod fonts;
 mod project;
+mod settings;
 mod theme;
 mod time;
 mod ui;

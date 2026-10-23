@@ -253,6 +253,15 @@ impl Project {
                     action: Action::Remote(RemoteOp::ForcePush),
                 });
             }
+            _ if error.contains("Please tell me who you are")
+                || error.contains("Author identity unknown") =>
+            {
+                self.notices.push(
+                    "Git doesn't know who you are yet. Set your name and email in Settings \
+                     (the gear at the top right)."
+                        .to_owned(),
+                );
+            }
             _ => self.notices.push(error),
         }
     }
