@@ -1,1 +1,21 @@
+# Rust build output (Cargo.lock stays committed: graft is an application)
 /target
+**/*.rs.bk
+*.pdb
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS clutter
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Logs and local scratch
+*.log
+
+# Claude Code: personal settings stay local (shared .claude/settings.json is committed)
+.claude/settings.local.json
