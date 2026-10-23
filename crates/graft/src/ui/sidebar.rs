@@ -9,7 +9,7 @@ use super::widgets::{
     self, Badge, ICON_SIZE, elided, elided_path, paint_badges_right, paint_galley_left, paint_icon,
     paint_row_bg, section_heading,
 };
-use crate::project::{Action, Project, Tab, WorkspaceView};
+use crate::project::{Action, Confirm, Project, Tab, WorkspaceView};
 use crate::theme::{self, color};
 
 const SECTION_GAP: f32 = 14.0;
@@ -49,23 +49,30 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
             }
             ui.add_space(SECTION_GAP);
 
-            if let Some(add) = heading(ui, "WORKTREES", Some(repo.worktrees.len())) {
-                add.on_hover_text("New worktree (coming in a later step)");
+            if let Some(add) = heading(ui, "WORKTREES", Some(repo.worktrees.len()))
+                && add.on_hover_text("New worktree").clicked()
+                && !project.is_operating()
+            {
+                actions.push(Action::NewWorktree(None));
             }
             for wt in &repo.worktrees {
                 let selected = same_path(&wt.path, &nav.worktree);
-                if worktree_row(ui, wt, selected).clicked() && !wt.prunable {
+                let response = worktree_row(ui, wt, selected);
+                if response.clicked() && !wt.prunable {
                     actions.push(Action::OpenWorktree(wt.path.clone()));
                 }
+                response.context_menu(|ui| worktree_menu(ui, wt, project.is_operating(), actions));
             }
             ui.add_space(SECTION_GAP);
 
             if collapsible(ui, "BRANCHES", repo.branches.len(), true) {
                 let head = current.and_then(|wt| wt.branch.as_deref());
                 for branch in &repo.branches {
-                    if branch_row(ui, repo, branch, head).clicked() {
+                    let response = branch_row(ui, repo, branch, head);
+                    if response.clicked() {
                         actions.push(Action::Reveal(branch.target));
                     }
+                    response.context_menu(|ui| branch_menu(ui, repo, &branch.name, actions));
                 }
                 if repo.branches.is_empty() {
                     faint_row(ui, "No branches yet");
@@ -236,6 +243,111 @@ fn worktree_row(ui: &mut Ui, wt: &Worktree, selected: bool) -> Response {
     paint_galley_left(painter, text_x, bottom_y, path, color::TEXT_WEAK);
 
     response.on_hover_text(wt.path.display().to_string())
+}
+
+fn worktree_menu(ui: &mut Ui, wt: &Worktree, busy: bool, actions: &mut Vec<Action>) {
+    if wt.prunable {
+        if ui
+            .add_enabled(!busy, egui::Button::new("Prune missing worktrees"))
+            .on_hover_text("The folder is gone; forget it (git worktree prune)")
+            .clicked()
+        {
+            actions.push(Action::PruneWorktrees);
+            ui.close();
+        }
+        return;
+    }
+    if ui.button("Show in Explorer").clicked() {
+        actions.push(Action::OpenFolder(wt.path.clone()));
+        ui.close();
+    }
+    if ui.button("Open terminal here").clicked() {
+        actions.push(Action::OpenTerminal(wt.path.clone()));
+        ui.close();
+    }
+    if ui.button("Copy path").clicked() {
+        ui.ctx().copy_text(wt.path.display().to_string());
+        ui.close();
+    }
+    if wt.is_main {
+        return;
+    }
+    ui.separator();
+    let lock_label = if wt.locked { "Unlock" } else { "Lock" };
+    if ui
+        .add_enabled(!busy, egui::Button::new(lock_label))
+        .on_hover_text("A locked worktree is never removed or pruned")
+        .clicked()
+    {
+        actions.push(Action::LockWorktree {
+            path: wt.path.clone(),
+            locked: !wt.locked,
+        });
+        ui.close();
+    }
+    let remove = ui.add_enabled(!busy && !wt.locked, egui::Button::new("Remove worktree…"));
+    let remove = if wt.locked {
+        remove.on_disabled_hover_text("Unlock it first")
+    } else {
+        remove
+    };
+    if remove.clicked() {
+        actions.push(Action::Ask(Box::new(remove_confirm(wt))));
+        ui.close();
+    }
+}
+
+fn remove_confirm(wt: &Worktree) -> Confirm {
+    let dirty = wt.dirty();
+    let branch = match &wt.branch {
+        Some(b) => format!("The branch {b} is kept."),
+        None => {
+            "Its detached HEAD is kept in the history only if a branch points at it.".to_owned()
+        }
+    };
+    let body = if dirty > 0 {
+        format!(
+            "The folder {} will be deleted, including {dirty} uncommitted change{}, which will be lost. {branch}",
+            wt.path.display(),
+            if dirty == 1 { "" } else { "s" }
+        )
+    } else {
+        format!("The folder {} will be deleted. {branch}", wt.path.display())
+    };
+    Confirm {
+        title: format!("Remove worktree {}?", wt.label()),
+        body,
+        confirm_label: if dirty > 0 {
+            "Remove and lose changes".to_owned()
+        } else {
+            "Remove worktree".to_owned()
+        },
+        action: Action::RemoveWorktree {
+            path: wt.path.clone(),
+            force: dirty > 0,
+        },
+    }
+}
+
+fn branch_menu(ui: &mut Ui, repo: &RepoSnapshot, name: &str, actions: &mut Vec<Action>) {
+    match repo.worktree_for_branch(name) {
+        Some(wt) => {
+            if ui.button("Open its worktree").clicked() {
+                actions.push(Action::OpenWorktree(wt.path.clone()));
+                ui.close();
+            }
+        }
+        None => {
+            if ui.button("New worktree for this branch…").clicked() {
+                actions.push(Action::NewWorktree(Some(name.to_owned())));
+                ui.close();
+            }
+        }
+    }
+    if ui.button("Copy name").clicked() {
+        ui.ctx().copy_text(name.to_owned());
+        ui.close();
+    }
 }
 
 fn branch_row(ui: &mut Ui, repo: &RepoSnapshot, branch: &Branch, head: Option<&str>) -> Response {

@@ -17,6 +17,8 @@ pub mod remote;
 pub mod repo;
 pub mod snapshot;
 pub mod status;
+pub mod watch;
+pub mod worktree;
 
 pub use cli::{CancelToken, Git};
 pub use console::Console;

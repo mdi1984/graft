@@ -5,6 +5,7 @@ pub mod file_status;
 pub mod history;
 pub mod icons;
 pub mod main_area;
+pub mod new_worktree;
 pub mod project_tabs;
 pub mod sidebar;
 pub mod start;

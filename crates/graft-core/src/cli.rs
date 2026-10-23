@@ -228,7 +228,7 @@ impl Git {
 }
 
 /// Spawn a child process in the background without flashing a console window.
-fn command(cwd: &Path) -> Command {
+pub(crate) fn command(cwd: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.current_dir(cwd)
         // Never block on a terminal prompt; Git Credential Manager still shows its own window.
@@ -236,6 +236,9 @@ fn command(cwd: &Path) -> Command {
         // Stable, parseable English output.
         .env("LC_ALL", "C")
         .env("LANG", "C")
+        // Reads like `status` must not rewrite the index: that would wake the
+        // file watcher and refresh forever.
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE");

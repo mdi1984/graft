@@ -115,7 +115,12 @@ impl RemoteOp {
 /// What happens when an operation finishes successfully.
 pub(super) enum Then {
     Nothing,
-    Committed { summary: String, push: bool },
+    /// Select this worktree as soon as a snapshot contains it.
+    OpenWorktree(std::path::PathBuf),
+    Committed {
+        summary: String,
+        push: bool,
+    },
     Info(String),
 }
 
@@ -434,7 +439,7 @@ impl Project {
             };
             Event::OpDone {
                 then,
-                result: result.map_err(|e| format!("{e:#}")),
+                result: result.map(|()| None).map_err(|e| format!("{e:#}")),
             }
         });
     }
@@ -446,6 +451,19 @@ impl Project {
         then: Then,
         job: impl FnOnce(Git) -> anyhow::Result<()> + Send + 'static,
     ) {
+        let git = self.wt_git();
+        self.run_op_at(git, label, then, move |git| job(git).map(|()| None));
+    }
+
+    /// Run a quick git operation with `git`, then refresh. The job may return
+    /// an extra message for the user.
+    pub(super) fn run_op_at(
+        &mut self,
+        git: Git,
+        label: &str,
+        then: Then,
+        job: impl FnOnce(Git) -> anyhow::Result<Option<String>> + Send + 'static,
+    ) {
         if self.is_operating() {
             return;
         }
@@ -454,22 +472,36 @@ impl Project {
             progress: Arc::default(),
             cancel: None,
         });
-        let git = self.wt_git();
         self.pool.spawn(&self.tx, move || Event::OpDone {
             then,
             result: job(git).map_err(|e| format!("{e:#}")),
         });
     }
 
-    pub(super) fn on_op_done(&mut self, then: Then, result: Result<(), String>) {
+    pub(super) fn on_op_done(&mut self, then: Then, result: Result<Option<String>, String>) {
         self.op = None;
         self.refresh();
         match result {
             Err(e) if e == "Cancelled" => {}
-            Err(e) => self.notices.push(e),
-            Ok(()) => match then {
-                Then::Nothing => {}
-                Then::Info(text) => self.infos.push(text),
+            Err(e) => match &mut self.new_worktree {
+                // Show it in the dialog, where the user can fix it.
+                Some(form) if form.creating => {
+                    form.creating = false;
+                    form.error = Some(e);
+                }
+                _ => self.notices.push(e),
+            },
+            Ok(extra) => match then {
+                Then::Nothing => self.infos.extend(extra),
+                Then::Info(text) => self.infos.push(match extra {
+                    Some(extra) => format!("{text}. {extra}"),
+                    None => text,
+                }),
+                Then::OpenWorktree(path) => {
+                    self.new_worktree = None;
+                    self.infos.extend(extra);
+                    self.pending_open = Some(path);
+                }
                 Then::Committed { summary, push } => {
                     self.commit_form = CommitForm {
                         push_after: self.commit_form.push_after,
