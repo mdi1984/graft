@@ -1,0 +1,8 @@
+* text=auto
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.svg text eol=lf
+*.ttf binary
+*.ico binary
+*.png binary

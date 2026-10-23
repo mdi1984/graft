@@ -30,6 +30,12 @@ pub mod color {
     pub const TEXT_FAINT: Color32 = hex(0x7d8590);
 
     pub const ACCENT: Color32 = hex(0x8fd19e);
+    pub const ACCENT_HOVER: Color32 = hex(0xa3dcb0);
+    /// Text on an accent-filled button.
+    pub const ON_ACCENT: Color32 = hex(0x0b1a0f);
+
+    /// Strip of project tabs above the toolbar.
+    pub const TABSTRIP_BG: Color32 = hex(0x0e1013);
 
     // Badges: dirty count (orange), ahead count (blue), neutral count.
     pub const DIRTY_BG: Color32 = hex(0x3a2a1a);
@@ -48,6 +54,20 @@ pub mod color {
     pub const BRANCH_DOT_AGENT: Color32 = hex(0xf2a65a);
 
     pub const REMOVED: Color32 = hex(0xff9a8f);
+    pub const ADDED: Color32 = hex(0x7ee08f);
+    pub const TAG: Color32 = hex(0xf5d76e);
+
+    /// Commit graph lanes, assigned round-robin.
+    pub const LANES: [Color32; 8] = [
+        hex(0x8fd19e),
+        hex(0x8cc2ff),
+        hex(0xf2b77a),
+        hex(0xd6a3ff),
+        hex(0xff9a8f),
+        hex(0x7fd8d0),
+        hex(0xf5d76e),
+        hex(0xf39ac7),
+    ];
 }
 
 pub const RADIUS: u8 = 6;
@@ -113,7 +133,7 @@ fn style() -> egui::Style {
     v.hyperlink_color = AHEAD_FG;
     v.warn_fg_color = DIRTY_FG;
     v.error_fg_color = REMOVED;
-    v.weak_text_color = Some(TEXT_WEAK);
+    v.weak_text_color = Some(TEXT_FAINT);
     v.selection.bg_fill = Color32::from_rgb(0x26, 0x4f, 0x78);
     v.selection.stroke = Stroke::new(1.0, TEXT);
 

@@ -2,23 +2,22 @@
 //! New worktree | Preview in main, Slash | search.
 
 use egui::{Align, Frame, Id, Key, Layout, Margin, Modifiers, Sense, Stroke, TextEdit, Ui, vec2};
-use graft_core::RepoSnapshot;
 
 use super::icons::{self, Icon};
 use super::widgets::{Tone, tool_button, toolbar_divider};
-use crate::app::{Nav, Tab};
+use crate::project::{Action, Project, Tab};
 use crate::theme::{RADIUS, color};
 
-const LATER: &str = "Not wired up yet";
+const LATER: &str = "Coming in a later step";
 
-pub fn show(ui: &mut Ui, repo: &RepoSnapshot, nav: &mut Nav, search: &mut String) {
-    let ahead = repo.worktrees.get(nav.worktree).map_or(0, |wt| wt.ahead);
+pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>, search: &mut String) {
+    let ahead = project.worktree().map_or(0, |wt| wt.ahead());
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
 
         if tool_button(ui, Some(Icon::Commit), "Commit", None, Tone::Normal).clicked() {
-            nav.open_file_status();
+            actions.push(Action::ShowFileStatus);
         }
         tool_button(ui, Some(Icon::Pull), "Pull", None, Tone::Normal).on_hover_text(LATER);
         let push_badge = (ahead > 0).then(|| ahead.to_string());
@@ -29,7 +28,7 @@ pub fn show(ui: &mut Ui, repo: &RepoSnapshot, nav: &mut Nav, search: &mut String
         tool_button(ui, None, "Branch", None, Tone::Normal).on_hover_text(LATER);
         tool_button(ui, None, "Merge", None, Tone::Normal).on_hover_text(LATER);
         if tool_button(ui, None, "Stash", None, Tone::Normal).clicked() {
-            nav.tab = Tab::Stashes;
+            actions.push(Action::SetTab(Tab::Stashes));
         }
         tool_button(ui, None, "New worktree", None, Tone::Normal).on_hover_text(LATER);
         toolbar_divider(ui);

@@ -3,7 +3,9 @@
 
 mod app;
 mod fonts;
+mod project;
 mod theme;
+mod time;
 mod ui;
 
 use tracing_subscriber::EnvFilter;
@@ -26,7 +28,14 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Graft",
         options,
-        Box::new(|cc| Ok(Box::new(app::GraftApp::new(cc)))),
+        Box::new(|cc| {
+            // `graft <folder>…` opens those folders as projects.
+            let folders = std::env::args_os()
+                .skip(1)
+                .map(std::path::PathBuf::from)
+                .collect();
+            Ok(Box::new(app::GraftApp::new(cc, folders)))
+        }),
     )
 }
 
