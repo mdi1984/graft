@@ -10,6 +10,7 @@ pub mod conflicts;
 pub mod console;
 pub mod details;
 pub mod diff;
+pub mod file_log;
 pub mod history;
 pub mod identity;
 pub mod jobs;

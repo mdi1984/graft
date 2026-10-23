@@ -4,6 +4,7 @@
 
 mod changes;
 mod conflicts;
+mod file_history;
 mod preview;
 mod refs;
 mod review;
@@ -32,6 +33,7 @@ use graft_core::{
 
 pub use changes::{CommitForm, Confirm, DiffView, FileKey, Highlights, Operation, RemoteOp};
 pub use conflicts::{ConflictView, merge_dialog};
+pub use file_history::{FileHistoryMode, FileHistoryView};
 pub use refs::{Dialog, DialogKind};
 pub use review::{ReviewState, ReviewView};
 pub use slash::{SlashView, SlashedBranch};
@@ -52,6 +54,8 @@ pub enum Tab {
 pub enum WorkspaceView {
     FileStatus,
     History,
+    /// The commits that changed one file (see `Project::file_history`).
+    FileHistory,
 }
 
 /// Where the user is inside a project.
@@ -230,6 +234,13 @@ pub enum Action {
     UpdatePreview,
     RestoreMain,
 
+    // File history
+    /// Show the history of this file (path in the selected worktree).
+    OpenFileHistory(String),
+    CloseFileHistory,
+    SelectFileCommit(usize),
+    SetFileHistoryMode(FileHistoryMode),
+
     // Settings
     LoadIdentity,
     SaveIdentity(graft_core::identity::Identity),
@@ -287,6 +298,14 @@ enum Event {
     SlashDone(graft_core::slash::Outcome),
     Identity(Result<graft_core::identity::Identity, String>),
     AutoFetched(Result<(), String>),
+    FileLog(
+        String,
+        Result<Vec<graft_core::file_log::FileCommit>, String>,
+    ),
+    Blame {
+        generation: u64,
+        result: Result<graft_core::file_log::Blame, String>,
+    },
     /// The file watcher saw a change that matters.
     Changed,
     PickedFolder(Option<PathBuf>),
@@ -345,6 +364,8 @@ pub struct Project {
     pub slash: Option<SlashView>,
     /// Deleted branches, newest first. Saved by the app.
     pub slashed: Vec<SlashedBranch>,
+    /// File history, while WorkspaceView::FileHistory shows it.
+    pub file_history: Option<FileHistoryView>,
     /// The app's settings; the app keeps this copy current.
     pub settings: crate::settings::Settings,
     /// The commit identity, loaded for the Settings dialog.
@@ -421,6 +442,7 @@ impl Project {
             pending_conflicts: None,
             slash: None,
             slashed: Vec::new(),
+            file_history: None,
             settings: crate::settings::Settings::default(),
             identity: None,
             last_fetch: std::time::Instant::now(),
@@ -484,6 +506,8 @@ impl Project {
                 Event::SlashDone(outcome) => self.on_slash_done(outcome),
                 Event::Identity(result) => self.on_identity(result),
                 Event::AutoFetched(result) => self.on_auto_fetched(result),
+                Event::FileLog(path, result) => self.on_file_log(path, result),
+                Event::Blame { generation, result } => self.on_blame(generation, result),
                 Event::StashFiles(id, result) => {
                     if self.selected_stash == Some(id) {
                         self.stash_files = Some(result);
@@ -802,6 +826,10 @@ impl Project {
                 self.apply_preview_action(action)
             }
             Action::LoadIdentity | Action::SaveIdentity(_) => self.apply_settings_action(action),
+            Action::OpenFileHistory(_)
+            | Action::CloseFileHistory
+            | Action::SelectFileCommit(_)
+            | Action::SetFileHistoryMode(_) => self.apply_file_history_action(action),
             other => self.apply_change(other),
         }
     }

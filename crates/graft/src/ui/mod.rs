@@ -3,6 +3,7 @@ pub mod conflicts;
 pub mod console;
 pub mod dialog;
 pub mod diff_view;
+pub mod file_history;
 pub mod file_status;
 pub mod history;
 pub mod icons;

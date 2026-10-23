@@ -272,6 +272,10 @@ fn file_row(
             _ => {}
         }
         ui.separator();
+        if ui.button("File history").clicked() {
+            actions.push(Action::OpenFileHistory(entry.path.clone()));
+            ui.close();
+        }
         if ui.button("Copy path").clicked() {
             ui.ctx().copy_text(entry.path.clone());
             ui.close();

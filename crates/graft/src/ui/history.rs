@@ -679,7 +679,18 @@ fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &m
             source: Source::Commit(d.id),
             path: file.path.clone(),
         };
-        if file_row(ui, file, open == Some(&key), None).clicked() {
+        let response = file_row(ui, file, open == Some(&key), None);
+        response.context_menu(|ui| {
+            if ui.button("File history").clicked() {
+                actions.push(Action::OpenFileHistory(file.path.clone()));
+                ui.close();
+            }
+            if ui.button("Copy path").clicked() {
+                ui.ctx().copy_text(file.path.clone());
+                ui.close();
+            }
+        });
+        if response.clicked() {
             actions.push(Action::SelectCommitFile(key));
         }
     }

@@ -5,7 +5,7 @@ use egui::{Align2, Frame, Margin, Panel, Rect, Sense, Ui, vec2};
 use graft_core::Worktree;
 
 use super::widgets::{ButtonKind, button, elided_path, paint_galley_left, spinner};
-use super::{conflicts, file_status, history, review, stashes};
+use super::{conflicts, file_history, file_status, history, review, stashes};
 use crate::project::{Action, Project, Tab, WorkspaceView};
 use crate::theme::{self, color};
 
@@ -25,6 +25,10 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
                     conflicts::banner(ui, project, wt, actions);
                 }
                 file_status::show(ui, project, actions);
+            }
+            WorkspaceView::FileHistory => {
+                header(ui, "File history", worktree);
+                file_history::show(ui, project, actions);
             }
             WorkspaceView::History => {
                 header(ui, "History", worktree);
