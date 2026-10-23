@@ -3,7 +3,7 @@
 
 use graft_core::Oid;
 use graft_core::refs::{self, NOT_MERGED, ResetMode};
-use graft_core::remote::is_rejected_push;
+use graft_core::remote::{self, is_rejected_push};
 use graft_core::stash;
 
 use super::changes::Then;
@@ -46,6 +46,14 @@ pub enum DialogKind {
         id: Oid,
         label: String,
         name: String,
+    },
+    /// Add a remote (`original` is `None`) or edit one.
+    Remote {
+        original: Option<String>,
+        name: String,
+        url: String,
+        /// Fetch from it after adding.
+        fetch: bool,
     },
     /// Merge a branch into the selected worktree's branch.
     Merge {
@@ -125,6 +133,28 @@ impl Project {
                 Some("Pick what to merge.".to_owned())
             }
             DialogKind::Merge { .. } => None,
+            DialogKind::Remote {
+                original,
+                name,
+                url,
+                ..
+            } => {
+                let name = name.trim();
+                let taken = original.as_deref() != Some(name)
+                    && self
+                        .snapshot
+                        .as_ref()
+                        .is_some_and(|s| s.remotes.iter().any(|r| r.name == name));
+                if name.is_empty() || name.contains(char::is_whitespace) {
+                    Some("Give the remote a name without spaces, e.g. origin.".to_owned())
+                } else if taken {
+                    Some(format!("A remote named {name} already exists."))
+                } else if url.trim().is_empty() {
+                    Some("Enter the repository's URL.".to_owned())
+                } else {
+                    None
+                }
+            }
         };
         if let Some(problem) = problem {
             dialog.error = Some(problem);
@@ -200,6 +230,28 @@ impl Project {
                     dialog.submitting = self.op.is_some();
                 }
             }
+            DialogKind::Remote {
+                original,
+                name,
+                url,
+                fetch,
+            } => {
+                let name = name.trim().to_owned();
+                let url = url.trim().to_owned();
+                let done = match &original {
+                    None => format!("Added remote {name}"),
+                    Some(_) => format!("Saved remote {name}"),
+                };
+                let fetch = fetch && original.is_none();
+                let label = if fetch {
+                    "Adding remote and fetching"
+                } else {
+                    "Saving remote"
+                };
+                self.run_op(label, Then::Dialog(done), move |git| {
+                    remote::save_remote(&git, original.as_deref(), &name, &url, fetch)
+                });
+            }
             DialogKind::Reset {
                 target,
                 target_label,
@@ -252,6 +304,15 @@ impl Project {
                     confirm_label: "Force push".to_owned(),
                     action: Action::Remote(RemoteOp::ForcePush),
                 });
+            }
+            _ if error.contains("No configured push destination")
+                || error.contains("No remote repository specified") =>
+            {
+                self.notices.push(
+                    "This repository has no remote yet. Add one under REMOTES in the sidebar \
+                     (Add remote…)."
+                        .to_owned(),
+                );
             }
             _ if error.contains("Please tell me who you are")
                 || error.contains("Author identity unknown") =>
@@ -308,6 +369,15 @@ impl Project {
                         refs::delete_branch(&git, &target, force)?;
                         Ok(Some(format!("Deleted branch {target}")))
                     },
+                );
+            }
+            Action::RemoveRemote(name) => {
+                let done = format!("Removed remote {name}");
+                self.run_op_at(
+                    self.git.clone(),
+                    "Removing remote",
+                    Then::Info(done),
+                    move |git| remote::remove_remote(&git, &name).map(|()| None),
                 );
             }
             Action::DeleteTag(name) => {

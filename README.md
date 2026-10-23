@@ -29,7 +29,8 @@ to the Start menu. Run it again to update. To try it without installing, run
   it is ahead. Create one for a new or existing branch; ignored files like `.env`
   are copied over. Changes show up live.
 - **Branches, remotes, tags.** Check out, create, rename, delete, push, track
-  remote branches.
+  remote branches. Add, edit and remove remotes (for example to publish a repo
+  you created locally).
 - **Pull, push, fetch.** With progress and Cancel. Force push asks first and uses
   `--force-with-lease`. Optional fetch in the background.
 - **Merge and rebase, with a conflict resolver.** Ours, base and theirs for each
