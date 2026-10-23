@@ -1,0 +1,12 @@
+[package]
+name = "graft"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+graft-core.workspace = true
+eframe.workspace = true
+egui.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
