@@ -2,6 +2,8 @@
 //! the background jobs that load them. The UI reads this state and sends
 //! [`Action`]s; nothing here blocks on git.
 
+mod changes;
+
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -9,11 +11,15 @@ use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, Sender};
 use graft_core::details::{self, CommitDetails};
+use graft_core::diff::FileDiff;
 use graft_core::history::{self, Commits, History};
 use graft_core::jobs::JobPool;
+use graft_core::ops::LineOp;
 use graft_core::{
     CancelToken, Console, Git, Oid, RepoSnapshot, Worktree, null_oid, same_path, snapshot,
 };
+
+pub use changes::{CommitForm, Confirm, DiffView, FileKey, Highlights, Operation, RemoteOp};
 
 /// Commits loaded into the graph. Enough for years of history in big repos.
 const HISTORY_LIMIT: usize = 100_000;
@@ -56,6 +62,41 @@ pub enum Action {
     Refresh,
     /// Close this project's tab. Handled by the app.
     Close,
+
+    // File status
+    SelectFile(FileKey),
+    /// Toggle a changed line; with shift, select the range from the anchor.
+    ClickLine {
+        hunk: usize,
+        line: usize,
+        shift: bool,
+    },
+    /// The pointer was dragged onto a line while selecting.
+    DragLine {
+        hunk: usize,
+        line: usize,
+    },
+    ClearLines,
+    HunkOp(usize, LineOp),
+    LinesOp(LineOp),
+    StageFiles(Vec<String>),
+    UnstageFiles(Vec<String>),
+    Discard {
+        tracked: Vec<String>,
+        untracked: Vec<String>,
+    },
+    Commit,
+    ToggleAmend,
+    Remote(RemoteOp),
+    CancelOperation,
+    /// Ask before doing something destructive.
+    Ask(Box<Confirm>),
+    ConfirmYes,
+    ConfirmNo,
+    /// Open a file of the selected worktree with its default program.
+    OpenPath(String),
+    /// Show a file of the selected worktree in Explorer.
+    RevealPath(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -83,6 +124,15 @@ enum Event {
         result: Result<(Arc<Commits>, History), String>,
     },
     Details(Oid, Result<CommitDetails, String>),
+    Diff {
+        generation: u64,
+        result: Result<(FileDiff, Highlights), String>,
+    },
+    LastMessage(Option<String>),
+    OpDone {
+        then: changes::Then,
+        result: Result<(), String>,
+    },
 }
 
 pub struct Project {
@@ -117,8 +167,18 @@ pub struct Project {
     /// Set when the history list should scroll the selection into view.
     pub scroll_to_selected: Cell<bool>,
 
+    pub diff_view: Option<DiffView>,
+    diff_generation: u64,
+    pub commit_form: CommitForm,
+    /// A git command that changes things, while it runs.
+    pub op: Option<Operation>,
+    /// A destructive action waiting for the user's OK.
+    pub confirm: Option<Confirm>,
+
     /// Errors for the app to show as toasts.
     pub notices: Vec<String>,
+    /// Confirmations for the app to show as toasts.
+    pub infos: Vec<String>,
 }
 
 impl Project {
@@ -158,7 +218,13 @@ impl Project {
             details: None,
             details_error: None,
             scroll_to_selected: Cell::new(false),
+            diff_view: None,
+            diff_generation: 0,
+            commit_form: CommitForm::default(),
+            op: None,
+            confirm: None,
             notices: Vec::new(),
+            infos: Vec::new(),
         };
         project.refresh();
         project
@@ -195,6 +261,9 @@ impl Project {
             match event {
                 Event::Snapshot(result) => self.on_snapshot(result),
                 Event::History { generation, result } => self.on_history(generation, result),
+                Event::Diff { generation, result } => self.on_diff(generation, result),
+                Event::LastMessage(message) => self.on_last_message(message),
+                Event::OpDone { then, result } => self.on_op_done(then, result),
                 Event::Details(id, result) => {
                     if self.selected == Some(id) {
                         match result {
@@ -238,6 +307,7 @@ impl Project {
                 } else if self.worktree_parent() != self.history_parent {
                     self.load_history(false);
                 }
+                self.sync_file_selection();
             }
             Err(e) => {
                 if self.snapshot.is_none() {
@@ -364,6 +434,9 @@ impl Project {
                 } else {
                     self.select_head();
                 }
+                self.diff_view = None;
+                self.commit_form = CommitForm::default();
+                self.sync_file_selection();
             }
             Action::ShowFileStatus => {
                 self.nav.tab = Tab::Workspace;
@@ -383,6 +456,7 @@ impl Project {
             }
             Action::Refresh => self.refresh(),
             Action::Close => {}
+            other => self.apply_change(other),
         }
     }
 }

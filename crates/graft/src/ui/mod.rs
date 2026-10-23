@@ -1,4 +1,7 @@
+pub mod confirm;
 pub mod console;
+pub mod diff_view;
+pub mod file_status;
 pub mod history;
 pub mod icons;
 pub mod main_area;

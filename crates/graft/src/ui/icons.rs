@@ -15,6 +15,7 @@ pub enum Icon {
     FileStatus,
     History,
     Plus,
+    Minus,
     Close,
     Download,
     FolderPlus,
@@ -101,6 +102,7 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             line(&[(12.0, 5.0), (12.0, 19.0)]);
             line(&[(5.0, 12.0), (19.0, 12.0)]);
         }
+        Icon::Minus => line(&[(5.0, 12.0), (19.0, 12.0)]),
         Icon::Close => {
             line(&[(6.0, 6.0), (18.0, 18.0)]);
             line(&[(18.0, 6.0), (6.0, 18.0)]);
