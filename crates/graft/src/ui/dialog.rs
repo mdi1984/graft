@@ -63,6 +63,51 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Vec<Action>)
                 text_field(ui, message, "Release notes, …", WIDTH);
                 "Create tag"
             }
+            DialogKind::Stash {
+                message,
+                include_untracked,
+                keep_index,
+                staged_only,
+            } => {
+                title(ui, "Stash changes");
+                note(
+                    ui,
+                    "Puts the changes of this worktree aside and leaves it clean. \
+                     Bring them back from the Stashes tab, here or in another worktree.",
+                );
+                field_label(ui, "Message (optional)");
+                let r = text_field(ui, message, "What you were doing", WIDTH);
+                if focus {
+                    r.request_focus();
+                }
+                ui.add_space(4.0);
+                ui.checkbox(include_untracked, "Include untracked files");
+                ui.add_enabled_ui(!*staged_only, |ui| {
+                    ui.checkbox(keep_index, "Keep staged changes in place too");
+                });
+                ui.checkbox(staged_only, "Only stash what is staged");
+                if *staged_only {
+                    *keep_index = false;
+                }
+                "Stash"
+            }
+            DialogKind::StashBranch { label, name, .. } => {
+                title(ui, "New branch from stash");
+                note(
+                    ui,
+                    &format!(
+                        "Creates the branch at the commit {label} was made on, switches to it, \
+                         applies the stash there and drops it. Handy when the stash no longer \
+                         applies cleanly."
+                    ),
+                );
+                field_label(ui, "Branch name");
+                let r = text_field(ui, name, "e.g. wip/idea", WIDTH);
+                if focus {
+                    r.request_focus();
+                }
+                "Create branch"
+            }
             DialogKind::Reset {
                 target_label,
                 branch,

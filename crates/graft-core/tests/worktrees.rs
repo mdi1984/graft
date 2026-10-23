@@ -141,3 +141,61 @@ fn branches_tags_and_commit_ops() {
     refs::reset(&git, "HEAD", ResetMode::Hard).unwrap();
     refs::switch_detached(&git, "v1").unwrap();
 }
+
+#[test]
+fn stash_push_list_apply_branch_drop() {
+    use graft_core::stash::{self, Options};
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("r");
+    std::fs::create_dir(&dir).unwrap();
+    sh(&dir, &["init", "-q", "-b", "main"]);
+    sh(&dir, &["config", "user.name", "Ada"]);
+    sh(&dir, &["config", "user.email", "ada@example.com"]);
+    std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+    sh(&dir, &["add", "."]);
+    sh(&dir, &["commit", "-q", "-m", "init"]);
+    let git = Git::new(&dir, Console::default());
+
+    assert!(
+        stash::push(&git, &Options::default()).is_err(),
+        "nothing to stash"
+    );
+    std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
+    std::fs::write(dir.join("new.txt"), "new\n").unwrap();
+    let options = Options {
+        message: "half done".into(),
+        include_untracked: true,
+        ..Options::default()
+    };
+    stash::push(&git, &options).unwrap();
+    assert!(!dir.join("new.txt").exists());
+
+    let list = stash::list(&git).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].message, "half done");
+    assert_eq!(list[0].branch.as_deref(), Some("main"));
+    let mut files: Vec<String> = stash::files(&git, list[0].id)
+        .unwrap()
+        .into_iter()
+        .map(|f| f.change.path)
+        .collect();
+    files.sort();
+    assert_eq!(files, ["a.txt", "new.txt"]);
+
+    stash::apply(&git, list[0].id, false).unwrap();
+    assert!(dir.join("new.txt").exists());
+    assert_eq!(stash::list(&git).unwrap().len(), 1, "apply keeps the stash");
+    sh(&dir, &["reset", "-q", "--hard"]);
+    sh(&dir, &["clean", "-qfd"]);
+
+    stash::branch(&git, "from-stash", list[0].id).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.join("a.txt")).unwrap().trim(),
+        "changed"
+    );
+    assert!(
+        stash::list(&git).unwrap().is_empty(),
+        "branch drops the stash"
+    );
+    assert!(stash::drop(&git, list[0].id).is_err());
+}

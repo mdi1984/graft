@@ -172,6 +172,56 @@ impl Project {
         self.load_diff();
     }
 
+    /// Show one file of a commit or stash (read-only).
+    pub fn select_commit_file(&mut self, key: FileKey) {
+        if self.commit_diff.as_ref().is_some_and(|v| v.key == key) {
+            return;
+        }
+        self.diff_generation += 1;
+        let generation = self.diff_generation;
+        self.commit_diff = Some(DiffView {
+            key: key.clone(),
+            diff: None,
+            words: Vec::new(),
+            error: None,
+            loading: true,
+            selection: BTreeSet::new(),
+            anchor: None,
+            generation,
+        });
+        let git = self.git.clone();
+        self.pool.spawn(&self.tx, move || {
+            let result = diff::load(&git, &key.source, &key.path)
+                .map(|d| {
+                    let words = diff::word_highlights(&d);
+                    (d, words)
+                })
+                .map_err(|e| format!("{e:#}"));
+            Event::CommitDiff { generation, result }
+        });
+    }
+
+    pub(super) fn on_commit_diff(
+        &mut self,
+        generation: u64,
+        result: Result<(FileDiff, Highlights), String>,
+    ) {
+        let Some(view) = &mut self.commit_diff else {
+            return;
+        };
+        if view.generation != generation {
+            return;
+        }
+        view.loading = false;
+        match result {
+            Ok((diff, words)) => {
+                view.diff = Some(diff);
+                view.words = words;
+            }
+            Err(e) => view.error = Some(e),
+        }
+    }
+
     /// (Re)load the selected file's diff; the selection survives if the diff
     /// did not change.
     pub(super) fn load_diff(&mut self) {

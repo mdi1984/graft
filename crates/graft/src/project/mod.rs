@@ -4,6 +4,7 @@
 
 mod changes;
 mod refs;
+mod stashes;
 mod worktrees;
 
 use std::cell::Cell;
@@ -17,6 +18,7 @@ use graft_core::diff::FileDiff;
 use graft_core::history::{self, Commits, History};
 use graft_core::jobs::JobPool;
 use graft_core::ops::LineOp;
+use graft_core::stash::{Stash, StashFile};
 use graft_core::watch::Watcher;
 use graft_core::{
     CancelToken, Console, Git, Oid, RepoSnapshot, Worktree, null_oid, same_path, snapshot,
@@ -121,6 +123,21 @@ pub enum Action {
     OpenTerminal(PathBuf),
     OpenFolder(PathBuf),
 
+    // Diffs of commits and stashes
+    /// Show one file of a commit or stash.
+    SelectCommitFile(FileKey),
+    CloseCommitFile,
+
+    // Stashes
+    SelectStash(Oid),
+    /// Apply (or pop) a stash to a worktree.
+    ApplyStash {
+        id: Oid,
+        worktree: PathBuf,
+        pop: bool,
+    },
+    DropStash(Oid),
+
     // Branches, tags, commits
     OpenDialog(DialogKind),
     CloseDialog,
@@ -178,6 +195,12 @@ enum Event {
         then: changes::Then,
         result: Result<Option<String>, String>,
     },
+    CommitDiff {
+        generation: u64,
+        result: Result<(FileDiff, Highlights), String>,
+    },
+    Stashes(Result<Vec<Stash>, String>),
+    StashFiles(Oid, Result<Vec<StashFile>, String>),
     /// The file watcher saw a change that matters.
     Changed,
     PickedFolder(Option<PathBuf>),
@@ -218,6 +241,12 @@ pub struct Project {
     pub scroll_to_selected: Cell<bool>,
 
     pub diff_view: Option<DiffView>,
+    /// A file of the selected commit or stash, read-only.
+    pub commit_diff: Option<DiffView>,
+    /// `None` until the Stashes tab was opened.
+    pub stashes: Option<Result<Vec<Stash>, String>>,
+    pub selected_stash: Option<Oid>,
+    pub stash_files: Option<Result<Vec<StashFile>, String>>,
     diff_generation: u64,
     pub commit_form: CommitForm,
     /// A git command that changes things, while it runs.
@@ -278,6 +307,10 @@ impl Project {
             details_error: None,
             scroll_to_selected: Cell::new(false),
             diff_view: None,
+            commit_diff: None,
+            stashes: None,
+            selected_stash: None,
+            stash_files: None,
             diff_generation: 0,
             commit_form: CommitForm::default(),
             op: None,
@@ -328,6 +361,13 @@ impl Project {
                 Event::Diff { generation, result } => self.on_diff(generation, result),
                 Event::LastMessage(message) => self.on_last_message(message),
                 Event::OpDone { then, result } => self.on_op_done(then, result),
+                Event::CommitDiff { generation, result } => self.on_commit_diff(generation, result),
+                Event::Stashes(result) => self.on_stashes(result),
+                Event::StashFiles(id, result) => {
+                    if self.selected_stash == Some(id) {
+                        self.stash_files = Some(result);
+                    }
+                }
                 Event::Changed => {
                     if !self.is_operating() {
                         self.refresh();
@@ -393,6 +433,9 @@ impl Project {
                 }
                 self.sync_file_selection();
                 self.sync_watcher();
+                if self.stashes.is_some() || self.nav.tab == Tab::Stashes {
+                    self.load_stashes();
+                }
                 if let Some(path) = self.pending_open.take() {
                     if self
                         .snapshot
@@ -501,6 +544,7 @@ impl Project {
         }
         self.selected = Some(id);
         self.details = None;
+        self.commit_diff = None;
         self.details_error = None;
         if id.is_null() {
             return;
@@ -563,7 +607,18 @@ impl Project {
                 self.nav.tab = Tab::Workspace;
                 self.nav.view = WorkspaceView::History;
             }
-            Action::SetTab(tab) => self.nav.tab = tab,
+            Action::SetTab(tab) => {
+                self.nav.tab = tab;
+                self.commit_diff = None;
+                if tab == Tab::Stashes {
+                    self.load_stashes();
+                }
+            }
+            Action::SelectCommitFile(key) => self.select_commit_file(key),
+            Action::CloseCommitFile => self.commit_diff = None,
+            Action::SelectStash(id) => self.select_stash(id),
+            Action::ApplyStash { id, worktree, pop } => self.apply_stash(id, worktree, pop),
+            Action::DropStash(id) => self.drop_stash(id),
             Action::Select(id) => self.select(id),
             Action::Reveal(id) => {
                 self.nav.tab = Tab::Workspace;
