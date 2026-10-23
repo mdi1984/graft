@@ -5,7 +5,7 @@ use egui::{Align, Frame, Id, Key, Layout, Margin, Modifiers, Sense, Stroke, Text
 
 use super::icons::{self, Icon};
 use super::widgets::{Tone, tool_button, toolbar_divider};
-use crate::project::{Action, DialogKind, Project, RemoteOp, Tab};
+use crate::project::{Action, DialogKind, Project, RemoteOp, Tab, merge_dialog};
 use crate::theme::{RADIUS, color};
 
 const LATER: &str = "Coming in a later step";
@@ -64,7 +64,22 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>, search: &
                 checkout: true,
             }));
         }
-        tool_button(ui, None, "Merge", None, Tone::Normal).on_hover_text(LATER);
+        let wt = project.worktree();
+        let merge_hint = match wt {
+            Some(wt) if wt.in_progress.is_some() => "Finish or abort what is in progress first",
+            Some(wt) if wt.branch.is_none() => "Check out a branch to merge into",
+            _ => "Merge another branch into the current one",
+        };
+        let can_merge = wt.is_some_and(|wt| wt.branch.is_some() && wt.in_progress.is_none());
+        if tool_button(ui, Some(Icon::Merge), "Merge", None, Tone::Normal)
+            .on_hover_text(merge_hint)
+            .clicked()
+            && !busy
+            && can_merge
+            && let Some(kind) = merge_dialog(project, None)
+        {
+            actions.push(Action::OpenDialog(kind));
+        }
         let dirty = project.worktree().is_some_and(|wt| wt.dirty() > 0);
         if tool_button(ui, None, "Stash", None, Tone::Normal)
             .on_hover_text(if dirty {

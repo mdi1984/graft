@@ -17,6 +17,8 @@ pub struct Entry {
     pub cwd: String,
     pub command: String,
     pub status: i32,
+    /// The exit code was one the caller expected (e.g. 1 for "conflicts").
+    pub expected: bool,
     pub duration: Duration,
     pub stdout: String,
     pub stderr: String,
@@ -39,6 +41,7 @@ impl Entry {
             cwd: cwd.display().to_string(),
             command,
             status,
+            expected: status == 0,
             duration,
             stdout: clip(&out.stdout),
             stderr: clip(&out.stderr),
@@ -46,7 +49,7 @@ impl Entry {
     }
 
     pub fn failed(&self) -> bool {
-        self.status != 0
+        !self.expected
     }
 }
 

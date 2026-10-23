@@ -143,6 +143,9 @@ pub(super) enum Then {
         push: bool,
     },
     Info(String),
+    /// A merge, rebase, cherry-pick, revert or continue: the job's extra
+    /// message means it stopped with conflicts.
+    MayConflict(String),
 }
 
 impl Project {
@@ -170,6 +173,7 @@ impl Project {
             generation: 0,
         });
         self.load_diff();
+        self.sync_conflict();
     }
 
     /// Show one file of a commit or stash (read-only).
@@ -305,6 +309,7 @@ impl Project {
             }
             None => self.diff_view = None,
         }
+        self.sync_conflict();
     }
 
     pub(super) fn apply_change(&mut self, action: Action) {
@@ -576,6 +581,7 @@ impl Project {
                     self.dialog = None;
                     self.infos.push(text);
                 }
+                Then::MayConflict(done) => self.on_may_conflict(done, extra),
                 Then::Info(text) => self.infos.push(match extra {
                     Some(extra) => format!("{text}. {extra}"),
                     None => text,

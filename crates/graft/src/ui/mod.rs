@@ -1,4 +1,5 @@
 pub mod confirm;
+pub mod conflicts;
 pub mod console;
 pub mod dialog;
 pub mod diff_view;

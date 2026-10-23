@@ -5,6 +5,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::cli::Git;
+use crate::conflicts;
 use crate::model::{
     Branch, Oid, Remote, RemoteBranch, RepoSnapshot, Tag, Upstream, Worktree, same_path,
 };
@@ -19,6 +20,7 @@ pub fn load(git: &Git) -> Result<RepoSnapshot> {
     for wt in &mut worktrees {
         if !wt.prunable {
             wt.status = status::load(&git.at(&wt.path)).ok();
+            wt.in_progress = conflicts::in_progress(&wt.path);
         }
     }
     Ok(RepoSnapshot {
@@ -144,6 +146,7 @@ fn parse_worktrees(bytes: &[u8], root: &Path) -> Vec<Worktree> {
                     locked: false,
                     prunable: false,
                     status: None,
+                    in_progress: None,
                 });
             }
             "HEAD" => {

@@ -9,7 +9,9 @@ use super::widgets::{
     self, Badge, ICON_SIZE, elided, elided_path, paint_badges_right, paint_galley_left, paint_icon,
     paint_row_bg, section_heading,
 };
-use crate::project::{Action, Confirm, DialogKind, Project, RemoteOp, Tab, WorkspaceView};
+use crate::project::{
+    Action, Confirm, DialogKind, Project, RemoteOp, Tab, WorkspaceView, merge_dialog,
+};
 use crate::theme::{self, color};
 
 const SECTION_GAP: f32 = 14.0;
@@ -72,9 +74,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
                     if response.clicked() {
                         actions.push(Action::Reveal(branch.target));
                     }
-                    response.context_menu(|ui| {
-                        branch_menu(ui, repo, branch, head, project.is_operating(), actions)
-                    });
+                    response.context_menu(|ui| branch_menu(ui, project, branch, head, actions));
                 }
                 if repo.branches.is_empty() {
                     faint_row(ui, "No branches yet");
@@ -83,7 +83,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
             }
 
             if collapsible(ui, "REMOTES", repo.remotes.len(), false) {
-                remotes(ui, repo, project.is_operating(), actions);
+                remotes(ui, project, repo, project.is_operating(), actions);
                 ui.add_space(SECTION_GAP);
             }
 
@@ -343,12 +343,15 @@ fn menu_item(ui: &mut Ui, label: &str, enabled: bool, actions: &mut Vec<Action>,
 
 fn branch_menu(
     ui: &mut Ui,
-    repo: &RepoSnapshot,
+    project: &Project,
     branch: &Branch,
     head: Option<&str>,
-    busy: bool,
     actions: &mut Vec<Action>,
 ) {
+    let Some(repo) = &project.snapshot else {
+        return;
+    };
+    let busy = project.is_operating();
     let name = branch.name.as_str();
     let is_head = head == Some(name);
     let elsewhere = repo.worktree_for_branch(name).filter(|_| !is_head);
@@ -377,6 +380,9 @@ fn branch_menu(
             );
         }
         None => {}
+    }
+    if !is_head {
+        merge_items(ui, project, name, true, actions);
     }
     menu_item(
         ui,
@@ -433,13 +439,60 @@ fn branch_menu(
     }
 }
 
+/// "Merge X into current…" and "Rebase current onto X…", for the selected
+/// worktree's branch.
+fn merge_items(
+    ui: &mut Ui,
+    project: &Project,
+    name: &str,
+    rebase: bool,
+    actions: &mut Vec<Action>,
+) {
+    let Some(wt) = project.worktree() else { return };
+    let Some(current) = wt.branch.as_deref() else {
+        return;
+    };
+    let enabled = !project.is_operating() && wt.in_progress.is_none();
+    if let Some(kind) = merge_dialog(project, Some(name)) {
+        menu_item(
+            ui,
+            &format!("Merge {name} into {current}…"),
+            enabled,
+            actions,
+            Action::OpenDialog(kind),
+        );
+    }
+    if rebase {
+        menu_item(
+            ui,
+            &format!("Rebase {current} onto {name}…"),
+            enabled,
+            actions,
+            Action::Ask(Box::new(Confirm {
+                title: format!("Rebase {current} onto {name}?"),
+                body: format!(
+                    "Replays the commits of {current} on top of {name}, one by one. \
+                     This rewrites them: if {current} was pushed already, you will have \
+                     to force push. If a commit conflicts, the rebase stops so you can \
+                     resolve it."
+                ),
+                confirm_label: "Rebase".to_owned(),
+                action: Action::Rebase(name.to_owned()),
+            })),
+        );
+    }
+    ui.separator();
+}
+
 fn remote_branch_menu(
     ui: &mut Ui,
+    project: &Project,
     repo: &RepoSnapshot,
     branch: &RemoteBranch,
     busy: bool,
     actions: &mut Vec<Action>,
 ) {
+    merge_items(ui, project, &branch.name, true, actions);
     let local = branch.branch_name();
     match repo.branch(local) {
         Some(_) if repo.worktree_for_branch(local).is_none() => menu_item(
@@ -604,7 +657,13 @@ fn branch_row(ui: &mut Ui, repo: &RepoSnapshot, branch: &Branch, head: Option<&s
     response.on_hover_text(tip)
 }
 
-fn remotes(ui: &mut Ui, repo: &RepoSnapshot, busy: bool, actions: &mut Vec<Action>) {
+fn remotes(
+    ui: &mut Ui,
+    project: &Project,
+    repo: &RepoSnapshot,
+    busy: bool,
+    actions: &mut Vec<Action>,
+) {
     if repo.remotes.is_empty() {
         faint_row(ui, "No remotes");
         return;
@@ -627,7 +686,8 @@ fn remotes(ui: &mut Ui, repo: &RepoSnapshot, busy: bool, actions: &mut Vec<Actio
             if response.clicked() {
                 actions.push(Action::Reveal(branch.target));
             }
-            response.context_menu(|ui| remote_branch_menu(ui, repo, branch, busy, actions));
+            response
+                .context_menu(|ui| remote_branch_menu(ui, project, repo, branch, busy, actions));
         }
     }
 }

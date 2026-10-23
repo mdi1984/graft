@@ -3,6 +3,7 @@
 //! [`Action`]s; nothing here blocks on git.
 
 mod changes;
+mod conflicts;
 mod refs;
 mod stashes;
 mod worktrees;
@@ -13,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, Sender};
+use graft_core::conflicts::{ConflictFile, Kind};
 use graft_core::details::{self, CommitDetails};
 use graft_core::diff::FileDiff;
 use graft_core::history::{self, Commits, History};
@@ -25,6 +27,7 @@ use graft_core::{
 };
 
 pub use changes::{CommitForm, Confirm, DiffView, FileKey, Highlights, Operation, RemoteOp};
+pub use conflicts::{ConflictView, merge_dialog};
 pub use refs::{Dialog, DialogKind};
 pub use worktrees::{BranchMode, NewWorktreeForm, checkout_choices, open_terminal};
 
@@ -159,6 +162,37 @@ pub enum Action {
     Revert(Oid),
     /// Undo the selected worktree's last commit, keeping its changes staged.
     UndoCommit,
+
+    // Merges and conflicts
+    /// Merge `rev` into the selected worktree's branch (`into`, for messages).
+    Merge {
+        rev: String,
+        no_ff: bool,
+        into: String,
+    },
+    /// Rebase the selected worktree's branch onto this.
+    Rebase(String),
+    /// Pick (or clear) the resolution of one conflict of the open file.
+    ResolveConflict {
+        index: usize,
+        resolution: Option<graft_core::conflicts::Resolution>,
+    },
+    /// Edit one conflict's result by hand.
+    EditConflict(usize),
+    /// Write the open file's resolved content and stage it.
+    SaveResolution,
+    /// Resolve a whole file with one side.
+    TakeSide {
+        path: String,
+        ours: bool,
+    },
+    /// The user fixed the file in an editor: stage it.
+    MarkResolved(String),
+    ContinueOp(Kind),
+    AbortOp {
+        kind: Kind,
+        confirmed: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -201,6 +235,10 @@ enum Event {
     },
     Stashes(Result<Vec<Stash>, String>),
     StashFiles(Oid, Result<Vec<StashFile>, String>),
+    Conflict {
+        generation: u64,
+        result: Result<ConflictFile, String>,
+    },
     /// The file watcher saw a change that matters.
     Changed,
     PickedFolder(Option<PathBuf>),
@@ -247,6 +285,8 @@ pub struct Project {
     pub stashes: Option<Result<Vec<Stash>, String>>,
     pub selected_stash: Option<Oid>,
     pub stash_files: Option<Result<Vec<StashFile>, String>>,
+    /// The resolver, while the selected file has conflicts.
+    pub conflict: Option<ConflictView>,
     diff_generation: u64,
     pub commit_form: CommitForm,
     /// A git command that changes things, while it runs.
@@ -311,6 +351,7 @@ impl Project {
             stashes: None,
             selected_stash: None,
             stash_files: None,
+            conflict: None,
             diff_generation: 0,
             commit_form: CommitForm::default(),
             op: None,
@@ -363,6 +404,7 @@ impl Project {
                 Event::OpDone { then, result } => self.on_op_done(then, result),
                 Event::CommitDiff { generation, result } => self.on_commit_diff(generation, result),
                 Event::Stashes(result) => self.on_stashes(result),
+                Event::Conflict { generation, result } => self.on_conflict(generation, result),
                 Event::StashFiles(id, result) => {
                     if self.selected_stash == Some(id) {
                         self.stash_files = Some(result);
@@ -574,6 +616,7 @@ impl Project {
             self.select_head();
         }
         self.diff_view = None;
+        self.conflict = None;
         self.commit_form = CommitForm::default();
         self.sync_file_selection();
     }
@@ -639,6 +682,15 @@ impl Project {
             | Action::CherryPick(_)
             | Action::Revert(_)
             | Action::UndoCommit => self.apply_ref_action(action),
+            Action::Merge { .. }
+            | Action::Rebase(_)
+            | Action::ResolveConflict { .. }
+            | Action::EditConflict(_)
+            | Action::SaveResolution
+            | Action::TakeSide { .. }
+            | Action::MarkResolved(_)
+            | Action::ContinueOp(_)
+            | Action::AbortOp { .. } => self.apply_conflict_action(action),
             other => self.apply_change(other),
         }
     }

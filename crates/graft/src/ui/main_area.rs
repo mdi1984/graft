@@ -5,7 +5,7 @@ use egui::{Align2, Frame, Margin, Panel, Rect, Sense, Ui, vec2};
 use graft_core::Worktree;
 
 use super::widgets::{ButtonKind, button, elided_path, empty_state, paint_galley_left, spinner};
-use super::{file_status, history, stashes};
+use super::{conflicts, file_status, history, stashes};
 use crate::project::{Action, Project, Tab, WorkspaceView};
 use crate::theme::{self, color};
 
@@ -20,10 +20,16 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
         Tab::Workspace => match project.nav.view {
             WorkspaceView::FileStatus => {
                 header(ui, "File status", worktree);
+                if let Some(wt) = worktree {
+                    conflicts::banner(ui, project, wt, actions);
+                }
                 file_status::show(ui, project, actions);
             }
             WorkspaceView::History => {
                 header(ui, "History", worktree);
+                if let Some(wt) = worktree {
+                    conflicts::banner(ui, project, wt, actions);
+                }
                 history::show(ui, project, actions);
             }
         },

@@ -150,6 +150,60 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Vec<Action>)
                 }
                 "Reset"
             }
+            DialogKind::Merge {
+                into,
+                rev,
+                choices,
+                filter,
+                no_ff,
+            } => {
+                title(ui, &format!("Merge into {into}"));
+                note(
+                    ui,
+                    "Brings the commits of another branch into this one. If both changed \
+                     the same lines, the merge stops and you resolve the conflicts first.",
+                );
+                field_label(ui, "Branch to merge");
+                let r = text_field(ui, filter, "Filter branches", WIDTH);
+                if focus {
+                    r.request_focus();
+                }
+                let needle = filter.trim().to_lowercase();
+                egui::Frame::new()
+                    .fill(color::APP_BG)
+                    .corner_radius(theme::RADIUS)
+                    .inner_margin(4)
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("merge-choices")
+                            .max_height(220.0)
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                ui.set_width(WIDTH - 8.0);
+                                let mut shown = 0;
+                                for choice in choices
+                                    .iter()
+                                    .filter(|c| c.to_lowercase().contains(&needle))
+                                {
+                                    shown += 1;
+                                    let selected = rev == choice;
+                                    let text = RichText::new(choice).font(theme::mono());
+                                    let row = egui::Button::selectable(selected, text)
+                                        .min_size(egui::vec2(ui.available_width(), 24.0));
+                                    if ui.add(row).clicked() {
+                                        *rev = choice.clone();
+                                    }
+                                }
+                                if shown == 0 {
+                                    ui.label(
+                                        RichText::new("No branch matches.").color(color::TEXT_WEAK),
+                                    );
+                                }
+                            });
+                    });
+                ui.checkbox(no_ff, "Always create a merge commit (--no-ff)");
+                "Merge"
+            }
         };
         if before != format!("{:?}", dialog.kind) {
             dialog.error = None;
