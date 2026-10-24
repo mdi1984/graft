@@ -1,6 +1,6 @@
 //! The Settings dialog: theme, commit identity for the open repository,
-//! editor, background fetch, Slash's protected branches and the files copied
-//! into new worktrees.
+//! editor, background fetch, Slash's protected branches, the files copied
+//! into new worktrees and update checks.
 
 use egui::{Align, ComboBox, Id, Key, Layout, RichText, Ui};
 use graft_core::identity::Identity;
@@ -24,6 +24,8 @@ pub enum Outcome {
     Cancel,
     /// Save the settings, and the identity if it changed.
     Save(Settings, Option<Identity>),
+    /// Close without saving and show About.
+    About,
 }
 
 impl SettingsForm {
@@ -149,6 +151,19 @@ pub fn show(
         section(ui, "New worktrees");
         field_label(ui, "Ignored files to copy into new worktrees");
         text_field(ui, &mut form.draft.copy_patterns, ".env, .env.*", WIDTH);
+
+        section(ui, "Updates");
+        ui.horizontal(|ui| {
+            ui.checkbox(
+                &mut form.draft.check_updates,
+                "Check for a new version when Graft starts",
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if button(ui, "About Graft", ButtonKind::Secondary, true).clicked() {
+                    outcome = Outcome::About;
+                }
+            });
+        });
 
         ui.add_space(10.0);
         ui.horizontal(|ui| {

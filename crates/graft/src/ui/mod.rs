@@ -1,3 +1,4 @@
+pub mod about;
 pub mod confirm;
 pub mod conflicts;
 pub mod console;

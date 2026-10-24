@@ -94,8 +94,16 @@ fetch · file history and blame · undo last commit · search everything with **
 
 ## Install
 
-You need [Rust](https://rustup.rs) and [Git for Windows](https://git-scm.com/download/win). Then, in the
-repository folder:
+You need [Git for Windows](https://git-scm.com/download/win).
+
+Download `Graft-<version>-x64.zip` from [Releases](https://github.com/mdi1984/graft/releases), unpack it
+anywhere you like and start `graft.exe`. Graft checks for a new version when it starts and updates
+itself: click **Update** in the title bar, or open **About** (click the Graft icon). You can turn the
+check off in Settings.
+
+### Build from source
+
+You need [Rust](https://rustup.rs). Then, in the repository folder:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\install.ps1

@@ -10,6 +10,7 @@ mod settings;
 mod theme;
 mod time;
 mod ui;
+mod update;
 
 use tracing_subscriber::EnvFilter;
 
@@ -19,6 +20,21 @@ fn main() -> eframe::Result {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+
+    // `graft <folder>…` opens those folders as projects.
+    let mut folders: Vec<std::path::PathBuf> =
+        std::env::args_os().skip(1).map(Into::into).collect();
+    if folders
+        .first()
+        .is_some_and(|a| a.as_os_str() == update::AFTER_UPDATE)
+    {
+        // Started by an update: let the old Graft save and close first.
+        if let Some(pid) = folders.get(1).and_then(|p| p.to_str()?.parse().ok()) {
+            native::wait_for_exit(pid);
+        }
+        folders.clear();
+    }
+    update::clean_up();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -34,11 +50,6 @@ fn main() -> eframe::Result {
         "Graft",
         options,
         Box::new(|cc| {
-            // `graft <folder>…` opens those folders as projects.
-            let folders = std::env::args_os()
-                .skip(1)
-                .map(std::path::PathBuf::from)
-                .collect();
             let app = app::GraftApp::new(cc, folders);
             // After the app picked the theme, for the border color.
             native::style_window(cc);

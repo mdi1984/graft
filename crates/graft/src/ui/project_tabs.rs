@@ -38,10 +38,17 @@ pub enum TabAction {
     /// Close the start page tab.
     CloseStart,
     OpenSettings,
+    OpenAbout,
 }
 
 /// `active` is `None` while the start page is showing; it then gets a tab too.
-pub fn show(ui: &mut Ui, tabs: &[TabInfo], active: Option<usize>) -> Option<TabAction> {
+/// `update` is a newer Graft's version, offered next to the settings button.
+pub fn show(
+    ui: &mut Ui,
+    tabs: &[TabInfo],
+    active: Option<usize>,
+    update: Option<&str>,
+) -> Option<TabAction> {
     let mut action = None;
     let full = ui.available_rect_before_wrap();
     let bottom = full.top() + HEIGHT;
@@ -55,9 +62,31 @@ pub fn show(ui: &mut Ui, tabs: &[TabInfo], active: Option<usize>) -> Option<TabA
         vec2(ICON, ICON),
     );
     window_frame::paint_app_icon(ui, icon);
+    if ui
+        .interact(
+            icon.expand(4.0),
+            ui.scope_id().with("about"),
+            Sense::click(),
+        )
+        .on_hover_text("About Graft")
+        .clicked()
+    {
+        action = Some(TabAction::OpenAbout);
+    }
+    let update_label = update.map(|v| {
+        ui.painter().layout_no_wrap(
+            format!("Update to {v}"),
+            theme::semibold(theme::SMALL_SIZE),
+            color::on_accent(),
+        )
+    });
+    let update_width = update_label
+        .as_ref()
+        .map_or(0.0, |g| g.size().x + 20.0 + 8.0);
 
     let count = tabs.len() + usize::from(active.is_none());
-    let room = full.width() - 40.0 - 40.0 - 40.0 - window_frame::BUTTONS_WIDTH - 16.0;
+    let room =
+        full.width() - 40.0 - 40.0 - 40.0 - window_frame::BUTTONS_WIDTH - 16.0 - update_width;
     let width = (room / count.max(1) as f32).clamp(MIN_WIDTH, MAX_WIDTH);
 
     let mut x = full.left() + 40.0;
@@ -182,6 +211,26 @@ pub fn show(ui: &mut Ui, tabs: &[TabInfo], active: Option<usize>) -> Option<TabA
     paint_icon_button(ui, gear, &response, Icon::Settings);
     if response.clicked() {
         action = Some(TabAction::OpenSettings);
+    }
+    if let Some(galley) = update_label {
+        let pill = Rect::from_min_size(
+            pos2(gear.left() - update_width, top + (TAB_HEIGHT - 22.0) / 2.0),
+            vec2(update_width - 8.0, 22.0),
+        );
+        let response = ui
+            .interact(pill, ui.scope_id().with("update"), Sense::click())
+            .on_hover_text("A new version of Graft is ready to install");
+        let fill = if response.hovered() {
+            color::accent_hover()
+        } else {
+            color::accent()
+        };
+        ui.painter().rect_filled(pill, 11, fill);
+        let text_pos = pill.center() - galley.size() / 2.0;
+        ui.painter().galley(text_pos, galley, color::on_accent());
+        if response.clicked() {
+            action = Some(TabAction::OpenAbout);
+        }
     }
     window_frame::caption_buttons(ui, strip, top + TAB_HEIGHT / 2.0);
     action
