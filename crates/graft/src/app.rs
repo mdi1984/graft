@@ -90,10 +90,16 @@ pub struct GraftApp {
     about_open: bool,
     /// An update is installed and the new Graft started: close this one.
     closing: bool,
+    /// Folders from a second start of Graft (empty: just come to the front).
+    forwarded: Receiver<Vec<PathBuf>>,
 }
 
 impl GraftApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, folders: Vec<PathBuf>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        folders: Vec<PathBuf>,
+        forwarded: Receiver<Vec<PathBuf>>,
+    ) -> Self {
         fonts::install(&cc.egui_ctx);
 
         let ctx = cc.egui_ctx.clone();
@@ -164,6 +170,7 @@ impl GraftApp {
             update: update::Status::Idle,
             about_open: false,
             closing: false,
+            forwarded,
         };
         if app.settings.check_updates && update::check_on_start() {
             app.check_update(false);
@@ -228,6 +235,17 @@ impl GraftApp {
             }
         }
         self.console_view.sync(&self.console);
+    }
+
+    /// Another start of Graft: come to the front and open its folders.
+    fn take_forwarded(&mut self, ctx: &egui::Context) {
+        while let Ok(folders) = self.forwarded.try_recv() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            for folder in folders {
+                self.open_folder(folder);
+            }
+        }
     }
 
     /// Find the repository at `path` in the background, then open it.
@@ -716,6 +734,7 @@ impl eframe::App for GraftApp {
             crate::native::set_border(color::border());
         }
         self.poll();
+        self.take_forwarded(&ctx);
         self.shortcuts(&ctx);
         self.handle_drops(&ctx);
         self.refresh_on_focus(&ctx);

@@ -7,10 +7,13 @@ mod launch;
 mod native;
 mod project;
 mod settings;
+mod single;
 mod theme;
 mod time;
 mod ui;
 mod update;
+
+use std::sync::{Arc, OnceLock};
 
 use tracing_subscriber::EnvFilter;
 
@@ -24,10 +27,10 @@ fn main() -> eframe::Result {
     // `graft <folder>…` opens those folders as projects.
     let mut folders: Vec<std::path::PathBuf> =
         std::env::args_os().skip(1).map(Into::into).collect();
-    if folders
+    let after_update = folders
         .first()
-        .is_some_and(|a| a.as_os_str() == update::AFTER_UPDATE)
-    {
+        .is_some_and(|a| a.as_os_str() == update::AFTER_UPDATE);
+    if after_update {
         // Started by an update: let the old Graft save and close first.
         if let Some(pid) = folders.get(1).and_then(|p| p.to_str()?.parse().ok()) {
             native::wait_for_exit(pid);
@@ -35,6 +38,25 @@ fn main() -> eframe::Result {
         folders.clear();
     }
     update::clean_up();
+    // Graft runs once: a second start hands its folders to the first. After
+    // an update the old Graft may still be closing; never hand over to it.
+    let _instance = match single::claim(&folders, !after_update) {
+        single::Start::First(instance) => instance,
+        single::Start::Forwarded => return Ok(()),
+    };
+    // Listen before the window exists: creating it can take seconds, and a
+    // second start only waits about three.
+    let (forward_tx, forwarded) = crossbeam_channel::unbounded();
+    let repaint = Arc::new(OnceLock::<egui::Context>::new());
+    single::listen({
+        let repaint = Arc::clone(&repaint);
+        move |folders| {
+            let _ = forward_tx.send(folders);
+            if let Some(ctx) = repaint.get() {
+                ctx.request_repaint();
+            }
+        }
+    });
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -49,8 +71,9 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Graft",
         options,
-        Box::new(|cc| {
-            let app = app::GraftApp::new(cc, folders);
+        Box::new(move |cc| {
+            let _ = repaint.set(cc.egui_ctx.clone());
+            let app = app::GraftApp::new(cc, folders, forwarded);
             // After the app picked the theme, for the border color.
             native::style_window(cc);
             Ok(Box::new(app))
