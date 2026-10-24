@@ -286,12 +286,7 @@ mod tests {
             assert!(out.status.success(), "git {args:?} failed");
         };
         git(&["init", "-q", "-b", "main"]);
-        std::fs::write(
-            root.join(".gitignore"),
-            ".claude/
-",
-        )
-        .unwrap();
+        std::fs::write(root.join(".gitignore"), ".claude/\n").unwrap();
         git(&["add", "."]);
         git(&[
             "-c",

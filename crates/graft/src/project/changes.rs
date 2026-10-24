@@ -145,6 +145,9 @@ pub(super) enum Then {
         push: bool,
     },
     Info(String),
+    /// Switching to this branch: if local changes are in the way, offer to
+    /// stash them first.
+    Switched(String),
     /// A merge, rebase, cherry-pick, revert or continue: the job's extra
     /// message means it stopped with conflicts.
     MayConflict(String),
@@ -590,6 +593,10 @@ impl Project {
                     self.infos.push(text);
                 }
                 Then::MayConflict(done) => self.on_may_conflict(done, extra),
+                Then::Switched(branch) => self.infos.push(match extra {
+                    Some(extra) => format!("Switched to {branch}. {extra}"),
+                    None => format!("Switched to {branch}"),
+                }),
                 Then::Info(text) => self.infos.push(match extra {
                     Some(extra) => format!("{text}. {extra}"),
                     None => text,

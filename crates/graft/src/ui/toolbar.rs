@@ -7,34 +7,54 @@ use super::icons::Icon;
 use super::widgets::{Tone, tool_button, toolbar_divider};
 use crate::project::{Action, DialogKind, Project, RemoteOp, Tab, merge_dialog};
 
+/// Below this width, buttons with an icon drop their label.
+const COMPACT_WIDTH: f32 = 1120.0;
+
 pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>, search: &mut String) {
     let ahead = project.worktree().map_or(0, |wt| wt.ahead());
+    let compact = ui.available_width() < COMPACT_WIDTH;
+    let label = |text: &'static str| if compact { "" } else { text };
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
 
-        if tool_button(ui, Some(Icon::Commit), "Commit", None, Tone::Normal).clicked() {
+        if tool_button(ui, Some(Icon::Commit), label("Commit"), None, Tone::Normal)
+            .on_hover_text("Commit: show the changes to stage and commit")
+            .clicked()
+        {
             actions.push(Action::ShowFileStatus);
         }
         let busy = project.is_operating() || project.snapshot.is_none();
         let behind = project.worktree().map_or(0, |wt| wt.behind());
         let pull_badge = (behind > 0).then(|| behind.to_string());
-        if tool_button(ui, Some(Icon::Pull), "Pull", pull_badge, Tone::Normal)
-            .on_hover_text("Pull the current branch from its upstream")
-            .clicked()
+        if tool_button(
+            ui,
+            Some(Icon::Pull),
+            label("Pull"),
+            pull_badge,
+            Tone::Normal,
+        )
+        .on_hover_text("Pull the current branch from its upstream")
+        .clicked()
             && !busy
         {
             actions.push(Action::Remote(RemoteOp::Pull));
         }
         let push_badge = (ahead > 0).then(|| ahead.to_string());
-        if tool_button(ui, Some(Icon::Push), "Push", push_badge, Tone::Normal)
-            .on_hover_text("Push the current branch (sets the upstream the first time)")
-            .clicked()
+        if tool_button(
+            ui,
+            Some(Icon::Push),
+            label("Push"),
+            push_badge,
+            Tone::Normal,
+        )
+        .on_hover_text("Push the current branch (sets the upstream the first time)")
+        .clicked()
             && !busy
         {
             actions.push(Action::Remote(RemoteOp::Push));
         }
-        if tool_button(ui, Some(Icon::Fetch), "Fetch", None, Tone::Normal)
+        if tool_button(ui, Some(Icon::Fetch), label("Fetch"), None, Tone::Normal)
             .on_hover_text("Fetch all remotes")
             .clicked()
             && !busy
@@ -68,7 +88,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>, search: &
             _ => "Merge another branch into the current one",
         };
         let can_merge = wt.is_some_and(|wt| wt.branch.is_some() && wt.in_progress.is_none());
-        if tool_button(ui, Some(Icon::Merge), "Merge", None, Tone::Normal)
+        if tool_button(ui, Some(Icon::Merge), label("Merge"), None, Tone::Normal)
             .on_hover_text(merge_hint)
             .clicked()
             && !busy
@@ -133,7 +153,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>, search: &
         {
             actions.push(action);
         }
-        if tool_button(ui, Some(Icon::Slash), "Slash", None, Tone::Danger)
+        if tool_button(ui, Some(Icon::Slash), label("Slash"), None, Tone::Danger)
             .on_hover_text("Clean up finished branches and worktrees (shows a preview first)")
             .clicked()
             && !busy

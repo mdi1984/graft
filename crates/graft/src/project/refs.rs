@@ -294,6 +294,20 @@ impl Project {
                     action: Action::DeleteBranch { name, force: true },
                 });
             }
+            Then::Switched(branch) if blocked_by_changes(&error) => {
+                let untracked = error.contains("untracked working tree files");
+                self.confirm = Some(Confirm {
+                    title: format!("Your changes are in the way of {branch}"),
+                    body: format!(
+                        "Switching would overwrite uncommitted changes in this worktree: \
+                         {}.\n\nGraft can stash them first; get them back later from \
+                         Stashes (Apply or Pop).",
+                        files_in_the_way(&error)
+                    ),
+                    confirm_label: "Stash and switch".to_owned(),
+                    action: Action::StashAndCheckout { branch, untracked },
+                });
+            }
             Then::Pushed if is_rejected_push(&error) => {
                 self.confirm = Some(Confirm {
                     title: "The remote has commits you don't have".to_owned(),
@@ -341,9 +355,26 @@ impl Project {
             }
             Action::SubmitDialog => self.submit_dialog(),
             Action::Checkout(branch) => {
-                let done = format!("Switched to {branch}");
-                self.run_op("Switching branch", Then::Info(done), move |git| {
+                let then = Then::Switched(branch.clone());
+                self.run_op("Switching branch", then, move |git| {
                     refs::switch(&git, &branch)
+                });
+            }
+            Action::StashAndCheckout { branch, untracked } => {
+                let then = Then::Switched(branch.clone());
+                self.run_op_at(self.wt_git(), "Switching branch", then, move |git| {
+                    stash::push(
+                        &git,
+                        &stash::Options {
+                            message: format!("Before switching to {branch}"),
+                            include_untracked: untracked,
+                            ..Default::default()
+                        },
+                    )?;
+                    refs::switch(&git, &branch)?;
+                    Ok(Some(format!(
+                        "Your changes are in the stash \"Before switching to {branch}\""
+                    )))
                 });
             }
             Action::CheckoutRemote { local, remote } => {
@@ -424,5 +455,44 @@ impl Project {
             }
             _ => {}
         }
+    }
+}
+
+/// Git refused to switch branches because local changes would be lost.
+fn blocked_by_changes(error: &str) -> bool {
+    error.contains("would be overwritten by checkout")
+        || error.contains("Please commit your changes or stash them")
+}
+
+/// The files git lists between "…would be overwritten by checkout:" and
+/// "Please …", joined for a sentence.
+fn files_in_the_way(error: &str) -> String {
+    let files: Vec<&str> = error
+        .lines()
+        .skip_while(|l| !l.contains("would be overwritten"))
+        .skip(1)
+        .map(str::trim)
+        .take_while(|l| !l.starts_with("Please") && !l.starts_with("Aborting"))
+        .filter(|l| !l.is_empty())
+        .collect();
+    match files.len() {
+        0 => "some files".to_owned(),
+        1..=5 => files.join(", "),
+        n => format!("{} and {} more", files[..4].join(", "), n - 4),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lists_files_in_the_way() {
+        let error = "error: Your local changes to the following files would be overwritten \
+                     by checkout:\n\tsrc/a.rs\n\tb.txt\nPlease commit your changes or stash \
+                     them before you switch branches.\nAborting";
+        assert!(blocked_by_changes(error));
+        assert_eq!(files_in_the_way(error), "src/a.rs, b.txt");
+        assert_eq!(files_in_the_way("fatal: something else"), "some files");
     }
 }
