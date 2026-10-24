@@ -117,6 +117,10 @@ main once checks pass.
   `Graft-X.Y.Z-x64.zip` (exe, LICENSE, README), `Graft-X.Y.Z-x64-setup.exe`
   (per-user Inno Setup installer from `installer/graft.iss`, used by winget),
   `graft-x64.exe` (stable name for the in-app updater) and `SHA256SUMS.txt`.
+- winget: the package is `mdi1984.Graft` (installer type inno, per-user). The
+  release workflow's `winget` job opens the PR to microsoft/winget-pkgs for
+  each new version (winget-releaser); it needs the `WINGET_TOKEN` secret and
+  only works once the package exists there.
 - `.github/workflows/ci.yml` checks fmt, clippy (-D warnings) and tests on
   every PR and push to main, and builds the packages (artifact
   `graft-packages`).
