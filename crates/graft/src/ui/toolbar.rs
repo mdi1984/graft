@@ -1,12 +1,11 @@
 //! The always-visible toolbar: Commit, Pull, Push, Fetch | Branch, Merge, Stash,
 //! New worktree | Preview in main, Slash | search.
 
-use egui::{Align, Frame, Id, Key, Layout, Margin, Modifiers, Sense, Stroke, TextEdit, Ui, vec2};
+use egui::{Align, Layout, Ui};
 
-use super::icons::{self, Icon};
+use super::icons::Icon;
 use super::widgets::{Tone, tool_button, toolbar_divider};
 use crate::project::{Action, DialogKind, Project, RemoteOp, Tab, merge_dialog};
-use crate::theme::{RADIUS, color};
 
 pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>, search: &mut String) {
     let ahead = project.worktree().map_or(0, |wt| wt.ahead());
@@ -143,45 +142,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>, search: &
         }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            search_box(ui, search)
+            super::search::show(ui, project, search, actions)
         });
     });
-}
-
-fn search_box(ui: &mut Ui, text: &mut String) {
-    let id = Id::unique("toolbar-search");
-    if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {
-        ui.memory_mut(|m| m.request_focus(id));
-    }
-    let focused = ui.memory(|m| m.has_focus(id));
-    let border = if focused {
-        color::ACCENT
-    } else {
-        color::CONTROL_BORDER
-    };
-    let width = ui.available_width().clamp(160.0, 300.0);
-
-    Frame::new()
-        .fill(color::APP_BG)
-        .stroke(Stroke::new(1.0, border))
-        .corner_radius(RADIUS)
-        .inner_margin(Margin::symmetric(8, 0))
-        .show(ui, |ui| {
-            ui.set_width(width - 16.0);
-            ui.set_height(28.0);
-            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                let (rect, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
-                icons::paint(ui.painter(), rect, Icon::Search, color::TEXT_WEAK);
-                ui.add(
-                    TextEdit::singleline(text)
-                        .id(id)
-                        .frame(Frame::NONE)
-                        .margin(Margin::ZERO)
-                        .min_size(vec2(0.0, 28.0))
-                        .align(egui::Align2::LEFT_CENTER)
-                        .hint_text("Commits, branches, files…  Ctrl+K")
-                        .desired_width(f32::INFINITY),
-                );
-            });
-        });
 }

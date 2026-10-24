@@ -10,6 +10,7 @@ pub mod main_area;
 pub mod new_worktree;
 pub mod project_tabs;
 pub mod review;
+pub mod search;
 pub mod settings;
 pub mod sidebar;
 pub mod slash;
