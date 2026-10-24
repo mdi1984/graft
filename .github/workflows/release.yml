@@ -54,3 +54,23 @@ jobs:
         run: |
           gh release create $env:GITHUB_REF_NAME (Get-ChildItem dist).FullName `
             --title "Graft $env:VERSION" --generate-notes --verify-tag
+
+  # Sends the new version to winget (a PR to microsoft/winget-pkgs) once the
+  # release is out. Needs the secret WINGET_TOKEN: a classic token with the
+  # public_repo scope, from an account with a fork of microsoft/winget-pkgs.
+  # Without the secret this job does nothing.
+  winget:
+    needs: release
+    runs-on: windows-latest
+    env:
+      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+    steps:
+      - name: Skip without a token
+        if: env.WINGET_TOKEN == ''
+        run: echo "No WINGET_TOKEN secret, so winget is not updated."
+      - uses: vedantmgoyal9/winget-releaser@v2
+        if: env.WINGET_TOKEN != ''
+        with:
+          identifier: mdi1984.Graft
+          installers-regex: '-x64-setup\.exe$'
+          token: ${{ secrets.WINGET_TOKEN }}
