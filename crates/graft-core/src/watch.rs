@@ -11,8 +11,8 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::Result;
-use notify_debouncer_full::notify::{RecommendedWatcher, RecursiveMode};
-use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
+use notify_debouncer_full::notify::{self, RecommendedWatcher, RecursiveMode};
+use notify_debouncer_full::{DebounceEventResult, Debouncer, NoCache, new_debouncer_opt};
 
 use crate::cli;
 
@@ -21,7 +21,7 @@ const DEBOUNCE: Duration = Duration::from_millis(300);
 const MAX_CHECK: usize = 2_000;
 
 pub struct Watcher {
-    _debouncer: Debouncer<RecommendedWatcher, RecommendedCache>,
+    _debouncer: Debouncer<RecommendedWatcher, NoCache>,
     roots: Vec<PathBuf>,
 }
 
@@ -33,7 +33,10 @@ impl Watcher {
             roots: roots.clone(),
             ignored: HashSet::new(),
         };
-        let mut debouncer = new_debouncer(DEBOUNCE, None, move |result: DebounceEventResult| {
+        // No file id cache: building it walks every file under the roots
+        // (node_modules included), which took 38 s on a big repo. It only
+        // serves rename tracking, which Graft does not need.
+        let handler = move |result: DebounceEventResult| {
             let Ok(events) = result else {
                 // Overflowed or failed: refresh to be safe.
                 on_change();
@@ -46,9 +49,19 @@ impl Watcher {
             if filter.relevant(&paths) {
                 on_change();
             }
-        })?;
+        };
+        let mut debouncer = new_debouncer_opt::<_, RecommendedWatcher, _>(
+            DEBOUNCE,
+            None,
+            handler,
+            NoCache::new(),
+            notify::Config::default(),
+        )?;
         for root in &roots {
-            if root.is_dir() {
+            // A worktree inside another one (e.g. `.claude/worktrees/x`) is
+            // already covered by the outer recursive watch.
+            let nested = roots.iter().any(|r| r != root && root.starts_with(r));
+            if root.is_dir() && !nested {
                 debouncer.watch(root, RecursiveMode::Recursive)?;
             }
         }
@@ -257,5 +270,55 @@ mod tests {
         assert!(f.relevant(&[root.join("main.rs").as_path()]));
         assert!(!f.relevant(&[root.join(".git").join("objects").join("ab").as_path()]));
         assert!(f.relevant(&[root.join(".git").join("HEAD").as_path()]));
+    }
+
+    #[test]
+    fn nested_worktree_changes_are_seen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("app");
+        std::fs::create_dir(&root).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(
+            root.join(".gitignore"),
+            ".claude/
+",
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=A",
+            "-c",
+            "user.email=a@x",
+            "commit",
+            "-qm",
+            "a",
+        ]);
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "agent",
+            ".claude/worktrees/agent",
+        ]);
+        let nested = root.join(".claude").join("worktrees").join("agent");
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let _watcher = Watcher::new(vec![root.clone(), nested.clone()], move || {
+            let _ = tx.send(());
+        })
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        std::fs::write(nested.join("new.txt"), "x").unwrap();
+        assert!(rx.recv_timeout(Duration::from_secs(10)).is_ok());
     }
 }

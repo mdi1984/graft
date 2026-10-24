@@ -25,6 +25,7 @@ use crate::time;
 const ROW_HEIGHT: f32 = 26.0;
 const LANE_WIDTH: f32 = 14.0;
 const MAX_GRAPH_WIDTH: f32 = 280.0;
+const MIN_GRAPH_WIDTH: f32 = 40.0;
 const COMMIT_COL: f32 = 76.0;
 const DATE_COL: f32 = 116.0;
 const AUTHOR_COL: f32 = 150.0;
@@ -88,11 +89,22 @@ struct Columns {
 
 fn commit_list(ui: &mut Ui, project: &Project, history: &History, actions: &mut Vec<Action>) {
     let width = ui.available_width();
-    let cols = Columns {
-        graph: (history.lanes.max(1) as f32 * LANE_WIDTH + 10.0).min(MAX_GRAPH_WIDTH),
+    // Big repos can have dozens of lanes: by default the graph gets at most a
+    // quarter of the list, the rest is clipped. Dragging the header divider
+    // sets the width (remembered per repository).
+    let needed = history.lanes.max(1) as f32 * LANE_WIDTH + 10.0;
+    let width_id = Id::unique(("graph-width", &project.root));
+    let chosen = ui.data_mut(|d| d.get_persisted::<f32>(width_id));
+    let graph = chosen
+        .unwrap_or_else(|| needed.min(MAX_GRAPH_WIDTH).min(width * 0.25))
+        .min(needed)
+        .min(width * 0.6)
+        .max(MIN_GRAPH_WIDTH);
+    let mut cols = Columns {
+        graph,
         author: if width > 700.0 { AUTHOR_COL } else { 0.0 },
     };
-    header_row(ui, &cols);
+    header_row(ui, &mut cols, width_id);
 
     let selected = project
         .selected
@@ -220,8 +232,25 @@ fn keyboard_nav(
     }
 }
 
-fn header_row(ui: &mut Ui, cols: &Columns) {
+fn header_row(ui: &mut Ui, cols: &mut Columns, width_id: Id) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::hover());
+    // Divider between Graph and Description: drag to resize the graph.
+    let handle = Rect::from_center_size(
+        pos2(rect.left() + cols.graph, rect.center().y),
+        vec2(8.0, rect.height()),
+    );
+    let drag = ui
+        .interact(handle, width_id, Sense::drag())
+        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+    if drag.dragged()
+        && let Some(pointer) = ui.ctx().pointer_interact_pos()
+    {
+        cols.graph = (pointer.x - rect.left()).clamp(MIN_GRAPH_WIDTH, rect.width() * 0.6);
+        ui.data_mut(|d| d.insert_persisted(width_id, cols.graph));
+    }
+    if drag.double_clicked() {
+        ui.data_mut(|d| d.remove::<f32>(width_id));
+    }
     let painter = ui.painter();
     painter.rect_filled(rect, 0, color::APP_BG);
     painter.hline(
@@ -239,6 +268,10 @@ fn header_row(ui: &mut Ui, cols: &Columns) {
             color::TEXT_FAINT,
         );
     };
+    if drag.hovered() || drag.dragged() {
+        let x = rect.left() + cols.graph;
+        painter.vline(x, rect.y_range(), Stroke::new(1.0, color::TEXT_FAINT));
+    }
     label(rect.left() + 10.0, "Graph");
     label(rect.left() + cols.graph + 6.0, "Description");
     let mut x = rect.right() - COMMIT_COL;
