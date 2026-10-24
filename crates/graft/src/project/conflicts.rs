@@ -255,9 +255,14 @@ impl Project {
         if self.dialog.as_ref().is_some_and(|d| d.submitting) {
             self.dialog = None;
         }
+        let elsewhere = self.pending_conflicts.take();
         match stopped {
             Some(text) => {
                 self.infos.push(text);
+                if let Some(path) = elsewhere {
+                    self.nav.tab = super::Tab::Workspace;
+                    self.open_worktree(path);
+                }
                 self.nav.tab = super::Tab::Workspace;
                 self.nav.view = WorkspaceView::FileStatus;
             }

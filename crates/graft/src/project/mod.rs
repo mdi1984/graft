@@ -5,6 +5,7 @@
 mod changes;
 mod conflicts;
 mod refs;
+mod review;
 mod stashes;
 mod worktrees;
 
@@ -29,7 +30,8 @@ use graft_core::{
 pub use changes::{CommitForm, Confirm, DiffView, FileKey, Highlights, Operation, RemoteOp};
 pub use conflicts::{ConflictView, merge_dialog};
 pub use refs::{Dialog, DialogKind};
-pub use worktrees::{BranchMode, NewWorktreeForm, checkout_choices, open_terminal};
+pub use review::{ReviewState, ReviewView};
+pub use worktrees::{BranchMode, NewWorktreeForm, checkout_choices, open_in_ide, open_terminal};
 
 /// Commits loaded into the graph. Enough for years of history in big repos.
 const HISTORY_LIMIT: usize = 100_000;
@@ -193,6 +195,20 @@ pub enum Action {
         kind: Kind,
         confirmed: bool,
     },
+
+    // Review
+    SelectReviewFile(String),
+    ToggleViewed(String),
+    SetReviewBase(String),
+    ToggleReviewSplit,
+    /// Merge the reviewed branch into its base, in the worktree that has the
+    /// base checked out.
+    MergeReviewed {
+        worktree: PathBuf,
+        branch: String,
+        into: String,
+    },
+    OpenInIde(PathBuf),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -238,6 +254,10 @@ enum Event {
     Conflict {
         generation: u64,
         result: Result<ConflictFile, String>,
+    },
+    Review {
+        generation: u64,
+        result: Result<graft_core::review::Review, String>,
     },
     /// The file watcher saw a change that matters.
     Changed,
@@ -287,6 +307,12 @@ pub struct Project {
     pub stash_files: Option<Result<Vec<StashFile>, String>>,
     /// The resolver, while the selected file has conflicts.
     pub conflict: Option<ConflictView>,
+    /// The Review tab, once opened.
+    pub review: Option<ReviewView>,
+    /// Viewed marks, notes and base branch per worktree. Saved by the app.
+    pub reviews: HashMap<PathBuf, ReviewState>,
+    /// A merge runs in this other worktree: show its conflicts if it stops.
+    pending_conflicts: Option<PathBuf>,
     diff_generation: u64,
     pub commit_form: CommitForm,
     /// A git command that changes things, while it runs.
@@ -352,6 +378,9 @@ impl Project {
             selected_stash: None,
             stash_files: None,
             conflict: None,
+            review: None,
+            reviews: HashMap::new(),
+            pending_conflicts: None,
             diff_generation: 0,
             commit_form: CommitForm::default(),
             op: None,
@@ -405,6 +434,7 @@ impl Project {
                 Event::CommitDiff { generation, result } => self.on_commit_diff(generation, result),
                 Event::Stashes(result) => self.on_stashes(result),
                 Event::Conflict { generation, result } => self.on_conflict(generation, result),
+                Event::Review { generation, result } => self.on_review(generation, result),
                 Event::StashFiles(id, result) => {
                     if self.selected_stash == Some(id) {
                         self.stash_files = Some(result);
@@ -477,6 +507,9 @@ impl Project {
                 self.sync_watcher();
                 if self.stashes.is_some() || self.nav.tab == Tab::Stashes {
                     self.load_stashes();
+                }
+                if self.nav.tab == Tab::Review {
+                    self.load_review();
                 }
                 if let Some(path) = self.pending_open.take() {
                     if self
@@ -600,6 +633,14 @@ impl Project {
     /// Select a worktree: a dirty one opens File status, a clean one History.
     fn open_worktree(&mut self, path: PathBuf) {
         self.nav.worktree = path;
+        if self.nav.tab == Tab::Review {
+            // Stay in Review: review the worktree that was clicked.
+            if let Some(snap) = &self.snapshot {
+                self.labels = build_labels(snap, &self.nav.worktree);
+            }
+            self.load_review();
+            return;
+        }
         self.nav.tab = Tab::Workspace;
         let dirty = self.worktree().is_some_and(|wt| wt.dirty() > 0);
         self.nav.view = if dirty {
@@ -656,6 +697,12 @@ impl Project {
                 if tab == Tab::Stashes {
                     self.load_stashes();
                 }
+                if tab == Tab::Review {
+                    if let Some(view) = &mut self.review {
+                        view.selected = None;
+                    }
+                    self.load_review();
+                }
             }
             Action::SelectCommitFile(key) => self.select_commit_file(key),
             Action::CloseCommitFile => self.commit_diff = None,
@@ -691,6 +738,12 @@ impl Project {
             | Action::MarkResolved(_)
             | Action::ContinueOp(_)
             | Action::AbortOp { .. } => self.apply_conflict_action(action),
+            Action::OpenInIde(path) => open_in_ide(&path),
+            Action::SelectReviewFile(_)
+            | Action::ToggleViewed(_)
+            | Action::SetReviewBase(_)
+            | Action::ToggleReviewSplit
+            | Action::MergeReviewed { .. } => self.apply_review_action(action),
             other => self.apply_change(other),
         }
     }

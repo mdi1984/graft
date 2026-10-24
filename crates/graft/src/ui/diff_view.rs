@@ -44,7 +44,11 @@ pub fn show_view(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Act
     if !view.selection.is_empty() {
         selection_bar(ui, view, busy, actions);
     }
+    body(ui, view, busy, false, actions);
+}
 
+/// The diff without its header: unified, or side by side with `split`.
+pub fn body(ui: &mut Ui, view: &DiffView, busy: bool, split: bool, actions: &mut Vec<Action>) {
     let Some(diff) = &view.diff else {
         if let Some(error) = &view.error {
             empty_state(ui, "Could not load the diff", error);
@@ -75,7 +79,165 @@ pub fn show_view(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Act
     if ui.input(|i| i.key_pressed(Key::Escape)) && !view.selection.is_empty() {
         actions.push(Action::ClearLines);
     }
-    lines(ui, view, diff, busy, actions);
+    if split {
+        side_by_side(ui, view, diff);
+    } else {
+        lines(ui, view, diff, busy, actions);
+    }
+}
+
+/// A row of the side-by-side view: old line on the left, new on the right.
+#[derive(Clone, Copy)]
+enum Pair {
+    Hunk(usize),
+    Lines(Option<(usize, usize)>, Option<(usize, usize)>),
+}
+
+fn pair_rows(diff: &FileDiff) -> Vec<Pair> {
+    let mut rows = Vec::new();
+    for (h, hunk) in diff.hunks.iter().enumerate() {
+        rows.push(Pair::Hunk(h));
+        let mut l = 0;
+        while l < hunk.lines.len() {
+            if hunk.lines[l].kind == Kind::Context {
+                rows.push(Pair::Lines(Some((h, l)), Some((h, l))));
+                l += 1;
+                continue;
+            }
+            // A change block: removed lines, then added lines, side by side.
+            let mut removed = Vec::new();
+            let mut added = Vec::new();
+            while l < hunk.lines.len() && hunk.lines[l].kind != Kind::Context {
+                match hunk.lines[l].kind {
+                    Kind::Removed => removed.push((h, l)),
+                    _ => added.push((h, l)),
+                }
+                l += 1;
+            }
+            for i in 0..removed.len().max(added.len()) {
+                rows.push(Pair::Lines(removed.get(i).copied(), added.get(i).copied()));
+            }
+        }
+    }
+    rows
+}
+
+fn side_by_side(ui: &mut Ui, view: &DiffView, diff: &FileDiff) {
+    let rows = pair_rows(diff);
+    ui.spacing_mut().item_spacing.y = 0.0;
+    ScrollArea::vertical()
+        .id_salt(("diff-split-scroll", &view.key.path))
+        .auto_shrink([false, false])
+        .show_rows(ui, ROW, rows.len(), |ui, range| {
+            for row in &rows[range] {
+                let (rect, _) =
+                    ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
+                match *row {
+                    Pair::Hunk(h) => {
+                        let hunk = &diff.hunks[h];
+                        let painter = ui.painter();
+                        painter.rect_filled(rect, 0, color::SIDEBAR_BG);
+                        let header = format!(
+                            "@@ -{},{} +{},{} @@ {}",
+                            hunk.old_start,
+                            hunk.old_count,
+                            hunk.new_start,
+                            hunk.new_count,
+                            hunk.section
+                        );
+                        let galley =
+                            painter.layout_no_wrap(header, theme::mono(), color::TEXT_FAINT);
+                        paint_galley_left(
+                            painter,
+                            rect.left() + 8.0,
+                            rect.center().y,
+                            galley,
+                            color::TEXT_FAINT,
+                        );
+                    }
+                    Pair::Lines(left, right) => {
+                        let mid = rect.center().x;
+                        let left_rect = Rect::from_min_max(rect.min, pos2(mid - 1.0, rect.max.y));
+                        let right_rect = Rect::from_min_max(pos2(mid + 1.0, rect.min.y), rect.max);
+                        half(ui, left_rect, view, diff, left, true);
+                        half(ui, right_rect, view, diff, right, false);
+                        ui.painter().line_segment(
+                            [pos2(mid, rect.top()), pos2(mid, rect.bottom())],
+                            Stroke::new(1.0, color::BORDER),
+                        );
+                    }
+                }
+            }
+        });
+}
+
+/// One side of a side-by-side row. A missing line is a hatched gap.
+fn half(
+    ui: &Ui,
+    rect: Rect,
+    view: &DiffView,
+    diff: &FileDiff,
+    at: Option<(usize, usize)>,
+    old: bool,
+) {
+    let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+    let Some((h, l)) = at else {
+        painter.rect_filled(rect, 0, color::SIDEBAR_BG.lerp_to_gamma(color::APP_BG, 0.4));
+        return;
+    };
+    let line = &diff.hunks[h].lines[l];
+    let tint = match line.kind {
+        Kind::Added => Some(color::ADDED),
+        Kind::Removed => Some(color::REMOVED),
+        Kind::Context => None,
+    };
+    if let Some(tint) = tint {
+        painter.rect_filled(rect, 0, color::APP_BG.lerp_to_gamma(tint, 0.09));
+    }
+    let y = rect.center().y;
+    let number = if old { line.old_no } else { line.new_no };
+    if let Some(n) = number {
+        painter.text(
+            pos2(rect.left() + NUM - 6.0, y),
+            Align2::RIGHT_CENTER,
+            n.to_string(),
+            theme::mono(),
+            color::TEXT_FAINT,
+        );
+    }
+    let text = line.text();
+    let text_color = if tint.is_some() {
+        color::TEXT
+    } else {
+        color::TEXT_MID
+    };
+    let galley = painter.layout_no_wrap(text.clone(), theme::mono(), text_color);
+    let origin = pos2(rect.left() + NUM + 8.0, y - galley.size().y / 2.0);
+    let word = view.words.get(h).and_then(|w| w.get(l)).cloned().flatten();
+    if let (Some(range), Some(tint)) = (word, tint)
+        && !range.is_empty()
+    {
+        let start = text[..range.start].chars().count();
+        let end = text[..range.end].chars().count();
+        let a = galley.pos_from_cursor(CCursor::new(start));
+        let b = galley.pos_from_cursor(CCursor::new(end));
+        let r = Rect::from_min_max(
+            origin + vec2(a.left(), 1.0),
+            origin + vec2(b.left(), galley.size().y - 1.0),
+        );
+        painter.rect_filled(r, 2, color::APP_BG.lerp_to_gamma(tint, 0.35));
+    }
+    let too_wide = origin.x + galley.size().x > rect.right();
+    painter.galley(origin, galley, text_color);
+    if too_wide && ui.rect_contains_pointer(rect) {
+        egui::Tooltip::always_open(
+            ui.ctx().clone(),
+            ui.layer_id(),
+            ui.scope_id().with(("line-tip", h, l, old)),
+            egui::PopupAnchor::Pointer,
+        )
+        .show(|ui| ui.label(RichText::new(&text).font(theme::mono())));
+    }
 }
 
 fn header(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Action>) {
@@ -106,6 +268,7 @@ fn header(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Action>) {
                     Source::Unstaged => "Unstaged",
                     Source::Untracked => "Untracked",
                     Source::Commit(_) => "Commit",
+                    Source::Base(_) => "Review",
                 };
                 let right_width = 230.0;
                 let room = (ui.available_width() - right_width - 140.0).max(80.0);
@@ -151,7 +314,7 @@ fn header(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Action>) {
                                 actions.push(discard_file(&view.key.source, path));
                             }
                         }
-                        Source::Commit(_) => {
+                        Source::Commit(_) | Source::Base(_) => {
                             if icon_button(ui, Icon::Close, 26.0)
                                 .on_hover_text("Close the diff (Esc)")
                                 .clicked()
@@ -229,7 +392,7 @@ fn selection_bar(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Act
                                 })));
                             }
                         }
-                        Source::Commit(_) => {}
+                        Source::Commit(_) | Source::Base(_) => {}
                     }
                     if button(ui, "Clear", ButtonKind::Secondary, true).clicked() {
                         actions.push(Action::ClearLines);
@@ -289,7 +452,7 @@ fn lines(ui: &mut Ui, view: &DiffView, diff: &FileDiff, busy: bool, actions: &mu
                         let line = &diff.hunks[h].lines[l];
                         let selected = view.selection.contains(&(h, l));
                         let word = view.words.get(h).and_then(|w| w.get(l)).cloned().flatten();
-                        let editable = !matches!(view.key.source, Source::Commit(_));
+                        let editable = !view.read_only;
                         paint_line(ui, rect, line, selected, word, text_x, editable);
                         let hovered = ui.rect_contains_pointer(rect) && ui.is_rect_visible(rect);
                         let selectable = line.is_change() && editable;
@@ -336,6 +499,9 @@ fn hunk_row(
         color::TEXT_FAINT,
     );
 
+    if view.read_only {
+        return;
+    }
     // Buttons stick to the visible right edge, not the scrolled content.
     let right = ui.clip_rect().right().min(rect.right()) - 8.0;
     let mut x = right;
@@ -394,7 +560,7 @@ fn hunk_row(
                 true,
             );
         }
-        Source::Commit(_) => {}
+        Source::Commit(_) | Source::Base(_) => {}
     }
 }
 

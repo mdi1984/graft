@@ -9,6 +9,7 @@ pub mod icons;
 pub mod main_area;
 pub mod new_worktree;
 pub mod project_tabs;
+pub mod review;
 pub mod sidebar;
 pub mod start;
 pub mod stashes;

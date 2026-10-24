@@ -1,6 +1,7 @@
 //! The application: project tabs, the start page, and everything projects
 //! share (job pool, git console, toasts, remembered state).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -11,7 +12,7 @@ use graft_core::repo::{self, Location, Progress};
 use graft_core::{CancelToken, Console, same_path};
 use serde::{Deserialize, Serialize};
 
-use crate::project::{Action, Project};
+use crate::project::{Action, Project, ReviewState};
 use crate::theme::color;
 use crate::ui::console::{self as console_ui, ConsoleView, STATUS_HEIGHT};
 use crate::ui::project_tabs::{self, TabAction, TabInfo};
@@ -31,6 +32,8 @@ struct Persisted {
     recent: Vec<PathBuf>,
     clone_parent: Option<PathBuf>,
     console_open: bool,
+    /// Review marks and notes per repository root, then per worktree.
+    reviews: HashMap<PathBuf, HashMap<PathBuf, ReviewState>>,
 }
 
 #[derive(Clone, Copy)]
@@ -63,6 +66,8 @@ pub struct GraftApp {
     search: String,
     window_title: String,
     was_focused: bool,
+    /// Review state of repositories that are not open.
+    reviews: HashMap<PathBuf, HashMap<PathBuf, ReviewState>>,
 }
 
 impl GraftApp {
@@ -94,10 +99,16 @@ impl GraftApp {
                     .map(Path::to_path_buf)
             })
             .unwrap_or_else(default_clone_parent);
+        let mut reviews = persisted.reviews;
         let projects: Vec<Project> = persisted
             .open
             .iter()
-            .map(|root| Project::new(root.clone(), root.clone(), console.clone(), pool.clone()))
+            .map(|root| {
+                let mut project =
+                    Project::new(root.clone(), root.clone(), console.clone(), pool.clone());
+                project.reviews = take_reviews(&mut reviews, root);
+                project
+            })
             .collect();
         let active = persisted
             .active
@@ -120,6 +131,7 @@ impl GraftApp {
             search: String::new(),
             window_title: String::new(),
             was_focused: true,
+            reviews,
         };
         for folder in folders {
             let folder = std::path::absolute(&folder).unwrap_or(folder);
@@ -191,12 +203,14 @@ impl GraftApp {
             }
             return;
         }
-        self.projects.push(Project::new(
+        let mut project = Project::new(
             location.root,
             location.opened,
             self.console.clone(),
             self.pool.clone(),
-        ));
+        );
+        project.reviews = take_reviews(&mut self.reviews, &project.root);
+        self.projects.push(project);
         self.activate(Some(self.projects.len() - 1));
     }
 
@@ -228,7 +242,9 @@ impl GraftApp {
         if index >= self.projects.len() {
             return;
         }
-        self.projects.remove(index);
+        let mut project = self.projects.remove(index);
+        self.reviews
+            .insert(project.root.clone(), std::mem::take(&mut project.reviews));
         let fix = |slot: Option<usize>, len: usize| match slot {
             Some(i) if i == index => None,
             Some(i) if i > index => Some(i - 1),
@@ -623,12 +639,22 @@ impl eframe::App for GraftApp {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         let clone_parent = self.start.clone_parent.trim();
+        let mut reviews = self.reviews.clone();
+        for p in &self.projects {
+            reviews.insert(p.root.clone(), p.reviews.clone());
+        }
+        for worktrees in reviews.values_mut() {
+            worktrees
+                .retain(|_, s| s.base.is_some() || !s.viewed.is_empty() || !s.notes.is_empty());
+        }
+        reviews.retain(|_, worktrees| !worktrees.is_empty());
         let persisted = Persisted {
             open: self.projects.iter().map(|p| p.root.clone()).collect(),
             active: self.active,
             recent: self.recent.iter().map(|r| r.path.clone()).collect(),
             clone_parent: (!clone_parent.is_empty()).then(|| PathBuf::from(clone_parent)),
             console_open: self.console_open,
+            reviews,
         };
         eframe::set_value(storage, STORAGE_KEY, &persisted);
     }
@@ -636,6 +662,15 @@ impl eframe::App for GraftApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         color::APP_BG.to_normalized_gamma_f32()
     }
+}
+
+/// The saved review state of the repository at `root`.
+fn take_reviews(
+    reviews: &mut HashMap<PathBuf, HashMap<PathBuf, ReviewState>>,
+    root: &Path,
+) -> HashMap<PathBuf, ReviewState> {
+    let key = reviews.keys().find(|k| same_path(k, root)).cloned();
+    key.and_then(|k| reviews.remove(&k)).unwrap_or_default()
 }
 
 /// Where clones go when the user has not picked a folder yet.
