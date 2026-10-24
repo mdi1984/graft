@@ -7,6 +7,7 @@ mod launch;
 mod native;
 mod project;
 mod settings;
+mod single;
 mod theme;
 mod time;
 mod ui;
@@ -35,6 +36,11 @@ fn main() -> eframe::Result {
         folders.clear();
     }
     update::clean_up();
+    // Graft runs once: a second start hands its folders to the first.
+    let _instance = match single::claim(&folders) {
+        single::Start::First(instance) => instance,
+        single::Start::Forwarded => return Ok(()),
+    };
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -50,7 +56,13 @@ fn main() -> eframe::Result {
         "Graft",
         options,
         Box::new(|cc| {
-            let app = app::GraftApp::new(cc, folders);
+            let (forward_tx, forwarded) = crossbeam_channel::unbounded();
+            let ctx = cc.egui_ctx.clone();
+            single::listen(move |folders| {
+                let _ = forward_tx.send(folders);
+                ctx.request_repaint();
+            });
+            let app = app::GraftApp::new(cc, folders, forwarded);
             // After the app picked the theme, for the border color.
             native::style_window(cc);
             Ok(Box::new(app))
