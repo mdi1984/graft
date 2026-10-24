@@ -217,18 +217,9 @@ fn shortcuts(ui: &mut Ui, form: &mut SettingsForm) {
             }
             Some(shortcut) => {
                 form.recording = None;
-                match form.draft.keys.conflict(command, shortcut) {
-                    Some(other) => {
-                        form.key_error = Some(format!(
-                            "{} is already used for “{}”.",
-                            keys::format(shortcut),
-                            other.label()
-                        ));
-                    }
-                    None => {
-                        form.key_error = None;
-                        form.draft.keys.set(command, Some(shortcut));
-                    }
+                form.key_error = form.draft.keys.refusal(command, shortcut);
+                if form.key_error.is_none() {
+                    form.draft.keys.set(command, Some(shortcut));
                 }
             }
             None => {}
@@ -270,8 +261,12 @@ fn shortcut_row(ui: &mut Ui, form: &mut SettingsForm, command: Command) {
                 })
                 .clicked()
             {
-                form.draft.keys.set(command, command.default_shortcut());
-                form.key_error = None;
+                // The default may be in use by now, too.
+                let default = command.default_shortcut();
+                form.key_error = default.and_then(|s| form.draft.keys.refusal(command, s));
+                if form.key_error.is_none() {
+                    form.draft.keys.set(command, default);
+                }
             }
             if ui
                 .add_enabled(current.is_some(), egui::Button::new("Clear").small())

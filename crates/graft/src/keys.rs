@@ -183,6 +183,80 @@ impl Command {
     fn from_id(id: &str) -> Option<Command> {
         Command::ALL.into_iter().find(|c| c.id() == id)
     }
+
+    /// Used while typing, so a shortcut without Ctrl or Alt would only ever
+    /// type text.
+    fn while_typing(self) -> bool {
+        matches!(self, Command::Commit | Command::SaveComment)
+    }
+
+    /// Holding the keys repeats only moving around, never an action.
+    fn repeats(self) -> bool {
+        matches!(
+            self,
+            Command::NextFile | Command::PreviousFile | Command::NextTab | Command::PreviousTab
+        )
+    }
+}
+
+/// Shortcuts that can't be changed, next to the configurable ones.
+pub const FIXED: [(KeyboardShortcut, &str); 13] = [
+    (
+        KeyboardShortcut::new(Modifiers::COMMAND, Key::PageUp),
+        "Previous tab",
+    ),
+    (
+        KeyboardShortcut::new(Modifiers::COMMAND, Key::PageDown),
+        "Next tab",
+    ),
+    (
+        KeyboardShortcut::new(Modifiers::COMMAND, Key::Num1),
+        "Go to tab 1",
+    ),
+    (
+        KeyboardShortcut::new(Modifiers::COMMAND, Key::Num2),
+        "Go to tab 2",
+    ),
+    (
+        KeyboardShortcut::new(Modifiers::COMMAND, Key::Num3),
+        "Go to tab 3",
+    ),
+    (
+        KeyboardShortcut::new(Modifiers::COMMAND, Key::Num4),
+        "Go to tab 4",
+    ),
+    (
+        KeyboardShortcut::new(Modifiers::COMMAND, Key::Num5),
+        "Go to tab 5",
+    ),
+    (
+        KeyboardShortcut::new(Modifiers::COMMAND, Key::Num6),
+        "Go to tab 6",
+    ),
+    (
+        KeyboardShortcut::new(Modifiers::COMMAND, Key::Num7),
+        "Go to tab 7",
+    ),
+    (
+        KeyboardShortcut::new(Modifiers::COMMAND, Key::Num8),
+        "Go to tab 8",
+    ),
+    (
+        KeyboardShortcut::new(Modifiers::COMMAND, Key::Num9),
+        "Go to tab 9",
+    ),
+    (KeyboardShortcut::new(Modifiers::COMMAND, Key::R), "Refresh"),
+    (
+        KeyboardShortcut::new(Modifiers::COMMAND, Key::Backtick),
+        "Show or hide the git console",
+    ),
+];
+
+/// Was the fixed shortcut `shortcut` pressed (see [`FIXED`])? Same rules as
+/// [`Keymap::pressed`].
+pub fn fixed_pressed(ctx: &egui::Context, shortcut: KeyboardShortcut) -> bool {
+    ctx.memory(|m| m.top_modal_layer()).is_none()
+        && ctx.input_mut(|i| consume_exact(i, shortcut, false))
 }
 
 /// The shortcuts in use: the defaults with the user's changes on top.
@@ -240,18 +314,43 @@ impl Keymap {
         }
     }
 
-    /// Another action whose shortcut would clash with `shortcut` for `command`.
-    pub fn conflict(&self, command: Command, shortcut: KeyboardShortcut) -> Option<Command> {
-        Command::ALL.into_iter().find(|other| {
+    /// The action, configurable or fixed, whose shortcut would clash with
+    /// `shortcut` for `command`.
+    pub fn conflict(&self, command: Command, shortcut: KeyboardShortcut) -> Option<&'static str> {
+        let configurable = Command::ALL.into_iter().find(|other| {
             *other != command
                 && other.scope().overlaps(command.scope())
                 && self.get(*other) == Some(shortcut)
+        });
+        configurable.map(Command::label).or_else(|| {
+            FIXED
+                .iter()
+                .find(|(fixed, _)| *fixed == shortcut)
+                .map(|(_, label)| *label)
+        })
+    }
+
+    /// Why `shortcut` can't be `command`'s, if it can't.
+    pub fn refusal(&self, command: Command, shortcut: KeyboardShortcut) -> Option<String> {
+        let m = shortcut.modifiers;
+        if command.while_typing() && !(m.command || m.ctrl || m.alt) {
+            return Some(format!(
+                "“{}” is used while typing, so its shortcut needs Ctrl or Alt.",
+                command.label()
+            ));
+        }
+        self.conflict(command, shortcut).map(|other| {
+            format!(
+                "{} is already used for “{other}”. Change that first.",
+                format(shortcut)
+            )
         })
     }
 
     /// Was `command`'s shortcut pressed? Consumes the key press. Nothing
-    /// fires behind an open dialog, and shortcuts without Ctrl or Alt never
-    /// fire while a text field has the keyboard.
+    /// fires behind an open dialog. Shortcuts without Ctrl or Alt (except
+    /// F1, F2, …) never fire while a text field has the keyboard, and Space
+    /// and Enter go to a button that has it.
     pub fn pressed(&self, ctx: &egui::Context, command: Command) -> bool {
         let Some(shortcut) = self.get(command) else {
             return false;
@@ -260,10 +359,16 @@ impl Keymap {
             return false;
         }
         let m = shortcut.modifiers;
-        if !(m.command || m.ctrl || m.alt) && ctx.text_edit_focused() {
-            return false;
+        if !(m.command || m.ctrl || m.alt) {
+            let key = shortcut.logical_key;
+            if ctx.text_edit_focused() && !is_function_key(key) {
+                return false;
+            }
+            if matches!(key, Key::Space | Key::Enter) && ctx.memory(|m| m.focused()).is_some() {
+                return false;
+            }
         }
-        ctx.input_mut(|i| consume_exact(i, shortcut))
+        ctx.input_mut(|i| consume_exact(i, shortcut, command.repeats()))
     }
 
     /// `text` with the shortcut, for a tooltip: "Stage all  (Ctrl+S)".
@@ -287,15 +392,23 @@ impl<'de> serde::Deserialize<'de> for Keymap {
     }
 }
 
+/// F1 to F35.
+fn is_function_key(key: Key) -> bool {
+    let name = key.name();
+    name.len() > 1 && name.starts_with('F') && name[1..].bytes().all(|b| b.is_ascii_digit())
+}
+
 /// Like egui's `consume_shortcut`, but Shift must match too: Ctrl+S must not
-/// fire on Ctrl+Shift+S.
-fn consume_exact(input: &mut InputState, shortcut: KeyboardShortcut) -> bool {
+/// fire on Ctrl+Shift+S. Held keys count only if `repeat`.
+fn consume_exact(input: &mut InputState, shortcut: KeyboardShortcut, repeat: bool) -> bool {
     let mut hit = false;
     input.events.retain(|event| {
         let matches = matches!(
             event,
-            Event::Key { key, pressed: true, modifiers, .. }
-                if *key == shortcut.logical_key && modifiers.matches_exact(shortcut.modifiers)
+            Event::Key { key, pressed: true, modifiers, repeat: held, .. }
+                if *key == shortcut.logical_key
+                    && modifiers.matches_exact(shortcut.modifiers)
+                    && (repeat || !held)
         );
         if matches && !hit {
             hit = true;
@@ -417,11 +530,27 @@ mod tests {
         }
         // Commit and saving a comment share Ctrl+Enter in different places.
         assert_eq!(keys.get(Command::Commit), keys.get(Command::SaveComment));
-        // A general shortcut clashes everywhere.
+        // A general shortcut clashes everywhere, fixed ones too.
         assert_eq!(
             keys.conflict(Command::StageAll, ctrl(Key::K).unwrap()),
-            Some(Command::Search)
+            Some("Search")
         );
+        assert_eq!(
+            keys.conflict(Command::Commit, ctrl(Key::R).unwrap()),
+            Some("Refresh")
+        );
+        assert_eq!(
+            keys.conflict(Command::Search, ctrl(Key::Num1).unwrap()),
+            Some("Go to tab 1")
+        );
+        for (shortcut, label) in FIXED {
+            assert!(
+                Command::ALL
+                    .iter()
+                    .all(|c| c.default_shortcut() != Some(shortcut)),
+                "{label}"
+            );
+        }
     }
 
     #[test]
@@ -446,8 +575,56 @@ mod tests {
         let keys = Keymap::default();
         assert_eq!(
             keys.conflict(Command::StageAll, shortcut),
-            Some(Command::UnstageAll)
+            Some(Command::UnstageAll.label())
         );
+    }
+
+    #[test]
+    fn shortcuts_that_could_never_fire_are_refused() {
+        let keys = Keymap::default();
+        let enter = plain(Key::Enter).unwrap();
+        assert!(keys.refusal(Command::SaveComment, enter).is_some());
+        assert!(
+            keys.refusal(Command::Commit, plain(Key::C).unwrap())
+                .is_some()
+        );
+        assert_eq!(keys.refusal(Command::Commit, ctrl(Key::M).unwrap()), None);
+        assert_eq!(
+            keys.refusal(Command::StageAll, plain(Key::A).unwrap()),
+            None
+        );
+        assert_eq!(
+            keys.refusal(Command::Refresh, ctrl(Key::S).unwrap())
+                .unwrap(),
+            "Ctrl+S is already used for “Stage all”. Change that first."
+        );
+    }
+
+    #[test]
+    fn held_keys_repeat_only_moving_around() {
+        let press = |key, repeat| Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat,
+            modifiers: Modifiers::NONE,
+        };
+        let mut input = InputState::default();
+        input.events = vec![press(Key::Space, true), press(Key::ArrowDown, true)];
+        assert!(!consume_exact(
+            &mut input,
+            plain(Key::Space).unwrap(),
+            false
+        ));
+        assert!(consume_exact(
+            &mut input,
+            plain(Key::ArrowDown).unwrap(),
+            true
+        ));
+        input.events = vec![press(Key::Space, false)];
+        assert!(consume_exact(&mut input, plain(Key::Space).unwrap(), false));
+        assert!(is_function_key(Key::F5) && is_function_key(Key::F12));
+        assert!(!is_function_key(Key::F) && !is_function_key(Key::Space));
     }
 
     #[test]

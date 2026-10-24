@@ -62,6 +62,15 @@ fn keyboard(ui: &Ui, project: &Project, status: &WorktreeStatus, actions: &mut V
     let ctx = ui.ctx();
     // Top to bottom as listed; `Some(true)` can be staged, `Some(false)`
     // unstaged.
+    // Nothing to do on the many frames without a key press.
+    let any_key = ui.input(|i| {
+        i.events
+            .iter()
+            .any(|e| matches!(e, egui::Event::Key { pressed: true, .. }))
+    });
+    if !any_key {
+        return;
+    }
     let rows: Vec<(FileKey, Option<bool>)> = status
         .conflicted()
         .map(|e| (FileKey::of(e, false), None))
@@ -319,8 +328,11 @@ fn file_row(
         } else {
             "Unstage"
         };
-        let tip = keys.tip(label, Command::StageFile);
-        if b.on_hover_text(tip).clicked() {
+        // Built only while hovered: there is one per row.
+        let tip = |ui: &mut Ui| {
+            ui.label(keys.tip(label, Command::StageFile));
+        };
+        if b.on_hover_ui(tip).clicked() {
             button_clicked = true;
             toggle(actions);
         }

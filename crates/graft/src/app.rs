@@ -6,13 +6,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::{Receiver, Sender};
-use egui::{CentralPanel, Frame, Key, Margin, Modifiers, Panel};
+use egui::{CentralPanel, Frame, Key, KeyboardShortcut, Margin, Modifiers, Panel};
 use graft_core::jobs::{JobPool, Waker};
 use graft_core::repo::{self, Location, Progress};
 use graft_core::{CancelToken, Console, same_path};
 use serde::{Deserialize, Serialize};
 
-use crate::keys::Command;
+use crate::keys::{self, Command};
 use crate::project::{Action, Project, ReviewState, SlashedBranch};
 use crate::settings::Settings;
 use crate::theme::color;
@@ -521,11 +521,8 @@ impl GraftApp {
         let ctrl = Modifiers::COMMAND;
         let keys = self.settings.keys.clone();
         let pressed = |command| keys.pressed(ctx, command);
-        // Fixed extras next to the configurable shortcuts.
-        let fixed = |mods, key| {
-            ctx.memory(|m| m.top_modal_layer()).is_none()
-                && ctx.input_mut(|i| i.consume_key(mods, key))
-        };
+        // Fixed extras next to the configurable shortcuts (keys::FIXED).
+        let fixed = |mods, key| keys::fixed_pressed(ctx, KeyboardShortcut::new(mods, key));
 
         if pressed(Command::Settings) {
             self.open_settings();
