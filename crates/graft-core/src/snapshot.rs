@@ -35,6 +35,7 @@ pub fn load(git: &Git) -> Result<RepoSnapshot> {
         tags: refs.tags,
         remotes: load_remotes(git)?,
         stash_count: load_stash_count(git)?,
+        preview: crate::preview::active(git.cwd()),
     })
 }
 

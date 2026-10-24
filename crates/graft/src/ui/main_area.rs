@@ -16,6 +16,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
     }
     let worktree = project.worktree().cloned();
     let worktree = worktree.as_ref();
+    preview_banner(ui, project, actions);
     match project.nav.tab {
         Tab::Workspace => match project.nav.view {
             WorkspaceView::FileStatus => {
@@ -42,6 +43,63 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
             stashes::show(ui, project, actions);
         }
     }
+}
+
+/// The strip across the top while main shows another worktree.
+fn preview_banner(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
+    let Some(snap) = &project.snapshot else {
+        return;
+    };
+    let Some(preview) = &snap.preview else { return };
+    let source = snap
+        .worktrees
+        .iter()
+        .find(|wt| graft_core::same_path(&wt.path, &preview.source));
+    let name = source.map_or_else(|| preview.source.display().to_string(), |wt| wt.label());
+    let back = match &preview.restore {
+        graft_core::preview::Restore::Branch(b) => b.clone(),
+        graft_core::preview::Restore::Detached(id) => graft_core::short(id),
+    };
+    let busy = project.is_operating();
+    Panel::top("preview-banner")
+        .frame(
+            Frame::new()
+                .fill(color::AHEAD_BG)
+                .inner_margin(Margin::symmetric(14, 8))
+                .stroke(egui::Stroke::new(1.0, color::AHEAD_FG.gamma_multiply(0.4))),
+        )
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Preview in main")
+                        .font(theme::semibold(theme::BODY_SIZE))
+                        .color(color::AHEAD_FG),
+                );
+                ui.label(
+                    egui::RichText::new(format!(
+                        "The main worktree shows {name} at {}, with its uncommitted changes.",
+                        graft_core::short(&preview.head)
+                    ))
+                    .color(color::TEXT_MID),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if button(ui, "Restore main", ButtonKind::Primary, !busy)
+                        .on_hover_text(format!(
+                            "Go back to {back}. Changes made in main during the preview are discarded."
+                        ))
+                        .clicked()
+                    {
+                        actions.push(Action::RestoreMain);
+                    }
+                    if button(ui, "Update", ButtonKind::Secondary, !busy && source.is_some())
+                        .on_hover_text(format!("Show the current state of {name} again"))
+                        .clicked()
+                    {
+                        actions.push(Action::UpdatePreview);
+                    }
+                });
+            });
+        });
 }
 
 /// Title, branch chip and worktree path.

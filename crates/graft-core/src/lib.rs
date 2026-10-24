@@ -14,6 +14,7 @@ pub mod history;
 pub mod jobs;
 pub mod model;
 pub mod ops;
+pub mod preview;
 pub mod refs;
 pub mod remote;
 pub mod repo;

@@ -50,7 +50,7 @@ pub struct InProgress {
 
 /// The git dir of a worktree: `.git` itself, or what a linked worktree's
 /// `.git` file points at.
-fn git_dir(worktree: &Path) -> Option<PathBuf> {
+pub(crate) fn git_dir(worktree: &Path) -> Option<PathBuf> {
     let dot = worktree.join(".git");
     if dot.is_dir() {
         return Some(dot);

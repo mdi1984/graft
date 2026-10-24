@@ -170,6 +170,30 @@ fn header(
             {
                 actions.push(Action::OpenInIde(wt.path.clone()));
             }
+            let previewing = snap.preview.as_ref();
+            let showing_this =
+                previewing.is_some_and(|p| graft_core::same_path(&p.source, &wt.path));
+            let can_preview = !wt.is_main && (previewing.is_none() || showing_this) && !busy;
+            let label = if showing_this {
+                "Update preview"
+            } else {
+                "Preview in main"
+            };
+            if button(ui, label, ButtonKind::Secondary, can_preview)
+                .on_hover_text(if previewing.is_some() && !showing_this {
+                    "Main already shows another preview. Restore main first."
+                } else {
+                    "Check out this worktree's state (uncommitted changes included) in the \
+                     main worktree, e.g. to run it from there"
+                })
+                .clicked()
+            {
+                actions.push(if showing_this {
+                    Action::UpdatePreview
+                } else {
+                    Action::PreviewInMain(wt.path.clone())
+                });
+            }
             let total = review.files.len();
             ui.label(
                 RichText::new(format!("{viewed} of {total} viewed"))
