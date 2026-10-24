@@ -12,8 +12,14 @@ use super::widgets::{ButtonKind, button, empty_state, spinner};
 use crate::project::{Action, ConflictView, Project};
 use crate::theme::{self, RADIUS, color};
 
-const OURS: Color32 = Color32::from_rgb(0x8c, 0xc2, 0xff);
-const THEIRS: Color32 = Color32::from_rgb(0xd6, 0xa3, 0xff);
+fn ours_color() -> Color32 {
+    color::ahead_fg()
+}
+
+fn theirs_color() -> Color32 {
+    color::lanes()[3]
+}
+
 /// Lines of clean context shown around each conflict.
 const CONTEXT: usize = 3;
 
@@ -39,18 +45,18 @@ pub fn banner(ui: &mut Ui, project: &Project, wt: &Worktree, actions: &mut Vec<A
     Panel::top("in-progress-banner")
         .frame(
             Frame::new()
-                .fill(color::DIRTY_BG)
+                .fill(color::dirty_bg())
                 .inner_margin(Margin::symmetric(14, 8))
-                .stroke(Stroke::new(1.0, color::SLASH_BORDER)),
+                .stroke(Stroke::new(1.0, color::slash_border())),
         )
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(format!("{} in progress", kind.noun()))
                         .font(theme::semibold(theme::BODY_SIZE))
-                        .color(color::DIRTY_FG),
+                        .color(color::dirty_fg()),
                 );
-                ui.label(RichText::new(title).color(color::TEXT_MID));
+                ui.label(RichText::new(title).color(color::text_mid()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let can_continue = left == 0 && !busy;
                     let r = button(ui, "Continue", ButtonKind::Primary, can_continue);
@@ -77,9 +83,9 @@ pub fn banner(ui: &mut Ui, project: &Project, wt: &Worktree, actions: &mut Vec<A
                         n => format!("{n} files with conflicts"),
                     };
                     ui.label(RichText::new(text).color(if left == 0 {
-                        color::ADDED
+                        color::added()
                     } else {
-                        color::REMOVED
+                        color::removed()
                     }));
                 });
             });
@@ -99,7 +105,7 @@ pub fn resolver(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
     let file = match &view.file {
         None => {
             let rect = ui.available_rect_before_wrap();
-            spinner(ui, rect.center(), 9.0, color::TEXT_WEAK);
+            spinner(ui, rect.center(), 9.0, color::text_weak());
             return;
         }
         Some(Err(e)) => {
@@ -123,7 +129,7 @@ pub fn resolver(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
         .size_range(220.0..=(width * 0.6).max(240.0))
         .frame(
             Frame::new()
-                .fill(color::SIDEBAR_BG)
+                .fill(color::sidebar_bg())
                 .inner_margin(Margin::symmetric(12, 10)),
         )
         .show(ui, |ui| result_panel(ui, view, &file));
@@ -150,7 +156,7 @@ fn header(
     Panel::top("conflict-header")
         .frame(
             Frame::new()
-                .fill(color::BAR_BG)
+                .fill(color::bar_bg())
                 .inner_margin(Margin::symmetric(12, 6)),
         )
         .show(ui, |ui| {
@@ -158,7 +164,7 @@ fn header(
                 ui.label(
                     RichText::new(&file.path)
                         .font(theme::semibold(theme::BODY_SIZE))
-                        .color(color::TEXT),
+                        .color(color::text()),
                 );
                 let total = view.resolutions.len();
                 if total > 0 {
@@ -166,9 +172,9 @@ fn header(
                     ui.label(
                         RichText::new(format!("{done} of {total} conflicts resolved"))
                             .color(if done == total {
-                                color::ADDED
+                                color::added()
                             } else {
-                                color::TEXT_WEAK
+                                color::text_weak()
                             })
                             .size(theme::SMALL_SIZE),
                     );
@@ -251,10 +257,10 @@ fn whole_file(
         ui.label(
             RichText::new("Whole-file conflict")
                 .font(theme::semibold(15.0))
-                .color(color::TEXT_MID),
+                .color(color::text_mid()),
         );
         ui.add_space(4.0);
-        ui.label(RichText::new(explanation).color(color::TEXT_WEAK));
+        ui.label(RichText::new(explanation).color(color::text_weak()));
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             let label = |name: &str, side: &Option<_>| match side {
@@ -325,13 +331,13 @@ fn cards(
         index += 1;
         let resolution = view.resolutions[i].clone();
         Frame::new()
-            .fill(color::SIDEBAR_BG)
+            .fill(color::sidebar_bg())
             .stroke(Stroke::new(
                 1.0,
                 if resolution.is_some() {
-                    color::ACCENT.gamma_multiply(0.45)
+                    color::accent().gamma_multiply(0.45)
                 } else {
-                    color::BORDER
+                    color::border()
                 },
             ))
             .corner_radius(RADIUS)
@@ -342,44 +348,44 @@ fn cards(
                     ui.label(
                         RichText::new(format!("Conflict {} of {total}", i + 1))
                             .font(theme::semibold(theme::BODY_SIZE))
-                            .color(color::TEXT),
+                            .color(color::text()),
                     );
                     ui.label(
                         RichText::new(format!("line {line}"))
-                            .color(color::TEXT_FAINT)
+                            .color(color::text_faint())
                             .size(theme::SMALL_SIZE),
                     );
                     if let Some(r) = &resolution {
                         ui.label(
                             RichText::new(format!("✓ {}", describe(r, ours_name, theirs_name)))
-                                .color(color::ADDED)
+                                .color(color::added())
                                 .size(theme::SMALL_SIZE),
                         );
                     }
                 });
                 if !before.is_empty() {
-                    code(ui, &before, color::TEXT_FAINT);
+                    code(ui, &before, color::text_faint());
                 }
                 let columns = if base.is_empty() { 2 } else { 3 };
                 // Side by side when each column has room for a line of code,
                 // stacked otherwise.
                 if ui.available_width() < columns as f32 * 300.0 {
-                    side(ui, ours_name, ours, OURS);
+                    side(ui, ours_name, ours, ours_color());
                     if columns == 3 {
-                        side(ui, "Base", base, color::TEXT_FAINT);
+                        side(ui, "Base", base, color::text_faint());
                     }
-                    side(ui, theirs_name, theirs, THEIRS);
+                    side(ui, theirs_name, theirs, theirs_color());
                 } else {
                     ui.columns(columns, |cols| {
-                        side(&mut cols[0], ours_name, ours, OURS);
+                        side(&mut cols[0], ours_name, ours, ours_color());
                         if columns == 3 {
-                            side(&mut cols[1], "Base", base, color::TEXT_FAINT);
+                            side(&mut cols[1], "Base", base, color::text_faint());
                         }
-                        side(&mut cols[columns - 1], theirs_name, theirs, THEIRS);
+                        side(&mut cols[columns - 1], theirs_name, theirs, theirs_color());
                     });
                 }
                 if !after.is_empty() {
-                    code(ui, &after, color::TEXT_FAINT);
+                    code(ui, &after, color::text_faint());
                 }
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
@@ -473,12 +479,12 @@ fn side(ui: &mut Ui, name: &str, text: &[u8], accent: Color32) {
             if text.is_empty() {
                 ui.label(
                     RichText::new("(nothing)")
-                        .color(color::TEXT_FAINT)
+                        .color(color::text_faint())
                         .italics()
                         .font(theme::mono()),
                 );
             } else {
-                code(ui, &String::from_utf8_lossy(text), color::TEXT);
+                code(ui, &String::from_utf8_lossy(text), color::text());
             }
         });
 }
@@ -505,14 +511,14 @@ fn result_panel(ui: &mut Ui, view: &ConflictView, file: &ConflictFile) {
     ui.label(
         RichText::new("RESULT")
             .font(theme::semibold(theme::SMALL_SIZE))
-            .color(color::TEXT_FAINT),
+            .color(color::text_faint()),
     );
     ui.add_space(4.0);
     let resolutions = view.effective();
     let mut job = LayoutJob::default();
     let plain = TextFormat {
         font_id: theme::mono(),
-        color: color::TEXT_WEAK,
+        color: color::text_weak(),
         ..Default::default()
     };
     let mut index = 0;
@@ -535,8 +541,8 @@ fn result_panel(ui: &mut Ui, view: &ConflictView, file: &ConflictFile) {
                             &String::from_utf8_lossy(&bytes),
                             0.0,
                             TextFormat {
-                                color: color::TEXT,
-                                background: color::ACCENT.gamma_multiply(0.12),
+                                color: color::text(),
+                                background: color::accent().gamma_multiply(0.12),
                                 ..plain.clone()
                             },
                         );
@@ -545,8 +551,8 @@ fn result_panel(ui: &mut Ui, view: &ConflictView, file: &ConflictFile) {
                         &format!("⟨ conflict {index} not resolved yet ⟩\n"),
                         0.0,
                         TextFormat {
-                            color: color::REMOVED,
-                            background: color::REMOVED.gamma_multiply(0.12),
+                            color: color::removed(),
+                            background: color::removed().gamma_multiply(0.12),
                             ..plain.clone()
                         },
                     ),

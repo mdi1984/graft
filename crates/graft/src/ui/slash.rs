@@ -23,12 +23,12 @@ pub fn show(
         ui.label(
             RichText::new("Slash")
                 .font(theme::semibold(15.0))
-                .color(color::TEXT),
+                .color(color::text()),
         );
         wrapped(
             ui,
             "Clean up branches and worktrees you are done with. Nothing is deleted until you confirm.",
-            color::TEXT_WEAK,
+            color::text_weak(),
         );
         ui.add_space(4.0);
 
@@ -37,9 +37,9 @@ pub fn show(
                 ui.horizontal(|ui| {
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-                    spinner(ui, rect.center(), 5.0, color::TEXT_WEAK);
+                    spinner(ui, rect.center(), 5.0, color::text_weak());
                     let line = progress.unwrap_or_else(|| "Fetching and scanning…".to_owned());
-                    ui.label(RichText::new(line).color(color::TEXT_WEAK));
+                    ui.label(RichText::new(line).color(color::text_weak()));
                 });
                 ui.add_space(8.0);
                 footer(ui, |ui| {
@@ -49,7 +49,7 @@ pub fn show(
                 });
             }
             Some(Err(error)) => {
-                wrapped(ui, &format!("Scanning failed: {error}"), color::REMOVED);
+                wrapped(ui, &format!("Scanning failed: {error}"), color::removed());
                 ui.add_space(8.0);
                 footer(ui, |ui| {
                     if button(ui, "Close", ButtonKind::Secondary, true).clicked() {
@@ -78,7 +78,7 @@ fn plan_ui(
         wrapped(
             ui,
             &format!("Could not fetch, so this uses what was fetched before. {first}"),
-            color::DIRTY_FG,
+            color::dirty_fg(),
         );
     }
 
@@ -88,7 +88,7 @@ fn plan_ui(
         .show(ui, |ui| {
             if plan.candidates.is_empty() {
                 ui.add_space(4.0);
-                ui.label(RichText::new("Nothing to clean up.").color(color::TEXT));
+                ui.label(RichText::new("Nothing to clean up.").color(color::text()));
             }
             let sections = [
                 (
@@ -126,13 +126,13 @@ fn plan_ui(
                 ui.add_space(6.0);
                 ui.label(
                     RichText::new(title.to_uppercase())
-                        .color(color::TEXT_FAINT)
+                        .color(color::text_faint())
                         .size(theme::SMALL_SIZE),
                 );
                 let detail_color = if reason == Reason::NeverPushed {
-                    color::DIRTY_FG
+                    color::dirty_fg()
                 } else {
-                    color::TEXT_FAINT
+                    color::text_faint()
                 };
                 small(ui, detail, detail_color);
                 for (i, candidate) in rows {
@@ -143,14 +143,14 @@ fn plan_ui(
             if !plan.kept.is_empty() {
                 ui.add_space(6.0);
                 egui::CollapsingHeader::new(
-                    RichText::new(format!("Kept ({})", plan.kept.len())).color(color::TEXT_MID),
+                    RichText::new(format!("Kept ({})", plan.kept.len())).color(color::text_mid()),
                 )
                 .id_salt("slash-kept")
                 .show(ui, |ui| {
                     for (name, why) in &plan.kept {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(name).font(theme::mono()).color(color::TEXT));
-                            small(ui, why, color::TEXT_FAINT);
+                            ui.label(RichText::new(name).font(theme::mono()).color(color::text()));
+                            small(ui, why, color::text_faint());
                         });
                     }
                 });
@@ -159,7 +159,7 @@ fn plan_ui(
             if !slashed.is_empty() {
                 egui::CollapsingHeader::new(
                     RichText::new(format!("Recently slashed ({})", slashed.len()))
-                        .color(color::TEXT_MID),
+                        .color(color::text_mid()),
                 )
                 .id_salt("slash-recent")
                 .show(ui, |ui| recent_ui(ui, slashed, view.running, actions));
@@ -168,7 +168,7 @@ fn plan_ui(
 
     if let Some(outcome) = &view.outcome {
         for error in &outcome.errors {
-            wrapped(ui, error, color::REMOVED);
+            wrapped(ui, error, color::removed());
         }
     }
 
@@ -187,8 +187,8 @@ fn plan_ui(
         }
         if view.running {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-            spinner(ui, rect.center(), 5.0, color::TEXT_WEAK);
-            ui.label(RichText::new("Slashing…").color(color::TEXT_WEAK));
+            spinner(ui, rect.center(), 5.0, color::text_weak());
+            ui.label(RichText::new("Slashing…").color(color::text_weak()));
         }
     });
 }
@@ -210,7 +210,7 @@ fn candidate_row(
         (None, None) => return,
     };
     ui.add_enabled_ui(!view.running, |ui| {
-        let text = RichText::new(name).font(theme::mono()).color(color::TEXT);
+        let text = RichText::new(name).font(theme::mono()).color(color::text());
         if ui.checkbox(&mut on, text).changed() {
             actions.push(Action::ToggleSlashItem(index));
         }
@@ -224,13 +224,13 @@ fn candidate_row(
         ui.horizontal(|ui| {
             ui.add_space(24.0);
             ui.spacing_mut().item_spacing.x = 0.0;
-            small(ui, prefix, color::TEXT_WEAK);
+            small(ui, prefix, color::text_weak());
             let full = path.display().to_string();
             let galley = elided_path(
                 ui,
                 &full,
                 theme::small(),
-                color::TEXT_WEAK,
+                color::text_weak(),
                 ui.available_width(),
             );
             ui.label(galley).on_hover_text(full);
@@ -245,13 +245,13 @@ fn recent_ui(ui: &mut Ui, slashed: &[SlashedBranch], running: bool, actions: &mu
             ui.label(
                 RichText::new(&entry.branch)
                     .font(theme::mono())
-                    .color(color::TEXT),
+                    .color(color::text()),
             );
             let sha: String = entry.target.chars().take(8).collect();
             small(
                 ui,
                 &format!("{sha} · {}", crate::time::relative(entry.at, now)),
-                color::TEXT_FAINT,
+                color::text_faint(),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if button(ui, "Restore", ButtonKind::Secondary, !running).clicked() {

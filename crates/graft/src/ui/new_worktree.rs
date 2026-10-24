@@ -22,7 +22,7 @@ pub fn show(
         ui.label(
             RichText::new("New worktree")
                 .font(theme::semibold(15.0))
-                .color(color::TEXT),
+                .color(color::text()),
         );
         ui.add(
             egui::Label::new(
@@ -30,7 +30,7 @@ pub fn show(
                     "A second checkout of this repository in its own folder, so two \
                      branches can be worked on at the same time.",
                 )
-                .color(color::TEXT_WEAK),
+                .color(color::text_weak()),
             )
             .wrap(),
         );
@@ -104,7 +104,7 @@ pub fn show(
 
         if let Some(error) = &form.error {
             ui.add_space(2.0);
-            ui.add(egui::Label::new(RichText::new(error).color(color::REMOVED)).wrap());
+            ui.add(egui::Label::new(RichText::new(error).color(color::removed())).wrap());
         }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -121,8 +121,8 @@ pub fn show(
                 }
                 if form.creating {
                     let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-                    spinner(ui, rect.center(), 5.0, color::TEXT_WEAK);
-                    ui.label(RichText::new("Creating…").color(color::TEXT_WEAK));
+                    spinner(ui, rect.center(), 5.0, color::text_weak());
+                    ui.label(RichText::new("Creating…").color(color::text_weak()));
                 }
             });
         });
@@ -136,7 +136,7 @@ fn field_label(ui: &mut Ui, text: &str) {
     ui.add_space(2.0);
     ui.label(
         RichText::new(text)
-            .color(color::TEXT_MID)
+            .color(color::text_mid())
             .size(theme::SMALL_SIZE),
     );
 }
@@ -145,7 +145,7 @@ fn hint(ui: &mut Ui, text: &str) {
     ui.add(
         egui::Label::new(
             RichText::new(text)
-                .color(color::TEXT_FAINT)
+                .color(color::text_faint())
                 .size(theme::SMALL_SIZE),
         )
         .wrap(),

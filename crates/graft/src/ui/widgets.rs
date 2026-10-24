@@ -67,18 +67,26 @@ pub struct BadgeColors {
     pub fg: Color32,
 }
 
-pub const DIRTY: BadgeColors = BadgeColors {
-    bg: color::DIRTY_BG,
-    fg: color::DIRTY_FG,
-};
-pub const AHEAD: BadgeColors = BadgeColors {
-    bg: color::AHEAD_BG,
-    fg: color::AHEAD_FG,
-};
-pub const NEUTRAL: BadgeColors = BadgeColors {
-    bg: color::NEUTRAL_BADGE_BG,
-    fg: color::NEUTRAL_BADGE_FG,
-};
+pub fn dirty() -> BadgeColors {
+    BadgeColors {
+        bg: color::dirty_bg(),
+        fg: color::dirty_fg(),
+    }
+}
+
+pub fn ahead() -> BadgeColors {
+    BadgeColors {
+        bg: color::ahead_bg(),
+        fg: color::ahead_fg(),
+    }
+}
+
+pub fn neutral() -> BadgeColors {
+    BadgeColors {
+        bg: color::neutral_badge_bg(),
+        fg: color::neutral_badge_fg(),
+    }
+}
 
 /// A pill with a short count, e.g. a dirty-file count. Laid out but not painted.
 pub struct Badge {
@@ -131,22 +139,22 @@ pub fn paint_badges_right(painter: &Painter, right: f32, y: f32, badges: Vec<Bad
 pub fn section_heading(ui: &Ui, painter: &Painter, x: f32, y: f32, title: &str) {
     let format = TextFormat {
         font_id: theme::semibold(theme::SMALL_SIZE),
-        color: color::TEXT_WEAK,
+        color: color::text_weak(),
         extra_letter_spacing: 0.7,
         ..Default::default()
     };
     let galley = ui
         .painter()
         .layout_job(LayoutJob::single_section(title.to_owned(), format));
-    paint_galley_left(painter, x, y, galley, color::TEXT_WEAK);
+    paint_galley_left(painter, x, y, galley, color::text_weak());
 }
 
 /// Row background: selected, hovered, or nothing.
 pub fn paint_row_bg(painter: &Painter, rect: Rect, response: &Response, selected: bool) {
     let fill = if selected {
-        color::SELECTED_ROW_BG
+        color::selected_row_bg()
     } else if response.hovered() {
-        color::HOVER_ROW_BG
+        color::hover_row_bg()
     } else {
         return;
     };
@@ -173,13 +181,13 @@ pub fn tool_button(
     const HEIGHT: f32 = 30.0;
 
     let fg = match tone {
-        Tone::Normal => color::TEXT,
-        Tone::Danger => color::SLASH_FG,
+        Tone::Normal => color::text(),
+        Tone::Danger => color::slash_fg(),
     };
     let text = ui
         .painter()
         .layout_no_wrap(label.to_owned(), theme::body(), fg);
-    let badge = badge.map(|b| Badge::new(ui, b, NEUTRAL));
+    let badge = badge.map(|b| Badge::new(ui, b, neutral()));
 
     // An empty label makes an icon-only button (compact toolbar).
     let icon_gap = if label.is_empty() { 0.0 } else { GAP };
@@ -198,16 +206,16 @@ pub fn tool_button(
 
     let pressed = response.is_pointer_button_down_on();
     let (fill, border) = match (tone, response.hovered(), pressed) {
-        (Tone::Normal, _, true) => (color::CONTROL_ACTIVE_BG, color::CONTROL_BORDER),
-        (Tone::Normal, true, false) => (color::CONTROL_HOVER_BG, color::CONTROL_BORDER),
-        (Tone::Normal, false, false) => (color::CONTROL_BG, color::CONTROL_BORDER),
+        (Tone::Normal, _, true) => (color::control_active_bg(), color::control_border()),
+        (Tone::Normal, true, false) => (color::control_hover_bg(), color::control_border()),
+        (Tone::Normal, false, false) => (color::control_bg(), color::control_border()),
         (Tone::Danger, hovered, pressed) => (
             if hovered || pressed {
-                color::SLASH_HOVER_BG
+                color::slash_hover_bg()
             } else {
-                color::SLASH_BG
+                color::slash_bg()
             },
-            color::SLASH_BORDER,
+            color::slash_border(),
         ),
     };
     let painter = ui.painter();
@@ -240,7 +248,7 @@ pub fn toolbar_divider(ui: &mut Ui) {
     ui.painter().vline(
         rect.center().x,
         rect.y_range(),
-        Stroke::new(1.0, color::CONTROL_BORDER),
+        Stroke::new(1.0, color::control_border()),
     );
 }
 
@@ -250,9 +258,9 @@ pub fn tab(ui: &mut Ui, label: &str, badge: Option<Badge>, selected: bool) -> Re
     const HEIGHT: f32 = 38.0;
 
     let (font, fg) = if selected {
-        (theme::semibold(theme::BODY_SIZE), color::TEXT)
+        (theme::semibold(theme::BODY_SIZE), color::text())
     } else {
-        (theme::body(), color::TEXT_WEAK)
+        (theme::body(), color::text_weak())
     };
     let text = ui.painter().layout_no_wrap(label.to_owned(), font, fg);
     let badge_width = badge.as_ref().map_or(0.0, |b| b.width() + 6.0);
@@ -260,7 +268,7 @@ pub fn tab(ui: &mut Ui, label: &str, badge: Option<Badge>, selected: bool) -> Re
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
 
     let fg = if response.hovered() && !selected {
-        color::TEXT
+        color::text()
     } else {
         fg
     };
@@ -277,7 +285,7 @@ pub fn tab(ui: &mut Ui, label: &str, badge: Option<Badge>, selected: bool) -> Re
     if selected {
         let underline =
             Rect::from_min_max(pos2(rect.left(), rect.bottom() - 2.0), rect.right_bottom());
-        painter.rect_filled(underline, 0.0, color::ACCENT);
+        painter.rect_filled(underline, 0.0, color::accent());
     }
     response
 }
@@ -292,14 +300,14 @@ pub fn empty_state(ui: &mut Ui, title: &str, detail: &str) {
         Align2::CENTER_CENTER,
         title,
         theme::semibold(15.0),
-        color::TEXT_MID,
+        color::text_mid(),
     );
     painter.text(
         center + vec2(0.0, 12.0),
         Align2::CENTER_CENTER,
         detail,
         theme::body(),
-        color::TEXT_WEAK,
+        color::text_weak(),
     );
 }
 
@@ -331,29 +339,31 @@ pub fn button(ui: &mut Ui, label: &str, kind: ButtonKind, enabled: bool) -> Resp
     let (rect, response) = ui.allocate_exact_size(size, sense);
     let hovered = enabled && response.hovered();
     let (fill, border, fg) = match kind {
-        ButtonKind::Primary if !enabled => {
-            (color::CONTROL_BG, color::CONTROL_BORDER, color::TEXT_FAINT)
-        }
+        ButtonKind::Primary if !enabled => (
+            color::control_bg(),
+            color::control_border(),
+            color::text_faint(),
+        ),
         ButtonKind::Primary => (
             if hovered {
-                color::ACCENT_HOVER
+                color::accent_hover()
             } else {
-                color::ACCENT
+                color::accent()
             },
             Color32::TRANSPARENT,
-            color::ON_ACCENT,
+            color::on_accent(),
         ),
         ButtonKind::Secondary => (
             if hovered {
-                color::CONTROL_HOVER_BG
+                color::control_hover_bg()
             } else {
-                color::CONTROL_BG
+                color::control_bg()
             },
-            color::CONTROL_BORDER,
+            color::control_border(),
             if enabled {
-                color::TEXT
+                color::text()
             } else {
-                color::TEXT_FAINT
+                color::text_faint()
             },
         ),
     };
@@ -380,12 +390,12 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, size: f32) -> Response {
 pub fn paint_icon_button(ui: &Ui, rect: Rect, response: &Response, icon: Icon) {
     let painter = ui.painter();
     if response.hovered() {
-        painter.rect_filled(rect, 4, color::CONTROL_HOVER_BG);
+        painter.rect_filled(rect, 4, color::control_hover_bg());
     }
     let fg = if response.hovered() {
-        color::TEXT
+        color::text()
     } else {
-        color::TEXT_WEAK
+        color::text_weak()
     };
     let icon_size = (rect.width() * 0.6).min(ICON_SIZE);
     let icon_rect = Rect::from_center_size(rect.center(), vec2(icon_size, icon_size));
@@ -397,12 +407,12 @@ pub fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Res
     let id = ui.next_auto_id();
     let focused = ui.memory(|m| m.has_focus(id));
     let border = if focused {
-        color::ACCENT
+        color::accent()
     } else {
-        color::CONTROL_BORDER
+        color::control_border()
     };
     egui::Frame::new()
-        .fill(color::APP_BG)
+        .fill(color::app_bg())
         .stroke(Stroke::new(1.0, border))
         .corner_radius(RADIUS)
         .inner_margin(egui::Margin::symmetric(8, 0))
@@ -415,7 +425,7 @@ pub fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Res
                     .margin(egui::Margin::ZERO)
                     .min_size(vec2(0.0, 30.0))
                     .align(Align2::LEFT_CENTER)
-                    .hint_text(egui::RichText::new(hint).color(color::TEXT_FAINT))
+                    .hint_text(egui::RichText::new(hint).color(color::text_faint()))
                     .desired_width(f32::INFINITY),
             )
         })
@@ -468,7 +478,7 @@ pub fn spinner(ui: &Ui, center: Pos2, radius: f32, color: Color32) {
 pub fn progress_bar(ui: &mut Ui, fraction: Option<f32>, width: f32) {
     let (rect, _) = ui.allocate_exact_size(vec2(width, 4.0), Sense::hover());
     let painter = ui.painter();
-    painter.rect_filled(rect, 2, color::CONTROL_BG);
+    painter.rect_filled(rect, 2, color::control_bg());
     let fill = match fraction {
         Some(f) => Rect::from_min_size(
             rect.min,
@@ -484,7 +494,7 @@ pub fn progress_bar(ui: &mut Ui, fraction: Option<f32>, width: f32) {
             )
         }
     };
-    painter.rect_filled(fill, 2, color::ACCENT);
+    painter.rect_filled(fill, 2, color::accent());
     ui.ctx().request_repaint();
 }
 

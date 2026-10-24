@@ -27,7 +27,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
     let commits = match &view.commits {
         None => {
             let rect = ui.available_rect_before_wrap();
-            spinner(ui, rect.center(), 9.0, color::TEXT_WEAK);
+            spinner(ui, rect.center(), 9.0, color::text_weak());
             return;
         }
         Some(Err(e)) => {
@@ -49,7 +49,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
         .resizable(true)
         .default_size(360.0)
         .size_range(240.0..=640.0)
-        .frame(Frame::new().fill(color::SIDEBAR_BG))
+        .frame(Frame::new().fill(color::sidebar_bg()))
         .show(ui, |ui| commit_list(ui, view, commits, actions));
 
     let busy = project.is_operating();
@@ -58,13 +58,13 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
             Some(diff) => diff_view::body(ui, diff, busy, false, actions),
             None => {
                 let rect = ui.available_rect_before_wrap();
-                spinner(ui, rect.center(), 9.0, color::TEXT_WEAK);
+                spinner(ui, rect.center(), 9.0, color::text_weak());
             }
         },
         FileHistoryMode::Blame => match &view.blame {
             None => {
                 let rect = ui.available_rect_before_wrap();
-                spinner(ui, rect.center(), 9.0, color::TEXT_WEAK);
+                spinner(ui, rect.center(), 9.0, color::text_weak());
             }
             Some(Err(e)) => empty_state(ui, "Could not annotate the file", e),
             Some(Ok(blame)) if blame.binary => {
@@ -79,7 +79,7 @@ fn toolbar(ui: &mut Ui, view: &FileHistoryView, actions: &mut Vec<Action>) {
     Panel::top("file-history-bar")
         .frame(
             Frame::new()
-                .fill(color::APP_BG)
+                .fill(color::app_bg())
                 .inner_margin(Margin::symmetric(14, 8)),
         )
         .show(ui, |ui| {
@@ -91,7 +91,7 @@ fn toolbar(ui: &mut Ui, view: &FileHistoryView, actions: &mut Vec<Action>) {
                 ui.label(
                     RichText::new(&view.path)
                         .font(theme::mono())
-                        .color(color::TEXT),
+                        .color(color::text()),
                 );
                 if let Some(Ok(commits)) = &view.commits {
                     let n = commits.len();
@@ -101,7 +101,7 @@ fn toolbar(ui: &mut Ui, view: &FileHistoryView, actions: &mut Vec<Action>) {
                         } else {
                             format!("{n} commits")
                         })
-                        .color(color::TEXT_FAINT),
+                        .color(color::text_faint()),
                     );
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -161,8 +161,8 @@ fn commit_list(
                 );
                 let x = rect.left() + 14.0;
                 let width = rect.width() - 28.0;
-                let summary = elided(ui, &commit.summary, theme::body(), color::TEXT, width);
-                paint_galley_left(ui.painter(), x, rect.top() + 15.0, summary, color::TEXT);
+                let summary = elided(ui, &commit.summary, theme::body(), color::text(), width);
+                paint_galley_left(ui.painter(), x, rect.top() + 15.0, summary, color::text());
                 let mut meta = format!(
                     "{} · {} · {}",
                     commit.author,
@@ -172,8 +172,8 @@ fn commit_list(
                 if commit.path != view.path {
                     meta.push_str(&format!(" · as {}", commit.path));
                 }
-                let meta = elided(ui, &meta, theme::small(), color::TEXT_WEAK, width);
-                paint_galley_left(ui.painter(), x, rect.top() + 33.0, meta, color::TEXT_WEAK);
+                let meta = elided(ui, &meta, theme::small(), color::text_weak(), width);
+                paint_galley_left(ui.painter(), x, rect.top() + 33.0, meta, color::text_weak());
                 if response.clicked() {
                     actions.push(Action::SelectFileCommit(i));
                 }
@@ -197,7 +197,7 @@ fn blame_view(
     let selected_id = view.selected.and_then(|i| commits.get(i)).map(|c| c.id);
     let char_width = ui
         .painter()
-        .layout_no_wrap("0".to_owned(), theme::mono(), color::TEXT)
+        .layout_no_wrap("0".to_owned(), theme::mono(), color::text())
         .size()
         .x;
     let longest = blame
@@ -224,13 +224,13 @@ fn blame_view(
                     gutter,
                     0,
                     if this_commit {
-                        color::SELECTED_ROW_BG
+                        color::selected_row_bg()
                     } else {
-                        color::SIDEBAR_BG
+                        color::sidebar_bg()
                     },
                 );
                 if first && i > 0 {
-                    painter.hline(rect.x_range(), rect.top(), (1.0, color::BORDER));
+                    painter.hline(rect.x_range(), rect.top(), (1.0, color::border()));
                 }
                 let info = blame.commits.get(&line.commit);
                 if first && let Some(info) = info {
@@ -240,13 +240,14 @@ fn blame_view(
                         info.author,
                         crate::time::relative(info.time, now)
                     );
-                    let galley = elided(ui, &text, theme::small(), color::TEXT_WEAK, GUTTER - 16.0);
+                    let galley =
+                        elided(ui, &text, theme::small(), color::text_weak(), GUTTER - 16.0);
                     paint_galley_left(
                         painter,
                         gutter.left() + 8.0,
                         rect.center().y,
                         galley,
-                        color::TEXT_WEAK,
+                        color::text_weak(),
                     );
                 }
                 let gutter_response = ui.interact(
@@ -271,18 +272,18 @@ fn blame_view(
                 let number = ui.painter().layout_no_wrap(
                     (i + 1).to_string(),
                     theme::mono(),
-                    color::TEXT_FAINT,
+                    color::text_faint(),
                 );
                 let nx = gutter.right() + number_width - 6.0 - number.size().x;
                 ui.painter().galley(
                     pos2(nx, rect.center().y - number.size().y / 2.0),
                     number,
-                    color::TEXT_FAINT,
+                    color::text_faint(),
                 );
                 let text = ui.painter().layout_no_wrap(
                     line.text.replace('\t', "    "),
                     theme::mono(),
-                    color::TEXT,
+                    color::text(),
                 );
                 ui.painter().galley(
                     pos2(
@@ -290,7 +291,7 @@ fn blame_view(
                         rect.center().y - text.size().y / 2.0,
                     ),
                     text,
-                    color::TEXT,
+                    color::text(),
                 );
             }
         },

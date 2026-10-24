@@ -32,7 +32,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
             let in_workspace = nav.tab == Tab::Workspace;
             let dirty = current.map_or(0, Worktree::dirty);
             let dirty_badge =
-                (dirty > 0).then(|| Badge::new(ui, dirty.to_string(), widgets::DIRTY));
+                (dirty > 0).then(|| Badge::new(ui, dirty.to_string(), widgets::dirty()));
             let status_selected = in_workspace && nav.view == WorkspaceView::FileStatus;
             if nav_row(
                 ui,
@@ -91,7 +91,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
 
             if collapsible(ui, "TAGS", repo.tags.len(), false) {
                 for tag in repo.tags.iter().rev() {
-                    let response = simple_row(ui, Icon::Tag, &tag.name, color::TAG, 20.0);
+                    let response = simple_row(ui, Icon::Tag, &tag.name, color::tag(), 20.0);
                     if response.clicked() {
                         actions.push(Action::Reveal(tag.target));
                     }
@@ -133,7 +133,7 @@ fn collapsible(ui: &mut Ui, title: &str, count: usize, default_open: bool) -> bo
     let mut open = ui.data_mut(|d| *d.get_persisted_mut_or(id, default_open));
     let (rect, response) = row(ui, 22.0);
     if response.hovered() {
-        ui.painter().rect_filled(rect, 4, color::HOVER_ROW_BG);
+        ui.painter().rect_filled(rect, 4, color::hover_row_bg());
     }
     let y = rect.center().y;
     let chevron = if open {
@@ -142,17 +142,17 @@ fn collapsible(ui: &mut Ui, title: &str, count: usize, default_open: bool) -> bo
         Icon::ChevronRight
     };
     let icon_rect = Rect::from_center_size(pos2(rect.left() + 10.0, y), vec2(10.0, 10.0));
-    super::icons::paint(ui.painter(), icon_rect, chevron, color::TEXT_FAINT);
+    super::icons::paint(ui.painter(), icon_rect, chevron, color::text_faint());
     section_heading(ui, ui.painter(), rect.left() + 20.0, y, title);
     let count = ui
         .painter()
-        .layout_no_wrap(count.to_string(), theme::small(), color::TEXT_FAINT);
+        .layout_no_wrap(count.to_string(), theme::small(), color::text_faint());
     paint_galley_left(
         ui.painter(),
         rect.right() - PAD_X - count.size().x,
         y,
         count,
-        color::TEXT_FAINT,
+        color::text_faint(),
     );
     if response.clicked() {
         open = !open;
@@ -166,7 +166,7 @@ fn nav_row(ui: &mut Ui, icon: Icon, label: &str, selected: bool, badge: Option<B
     let painter = ui.painter();
     paint_row_bg(painter, rect, &response, selected);
     let y = rect.center().y;
-    paint_icon(painter, pos2(rect.left() + PAD_X, y), icon, color::TEXT);
+    paint_icon(painter, pos2(rect.left() + PAD_X, y), icon, color::text());
     let text_x = rect.left() + PAD_X + ICON_SIZE + 8.0;
     let badges_x = paint_badges_right(
         painter,
@@ -178,10 +178,10 @@ fn nav_row(ui: &mut Ui, icon: Icon, label: &str, selected: bool, badge: Option<B
         ui,
         label,
         theme::body(),
-        color::TEXT,
+        color::text(),
         badges_x - 6.0 - text_x,
     );
-    paint_galley_left(painter, text_x, y, text, color::TEXT);
+    paint_galley_left(painter, text_x, y, text, color::text());
     response
 }
 
@@ -195,11 +195,11 @@ fn worktree_row(ui: &mut Ui, wt: &Worktree, selected: bool) -> Response {
     // Green is always the main folder, orange a linked worktree (like the
     // branch dots below); the row background shows which one is selected.
     let icon_color = if wt.prunable {
-        color::TEXT_FAINT
+        color::text_faint()
     } else if wt.is_main {
-        color::ACCENT
+        color::accent()
     } else {
-        color::BRANCH_DOT_AGENT
+        color::branch_dot_agent()
     };
     paint_icon(
         painter,
@@ -210,30 +210,30 @@ fn worktree_row(ui: &mut Ui, wt: &Worktree, selected: bool) -> Response {
 
     let mut badges = Vec::new();
     if wt.dirty() > 0 {
-        badges.push(Badge::new(ui, wt.dirty().to_string(), widgets::DIRTY));
+        badges.push(Badge::new(ui, wt.dirty().to_string(), widgets::dirty()));
     }
     if wt.ahead() > 0 {
-        badges.push(Badge::new(ui, format!("↑{}", wt.ahead()), widgets::AHEAD));
+        badges.push(Badge::new(ui, format!("↑{}", wt.ahead()), widgets::ahead()));
     }
     if wt.behind() > 0 {
         badges.push(Badge::new(
             ui,
             format!("↓{}", wt.behind()),
-            widgets::NEUTRAL,
+            widgets::neutral(),
         ));
     }
     if wt.prunable {
-        badges.push(Badge::new(ui, "missing", widgets::NEUTRAL));
+        badges.push(Badge::new(ui, "missing", widgets::neutral()));
     } else if wt.locked {
-        badges.push(Badge::new(ui, "locked", widgets::NEUTRAL));
+        badges.push(Badge::new(ui, "locked", widgets::neutral()));
     }
     let badges_x = paint_badges_right(painter, rect.right() - PAD_X, top_y, badges);
 
     let text_x = rect.left() + PAD_X + ICON_SIZE + 8.0;
     let fg = if wt.prunable {
-        color::TEXT_FAINT
+        color::text_faint()
     } else {
-        color::TEXT
+        color::text()
     };
     let branch = elided(ui, &wt.label(), theme::mono(), fg, badges_x - 6.0 - text_x);
     paint_galley_left(painter, text_x, top_y, branch, fg);
@@ -246,10 +246,10 @@ fn worktree_row(ui: &mut Ui, wt: &Worktree, selected: bool) -> Response {
         ui,
         &path,
         theme::small(),
-        color::TEXT_WEAK,
+        color::text_weak(),
         rect.right() - PAD_X - text_x,
     );
-    paint_galley_left(painter, text_x, bottom_y, path, color::TEXT_WEAK);
+    paint_galley_left(painter, text_x, bottom_y, path, color::text_weak());
 
     response.on_hover_text(wt.path.display().to_string())
 }
@@ -620,13 +620,13 @@ fn branch_row(ui: &mut Ui, repo: &RepoSnapshot, branch: &Branch, head: Option<&s
     let in_worktree = checked_out.is_some_and(|wt| !wt.is_main);
     let gone = matches!(branch.upstream, Upstream::Gone { .. });
     let dot = if in_main {
-        color::ACCENT
+        color::accent()
     } else if in_worktree {
-        color::BRANCH_DOT_AGENT
+        color::branch_dot_agent()
     } else if gone {
-        color::TEXT_FAINT
+        color::text_faint()
     } else {
-        color::AHEAD_FG
+        color::ahead_fg()
     };
     painter.circle_filled(pos2(rect.left() + PAD_X + 3.0, y), 3.0, dot);
 
@@ -642,12 +642,16 @@ fn branch_row(ui: &mut Ui, repo: &RepoSnapshot, branch: &Branch, head: Option<&s
     };
     let meta = ui
         .painter()
-        .layout_no_wrap(meta, theme::small(), color::TEXT_WEAK);
+        .layout_no_wrap(meta, theme::small(), color::text_weak());
     let meta_x = rect.right() - PAD_X - meta.size().x;
-    paint_galley_left(painter, meta_x, y, meta, color::TEXT_WEAK);
+    paint_galley_left(painter, meta_x, y, meta, color::text_weak());
 
     let text_x = rect.left() + PAD_X + 14.0;
-    let fg = if in_main { color::ACCENT } else { color::TEXT };
+    let fg = if in_main {
+        color::accent()
+    } else {
+        color::text()
+    };
     let name = elided(ui, &branch.name, theme::mono(), fg, meta_x - 6.0 - text_x);
     paint_galley_left(painter, text_x, y, name, fg);
 
@@ -697,7 +701,7 @@ fn remotes(
         fetch: true,
     });
     for remote in &repo.remotes {
-        simple_row(ui, Icon::Cloud, &remote.name, color::TEXT_MID, 8.0)
+        simple_row(ui, Icon::Cloud, &remote.name, color::text_mid(), 8.0)
             .on_hover_text(&remote.fetch_url)
             .context_menu(|ui| {
                 menu_item(
@@ -745,7 +749,7 @@ fn remotes(
                 ui,
                 Icon::ChevronRight,
                 branch.branch_name(),
-                color::TEXT_WEAK,
+                color::text_weak(),
                 26.0,
             );
             if response.double_clicked() {
@@ -765,7 +769,7 @@ fn remotes(
                 .context_menu(|ui| remote_branch_menu(ui, project, repo, branch, busy, actions));
         }
     }
-    let response = simple_row(ui, Icon::Plus, "Add remote…", color::TEXT_WEAK, 8.0);
+    let response = simple_row(ui, Icon::Plus, "Add remote…", color::text_weak(), 8.0);
     if response.clicked() && !busy {
         actions.push(add);
     }
@@ -783,10 +787,10 @@ fn simple_row(ui: &mut Ui, icon: Icon, text: &str, fg: egui::Color32, indent: f3
         ui,
         text,
         theme::mono(),
-        color::TEXT,
+        color::text(),
         rect.right() - PAD_X - x,
     );
-    paint_galley_left(ui.painter(), x, y, name, color::TEXT);
+    paint_galley_left(ui.painter(), x, y, name, color::text());
     response
 }
 
@@ -794,13 +798,13 @@ fn faint_row(ui: &mut Ui, text: &str) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
     let galley = ui
         .painter()
-        .layout_no_wrap(text.to_owned(), theme::small(), color::TEXT_FAINT);
+        .layout_no_wrap(text.to_owned(), theme::small(), color::text_faint());
     paint_galley_left(
         ui.painter(),
         rect.left() + 20.0,
         rect.center().y,
         galley,
-        color::TEXT_FAINT,
+        color::text_faint(),
     );
 }
 
@@ -812,8 +816,8 @@ fn footer_row(ui: &mut Ui, title: &str, value: &str) -> Response {
     section_heading(ui, painter, rect.left() + PAD_X, y, title);
     let value = ui
         .painter()
-        .layout_no_wrap(value.to_owned(), theme::small(), color::TEXT_WEAK);
+        .layout_no_wrap(value.to_owned(), theme::small(), color::text_weak());
     let x = rect.right() - PAD_X - value.size().x;
-    paint_galley_left(painter, x, y, value, color::TEXT_WEAK);
+    paint_galley_left(painter, x, y, value, color::text_weak());
     response
 }

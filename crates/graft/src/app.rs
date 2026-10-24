@@ -82,7 +82,6 @@ pub struct GraftApp {
 impl GraftApp {
     pub fn new(cc: &eframe::CreationContext<'_>, folders: Vec<PathBuf>) -> Self {
         fonts::install(&cc.egui_ctx);
-        theme::apply(&cc.egui_ctx);
 
         let ctx = cc.egui_ctx.clone();
         let waker: Waker = Arc::new(move || ctx.request_repaint());
@@ -111,6 +110,7 @@ impl GraftApp {
         let mut reviews = persisted.reviews;
         let mut slashed = persisted.slashed;
         let settings = persisted.settings;
+        theme::apply(&cc.egui_ctx, settings.theme.preference());
         let projects: Vec<Project> = persisted
             .open
             .iter()
@@ -393,9 +393,15 @@ impl GraftApp {
             let p = &self.projects[i];
             (p.name.as_str(), p.identity.as_ref())
         });
-        match ui::settings::show(ctx, form, repo) {
+        let outcome = ui::settings::show(ctx, form, repo);
+        // The theme choice previews live; Cancel puts the saved one back.
+        let mut theme = form.draft.theme;
+        match outcome {
             settings_ui::Outcome::Open => {}
-            settings_ui::Outcome::Cancel => self.settings_form = None,
+            settings_ui::Outcome::Cancel => {
+                self.settings_form = None;
+                theme = self.settings.theme;
+            }
             settings_ui::Outcome::Save(settings, identity) => {
                 self.settings_form = None;
                 self.settings = settings;
@@ -406,6 +412,10 @@ impl GraftApp {
                     self.projects[i].apply(Action::SaveIdentity(identity));
                 }
             }
+        }
+        if ctx.options(|o| o.theme_preference) != theme.preference() {
+            ctx.set_theme(theme.preference());
+            ctx.request_repaint();
         }
     }
 
@@ -498,13 +508,13 @@ impl GraftApp {
                 egui::Id::unique("drop-overlay"),
             ));
             let rect = ctx.content_rect();
-            painter.rect_filled(rect, 0, egui::Color32::from_black_alpha(170));
+            painter.rect_filled(rect, 0, color::app_bg().gamma_multiply(0.8));
             painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 "Drop a folder to open it",
                 theme::semibold(20.0),
-                color::TEXT,
+                color::text(),
             );
         }
     }
@@ -583,7 +593,7 @@ impl GraftApp {
             ui::slash::show(ui.ctx(), view, &project.slashed, progress, &mut actions);
         }
         let project = &self.projects[index];
-        let bar = |margin| Frame::new().fill(color::BAR_BG).inner_margin(margin);
+        let bar = |margin| Frame::new().fill(color::bar_bg()).inner_margin(margin);
 
         Panel::top("toolbar")
             .frame(bar(Margin::symmetric(12, 8)))
@@ -600,14 +610,14 @@ impl GraftApp {
                 .size_range(200.0..=440.0)
                 .frame(
                     Frame::new()
-                        .fill(color::SIDEBAR_BG)
+                        .fill(color::sidebar_bg())
                         .inner_margin(Margin::symmetric(8, 12)),
                 )
                 .show(ui, |ui| ui::sidebar::show(ui, project, &mut actions));
         }
         let project = &mut self.projects[index];
         CentralPanel::no_frame()
-            .frame(Frame::new().fill(color::APP_BG))
+            .frame(Frame::new().fill(color::app_bg()))
             .show(ui, |ui| ui::main_area::show(ui, project, &mut actions));
 
         for action in actions {
@@ -623,6 +633,9 @@ impl GraftApp {
 impl eframe::App for GraftApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        if theme::sync(&ctx) {
+            crate::native::set_border(color::border());
+        }
         self.poll();
         self.shortcuts(&ctx);
         self.handle_drops(&ctx);
@@ -645,7 +658,7 @@ impl eframe::App for GraftApp {
             })
             .collect();
         let tab_action = Panel::top("project-tabs")
-            .frame(Frame::new().fill(color::TABSTRIP_BG))
+            .frame(Frame::new().fill(color::tabstrip_bg()))
             .exact_size(project_tabs::HEIGHT)
             .show_separator_line(false)
             .show(ui, |ui| project_tabs::show(ui, &infos, self.active))
@@ -659,7 +672,7 @@ impl eframe::App for GraftApp {
         let cancel = Panel::bottom("status-bar")
             .frame(
                 Frame::new()
-                    .fill(color::TABSTRIP_BG)
+                    .fill(color::tabstrip_bg())
                     .inner_margin(Margin::symmetric(8, 0)),
             )
             .exact_size(STATUS_HEIGHT)
@@ -683,7 +696,7 @@ impl eframe::App for GraftApp {
                 .size_range(100.0..=640.0)
                 .frame(
                     Frame::new()
-                        .fill(color::SIDEBAR_BG)
+                        .fill(color::sidebar_bg())
                         .inner_margin(Margin::symmetric(12, 8)),
                 )
                 .show(ui, |ui| {
@@ -695,7 +708,7 @@ impl eframe::App for GraftApp {
             Some(index) => self.project_ui(ui, index),
             None => {
                 let action = CentralPanel::no_frame()
-                    .frame(Frame::new().fill(color::APP_BG))
+                    .frame(Frame::new().fill(color::app_bg()))
                     .show(ui, |ui| self.start.show(ui, &self.recent))
                     .inner;
                 if let Some(action) = action {
@@ -738,7 +751,7 @@ impl eframe::App for GraftApp {
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        color::APP_BG.to_normalized_gamma_f32()
+        color::app_bg().to_normalized_gamma_f32()
     }
 }
 

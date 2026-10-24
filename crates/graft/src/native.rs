@@ -1,6 +1,7 @@
 //! Windows touches for Graft's own window frame: the icon in every size from
 //! the exe's icon resource, rounded corners, and a border matching the theme.
 
+use egui::Color32;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 /// Apply to the main window once it exists.
@@ -16,8 +17,19 @@ pub fn style_window(window: &impl HasWindowHandle) {
     let _ = handle;
 }
 
+/// Color the window border, e.g. after a theme switch.
+pub fn set_border(color: Color32) {
+    #[cfg(windows)]
+    win::set_border(color);
+    #[cfg(not(windows))]
+    let _ = color;
+}
+
 #[cfg(windows)]
 mod win {
+    use std::sync::atomic::{AtomicPtr, Ordering};
+
+    use egui::Color32;
     use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::Graphics::Dwm::{
         DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
@@ -31,10 +43,12 @@ mod win {
 
     /// `winresource` embeds `graft.ico` under this id (see build.rs).
     const ICON_ID: usize = 1;
-    /// `crate::theme::color::BORDER` as a COLORREF (0x00BBGGRR).
-    const BORDER: u32 = 0x00_36_2f_2a;
+
+    /// The main window, once styled.
+    static WINDOW: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
 
     pub fn style(hwnd: HWND) {
+        WINDOW.store(hwnd, Ordering::Relaxed);
         // SAFETY: plain Win32 calls on our own, live window. Failures (e.g.
         // no icon resource, or Windows 10 without these DWM attributes) only
         // leave the defaults in place.
@@ -65,7 +79,19 @@ mod win {
                 (&raw const corners).cast(),
                 size_of_val(&corners) as u32,
             );
-            let border = BORDER;
+        }
+        set_border(crate::theme::color::border());
+    }
+
+    pub fn set_border(color: Color32) {
+        let hwnd = WINDOW.load(Ordering::Relaxed);
+        if hwnd.is_null() {
+            return;
+        }
+        // A COLORREF is 0x00BBGGRR.
+        let border = u32::from_le_bytes([color.r(), color.g(), color.b(), 0]);
+        // SAFETY: as in `style`; the window lives as long as the app.
+        unsafe {
             DwmSetWindowAttribute(
                 hwnd,
                 DWMWA_BORDER_COLOR as u32,

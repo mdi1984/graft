@@ -145,7 +145,7 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Vec<Action>)
                 if *mode == ResetMode::Hard {
                     ui.label(
                         RichText::new("Uncommitted changes in this worktree will be lost.")
-                            .color(color::REMOVED),
+                            .color(color::removed()),
                     );
                 }
                 "Reset"
@@ -202,7 +202,7 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Vec<Action>)
                 }
                 let needle = filter.trim().to_lowercase();
                 egui::Frame::new()
-                    .fill(color::APP_BG)
+                    .fill(color::app_bg())
                     .corner_radius(theme::RADIUS)
                     .inner_margin(4)
                     .show(ui, |ui| {
@@ -228,7 +228,8 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Vec<Action>)
                                 }
                                 if shown == 0 {
                                     ui.label(
-                                        RichText::new("No branch matches.").color(color::TEXT_WEAK),
+                                        RichText::new("No branch matches.")
+                                            .color(color::text_weak()),
                                     );
                                 }
                             });
@@ -241,7 +242,7 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Vec<Action>)
             dialog.error = None;
         }
         if let Some(error) = &dialog.error {
-            ui.add(egui::Label::new(RichText::new(error).color(color::REMOVED)).wrap());
+            ui.add(egui::Label::new(RichText::new(error).color(color::removed())).wrap());
         }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -258,7 +259,7 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Vec<Action>)
                 if busy {
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-                    spinner(ui, rect.center(), 5.0, color::TEXT_WEAK);
+                    spinner(ui, rect.center(), 5.0, color::text_weak());
                 }
             });
         });
@@ -272,26 +273,26 @@ fn title(ui: &mut Ui, text: &str) {
     ui.label(
         RichText::new(text)
             .font(theme::semibold(15.0))
-            .color(color::TEXT),
+            .color(color::text()),
     );
 }
 
 fn note(ui: &mut Ui, text: &str) {
-    ui.add(egui::Label::new(RichText::new(text).color(color::TEXT_WEAK)).wrap());
+    ui.add(egui::Label::new(RichText::new(text).color(color::text_weak())).wrap());
 }
 
 fn field_label(ui: &mut Ui, text: &str) {
     ui.add_space(2.0);
     ui.label(
         RichText::new(text)
-            .color(color::TEXT_MID)
+            .color(color::text_mid())
             .size(theme::SMALL_SIZE),
     );
 }
 
 fn choice(ui: &mut Ui, value: &mut ResetMode, option: ResetMode, label: &str, detail: &str) {
     ui.horizontal(|ui| {
-        ui.radio_value(value, option, RichText::new(label).color(color::TEXT));
-        ui.label(RichText::new(detail).color(color::TEXT_WEAK));
+        ui.radio_value(value, option, RichText::new(label).color(color::text()));
+        ui.label(RichText::new(detail).color(color::text_weak()));
     });
 }

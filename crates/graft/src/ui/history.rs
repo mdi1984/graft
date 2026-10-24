@@ -38,7 +38,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
         .size_range(260.0..=760.0)
         .frame(
             Frame::new()
-                .fill(color::SIDEBAR_BG)
+                .fill(color::sidebar_bg())
                 .inner_margin(Margin::symmetric(16, 14)),
         )
         .show(ui, |ui| details_pane(ui, project, actions));
@@ -63,7 +63,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
         let height = ui.available_height();
         Panel::bottom("history-diff")
             .exact_size((height * 0.55).max(160.0))
-            .frame(Frame::new().fill(color::APP_BG))
+            .frame(Frame::new().fill(color::app_bg()))
             .show(ui, |ui| {
                 diff_view::show_view(ui, view, project.is_operating(), actions)
             });
@@ -73,13 +73,13 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
 
 fn loading(ui: &mut Ui, text: &str) {
     let rect = ui.available_rect_before_wrap();
-    spinner(ui, rect.center() - vec2(0.0, 16.0), 9.0, color::TEXT_WEAK);
+    spinner(ui, rect.center() - vec2(0.0, 16.0), 9.0, color::text_weak());
     ui.painter().text(
         rect.center() + vec2(0.0, 10.0),
         Align2::CENTER_CENTER,
         text,
         theme::body(),
-        color::TEXT_WEAK,
+        color::text_weak(),
     );
 }
 
@@ -282,11 +282,11 @@ fn header_row(ui: &mut Ui, cols: &mut Columns, width_id: Id) {
         ui.data_mut(|d| d.remove::<f32>(width_id));
     }
     let painter = ui.painter();
-    painter.rect_filled(rect, 0, color::APP_BG);
+    painter.rect_filled(rect, 0, color::app_bg());
     painter.hline(
         rect.x_range(),
         rect.bottom() - 0.5,
-        Stroke::new(1.0, color::BORDER),
+        Stroke::new(1.0, color::border()),
     );
     let y = rect.center().y;
     let label = |x: f32, text: &str| {
@@ -295,12 +295,12 @@ fn header_row(ui: &mut Ui, cols: &mut Columns, width_id: Id) {
             Align2::LEFT_CENTER,
             text,
             theme::small(),
-            color::TEXT_FAINT,
+            color::text_faint(),
         );
     };
     if drag.hovered() || drag.dragged() {
         let x = rect.left() + cols.graph;
-        painter.vline(x, rect.y_range(), Stroke::new(1.0, color::TEXT_FAINT));
+        painter.vline(x, rect.y_range(), Stroke::new(1.0, color::text_faint()));
     }
     if cols.graph >= 50.0 {
         label(rect.left() + 10.0, "Graph");
@@ -334,13 +334,13 @@ fn paint_row(
 ) {
     let painter = ui.painter();
     let bg = if selected {
-        color::SELECTED_ROW_BG
+        color::selected_row_bg()
     } else if response.hovered() {
-        color::HOVER_ROW_BG
+        color::hover_row_bg()
     } else {
-        color::APP_BG
+        color::app_bg()
     };
-    if bg != color::APP_BG {
+    if bg != color::app_bg() {
         painter.rect_filled(rect, 0, bg);
     }
 
@@ -351,14 +351,20 @@ fn paint_row(
     let y = rect.center().y;
     let mut right = rect.right() - cols.commit;
     if cols.commit > 0.0 && !commit.is_worktree() {
-        let sha = painter.layout_no_wrap(short(&commit.id), theme::mono(), color::TEXT_FAINT);
-        paint_galley_left(painter, right, y, sha, color::TEXT_FAINT);
+        let sha = painter.layout_no_wrap(short(&commit.id), theme::mono(), color::text_faint());
+        paint_galley_left(painter, right, y, sha, color::text_faint());
     }
     right -= cols.date;
     if cols.date > 0.0 && !commit.is_worktree() {
         let date = time::relative(commit.time, now);
-        let date = elided(ui, &date, theme::body(), color::TEXT_WEAK, cols.date - 8.0);
-        paint_galley_left(painter, right, y, date, color::TEXT_WEAK);
+        let date = elided(
+            ui,
+            &date,
+            theme::body(),
+            color::text_weak(),
+            cols.date - 8.0,
+        );
+        paint_galley_left(painter, right, y, date, color::text_weak());
     }
     if cols.author > 0.0 {
         right -= cols.author;
@@ -367,10 +373,10 @@ fn paint_row(
                 ui,
                 &commit.author,
                 theme::body(),
-                color::TEXT_MID,
+                color::text_mid(),
                 cols.author - 10.0,
             );
-            paint_galley_left(painter, right, y, author, color::TEXT_MID);
+            paint_galley_left(painter, right, y, author, color::text_mid());
         }
     }
 
@@ -384,9 +390,9 @@ fn paint_row(
             let more = painter.layout_no_wrap(
                 format!("+{}", labels.len() - n),
                 theme::small(),
-                color::TEXT_WEAK,
+                color::text_weak(),
             );
-            x += chip(painter, x, y, more, color::TEXT_WEAK, 40.0) + 4.0;
+            x += chip(painter, x, y, more, color::text_weak(), 40.0) + 4.0;
             break;
         }
         let (fg, font) = label_style(label);
@@ -406,15 +412,15 @@ fn paint_row(
             ui,
             &text,
             theme::semibold(theme::BODY_SIZE),
-            color::DIRTY_FG,
+            color::dirty_fg(),
             desc_right - x,
         );
-        paint_galley_left(painter, x, y, galley, color::DIRTY_FG);
+        paint_galley_left(painter, x, y, galley, color::dirty_fg());
     } else {
         let fg = if commit.parents.len() > 1 {
-            color::TEXT_WEAK
+            color::text_weak()
         } else {
-            color::TEXT
+            color::text()
         };
         let summary = elided(ui, &commit.summary, theme::body(), fg, desc_right - x);
         paint_galley_left(painter, x, y, summary, fg);
@@ -425,20 +431,20 @@ fn paint_row(
 /// linked worktree; the viewed worktree's HEAD is bold.
 pub fn label_style(label: &RefLabel) -> (Color32, egui::FontId) {
     let branch_color = match label.checked_out {
-        CheckedOut::Main => color::ACCENT,
-        CheckedOut::Worktree => color::BRANCH_DOT_AGENT,
-        CheckedOut::Nowhere => color::AHEAD_FG,
+        CheckedOut::Main => color::accent(),
+        CheckedOut::Worktree => color::branch_dot_agent(),
+        CheckedOut::Nowhere => color::ahead_fg(),
     };
     match label.kind {
         RefKind::Head => (branch_color, theme::semibold(theme::SMALL_SIZE + 0.5)),
         RefKind::Local => (branch_color, theme::small()),
-        RefKind::Remote => (color::TEXT_WEAK, theme::small()),
-        RefKind::Tag => (color::TAG, theme::small()),
+        RefKind::Remote => (color::text_weak(), theme::small()),
+        RefKind::Tag => (color::tag(), theme::small()),
     }
 }
 
 fn lane_color(index: u8) -> Color32 {
-    color::LANES[index as usize % color::LANES.len()]
+    color::lanes()[index as usize % color::lanes().len()]
 }
 
 fn paint_graph(ui: &Ui, rect: Rect, row: &GraphRow, commit: &Commit, is_head: bool, bg: Color32) {
@@ -450,7 +456,7 @@ fn paint_graph(ui: &Ui, rect: Rect, row: &GraphRow, commit: &Commit, is_head: bo
 
     for line in &row.lines {
         let color = if commit.is_worktree() {
-            color::TEXT_FAINT
+            color::text_faint()
         } else {
             lane_color(line.color)
         };
@@ -471,7 +477,7 @@ fn paint_graph(ui: &Ui, rect: Rect, row: &GraphRow, commit: &Commit, is_head: bo
 
     let color = lane_color(row.color);
     if commit.is_worktree() {
-        painter.circle(node, 4.5, bg, Stroke::new(1.6, color::DIRTY_FG));
+        painter.circle(node, 4.5, bg, Stroke::new(1.6, color::dirty_fg()));
     } else if is_head {
         painter.circle(node, 6.0, bg, Stroke::new(2.0, color));
         painter.circle_filled(node, 3.0, color);
@@ -608,7 +614,7 @@ fn details_pane(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
                 .show(ui, |ui| commit_details(ui, d, project, actions));
         }
         (_, Some(error)) => {
-            ui.label(RichText::new(error).color(color::REMOVED));
+            ui.label(RichText::new(error).color(color::removed()));
         }
         _ => loading(ui, "Loading commit…"),
     }
@@ -620,13 +626,13 @@ fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &m
         egui::Label::new(
             RichText::new(d.summary())
                 .font(theme::semibold(15.0))
-                .color(color::TEXT),
+                .color(color::text()),
         )
         .wrap(),
     );
     let body = d.body();
     if !body.is_empty() {
-        ui.add(egui::Label::new(RichText::new(body).color(color::TEXT_MID)).wrap());
+        ui.add(egui::Label::new(RichText::new(body).color(color::text_mid())).wrap());
     }
     if let Some(labels) = project.labels.get(&d.id) {
         ui.add_space(2.0);
@@ -659,7 +665,7 @@ fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &m
                 ui.label(
                     RichText::new(d.id.to_string())
                         .font(theme::mono())
-                        .color(color::TEXT_MID),
+                        .color(color::text_mid()),
                 );
                 if icon_button(ui, Icon::Copy, 20.0)
                     .on_hover_text("Copy hash")
@@ -685,7 +691,7 @@ fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &m
                             egui::Label::new(
                                 RichText::new(short(parent))
                                     .font(theme::mono())
-                                    .color(color::AHEAD_FG),
+                                    .color(color::ahead_fg()),
                             )
                             .sense(Sense::click()),
                         );
@@ -711,7 +717,7 @@ fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &m
                     time::absolute(d.author_time),
                     time::relative(d.author_time, time::now())
                 ))
-                .color(color::TEXT_MID),
+                .color(color::text_mid()),
             );
             ui.end_row();
 
@@ -719,7 +725,9 @@ fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &m
                 meta_key(ui, "Committed");
                 ui.vertical(|ui| {
                     person(ui, &d.committer, &d.committer_email);
-                    ui.label(RichText::new(time::absolute(d.commit_time)).color(color::TEXT_WEAK));
+                    ui.label(
+                        RichText::new(time::absolute(d.commit_time)).color(color::text_weak()),
+                    );
                 });
                 ui.end_row();
             }
@@ -736,15 +744,15 @@ fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &m
                 if d.files.len() == 1 { "" } else { "s" }
             ))
             .font(theme::semibold(theme::BODY_SIZE))
-            .color(color::TEXT),
+            .color(color::text()),
         );
-        ui.label(RichText::new(format!("+{added}")).color(color::ADDED));
-        ui.label(RichText::new(format!("−{removed}")).color(color::REMOVED));
+        ui.label(RichText::new(format!("+{added}")).color(color::added()));
+        ui.label(RichText::new(format!("−{removed}")).color(color::removed()));
     });
     if d.parents.len() > 1 {
         ui.label(
             RichText::new("Merge commit: changes compared with the first parent.")
-                .color(color::TEXT_FAINT)
+                .color(color::text_faint())
                 .size(theme::SMALL_SIZE),
         );
     }
@@ -772,24 +780,24 @@ fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &m
 }
 
 fn meta_key(ui: &mut Ui, key: &str) {
-    ui.label(RichText::new(key).color(color::TEXT_FAINT));
+    ui.label(RichText::new(key).color(color::text_faint()));
 }
 
 fn person(ui: &mut Ui, name: &str, email: &str) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        ui.label(RichText::new(name).color(color::TEXT));
-        ui.label(RichText::new(email).color(color::TEXT_WEAK));
+        ui.label(RichText::new(name).color(color::text()));
+        ui.label(RichText::new(email).color(color::text_weak()));
     });
 }
 
 pub fn change_color(change: Change) -> Color32 {
     match change {
-        Change::Added => color::ADDED,
-        Change::Deleted | Change::Unmerged => color::REMOVED,
-        Change::Renamed | Change::Copied => color::LANES[3],
-        Change::TypeChanged => color::TEXT_WEAK,
-        Change::Modified | Change::None => color::DIRTY_FG,
+        Change::Added => color::added(),
+        Change::Deleted | Change::Unmerged => color::removed(),
+        Change::Renamed | Change::Copied => color::lanes()[3],
+        Change::TypeChanged => color::text_weak(),
+        Change::Modified | Change::None => color::dirty_fg(),
     }
 }
 
@@ -799,18 +807,18 @@ pub fn paint_path(ui: &Ui, x: f32, y: f32, path: &str, max_width: f32) {
         Some((dir, name)) => (dir, name),
         None => ("", path),
     };
-    let name = elided(ui, name, theme::body(), color::TEXT, max_width);
+    let name = elided(ui, name, theme::body(), color::text(), max_width);
     let name_width = name.size().x;
-    paint_galley_left(ui.painter(), x, y, name, color::TEXT);
+    paint_galley_left(ui.painter(), x, y, name, color::text());
     let room = max_width - name_width - 8.0;
     if !dir.is_empty() && room > 30.0 {
-        let dir = elided(ui, dir, theme::small(), color::TEXT_FAINT, room);
+        let dir = elided(ui, dir, theme::small(), color::text_faint(), room);
         paint_galley_left(
             ui.painter(),
             x + name_width + 8.0,
             y,
             dir,
-            color::TEXT_FAINT,
+            color::text_faint(),
         );
     }
 }
@@ -832,9 +840,9 @@ pub fn paint_change_letter(ui: &Ui, x: f32, y: f32, change: Change) {
 pub fn file_row(ui: &mut Ui, file: &FileChange, selected: bool, note: Option<&str>) -> Response {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
     if selected {
-        ui.painter().rect_filled(rect, 4, color::SELECTED_ROW_BG);
+        ui.painter().rect_filled(rect, 4, color::selected_row_bg());
     } else if response.hovered() {
-        ui.painter().rect_filled(rect, 4, color::HOVER_ROW_BG);
+        ui.painter().rect_filled(rect, 4, color::hover_row_bg());
     }
     let y = rect.center().y;
     paint_change_letter(ui, rect.left() + 4.0, y, file.change);
@@ -846,9 +854,9 @@ pub fn file_row(ui: &mut Ui, file: &FileChange, selected: bool, note: Option<&st
     };
     let stats = ui
         .painter()
-        .layout_no_wrap(stats, theme::small(), color::TEXT_FAINT);
+        .layout_no_wrap(stats, theme::small(), color::text_faint());
     let stats_x = rect.right() - 4.0 - stats.size().x;
-    paint_galley_left(ui.painter(), stats_x, y, stats, color::TEXT_FAINT);
+    paint_galley_left(ui.painter(), stats_x, y, stats, color::text_faint());
 
     let x = rect.left() + 28.0;
     paint_path(ui, x, y, &file.path, stats_x - 8.0 - x);
@@ -864,19 +872,19 @@ fn uncommitted(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
     ui.label(
         RichText::new("Uncommitted changes")
             .font(theme::semibold(15.0))
-            .color(color::TEXT),
+            .color(color::text()),
     );
     let Some(wt) = project.worktree() else { return };
-    ui.label(RichText::new(wt.path.display().to_string()).color(color::TEXT_WEAK));
+    ui.label(RichText::new(wt.path.display().to_string()).color(color::text_weak()));
     let Some(status) = &wt.status else { return };
     let staged = status.staged().count();
     let unstaged = status.unstaged().count();
     let conflicted = status.conflicted().count();
     ui.horizontal(|ui| {
-        ui.label(RichText::new(format!("{staged} staged")).color(color::ADDED));
-        ui.label(RichText::new(format!("{unstaged} unstaged")).color(color::DIRTY_FG));
+        ui.label(RichText::new(format!("{staged} staged")).color(color::added()));
+        ui.label(RichText::new(format!("{unstaged} unstaged")).color(color::dirty_fg()));
         if conflicted > 0 {
-            ui.label(RichText::new(format!("{conflicted} conflicted")).color(color::REMOVED));
+            ui.label(RichText::new(format!("{conflicted} conflicted")).color(color::removed()));
         }
     });
     ui.add_space(4.0);
@@ -892,7 +900,7 @@ fn uncommitted(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
                 let (rect, response) =
                     ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
                 if response.hovered() {
-                    ui.painter().rect_filled(rect, 4, color::HOVER_ROW_BG);
+                    ui.painter().rect_filled(rect, 4, color::hover_row_bg());
                 }
                 let change = if entry.is_conflicted() {
                     Change::Unmerged

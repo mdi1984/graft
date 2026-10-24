@@ -13,10 +13,10 @@ pub fn show(ctx: &egui::Context, confirm: &Confirm, actions: &mut Vec<Action>) {
         ui.label(
             RichText::new(&confirm.title)
                 .font(theme::semibold(15.0))
-                .color(color::TEXT),
+                .color(color::text()),
         );
         ui.add_space(2.0);
-        ui.add(egui::Label::new(RichText::new(&confirm.body).color(color::TEXT_MID)).wrap());
+        ui.add(egui::Label::new(RichText::new(&confirm.body).color(color::text_mid())).wrap());
         ui.add_space(10.0);
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -38,17 +38,17 @@ fn danger_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     let text = ui.painter().layout_no_wrap(
         label.to_owned(),
         theme::semibold(theme::BODY_SIZE),
-        color::ON_ACCENT,
+        color::on_accent(),
     );
     let size = egui::vec2(text.size().x + 28.0, 30.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     let fill = if response.hovered() {
-        color::REMOVED.gamma_multiply(1.1)
+        color::removed().gamma_multiply(1.1)
     } else {
-        color::REMOVED
+        color::removed()
     };
     ui.painter().rect_filled(rect, theme::RADIUS, fill);
     ui.painter()
-        .galley(rect.center() - text.size() / 2.0, text, color::ON_ACCENT);
+        .galley(rect.center() - text.size() / 2.0, text, color::on_accent());
     response
 }

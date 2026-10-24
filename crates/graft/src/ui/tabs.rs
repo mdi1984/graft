@@ -10,7 +10,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         let stashes =
-            (stash_count > 0).then(|| Badge::new(ui, stash_count.to_string(), widgets::NEUTRAL));
+            (stash_count > 0).then(|| Badge::new(ui, stash_count.to_string(), widgets::neutral()));
         let tabs = [
             (Tab::Workspace, "Workspace", None),
             (Tab::Review, "Review", None),

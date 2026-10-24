@@ -78,15 +78,15 @@ pub fn show(ui: &mut Ui, tabs: &[TabInfo], active: Option<usize>) -> Option<TabA
         let y = rect.center().y;
         let mut text_x = rect.left() + PAD_X;
         if tab.busy {
-            spinner(ui, pos2(text_x + 4.0, y), 4.0, color::TEXT_WEAK);
+            spinner(ui, pos2(text_x + 4.0, y), 4.0, color::text_weak());
             text_x += 14.0;
         } else if tab.error {
             ui.painter()
-                .circle_filled(pos2(text_x + 3.0, y), 3.5, color::REMOVED);
+                .circle_filled(pos2(text_x + 3.0, y), 3.5, color::removed());
             text_x += 13.0;
         } else if tab.dirty {
             ui.painter()
-                .circle_filled(pos2(text_x + 3.0, y), 3.5, color::DIRTY_FG);
+                .circle_filled(pos2(text_x + 3.0, y), 3.5, color::dirty_fg());
             text_x += 13.0;
         }
         let show_close = selected || response.hovered() || close.hovered();
@@ -96,9 +96,9 @@ pub fn show(ui: &mut Ui, tabs: &[TabInfo], active: Option<usize>) -> Option<TabA
             rect.right() - PAD_X
         };
         let (font, fg) = if selected {
-            (theme::semibold(theme::BODY_SIZE), color::TEXT)
+            (theme::semibold(theme::BODY_SIZE), color::text())
         } else {
-            (theme::body(), color::TEXT_WEAK)
+            (theme::body(), color::text_weak())
         };
         let name = elided(ui, &tab.name, font, fg, text_right - text_x);
         paint_galley_left(ui.painter(), text_x, y, name, fg);
@@ -141,7 +141,7 @@ pub fn show(ui: &mut Ui, tabs: &[TabInfo], active: Option<usize>) -> Option<TabA
             ui,
             label,
             theme::semibold(theme::BODY_SIZE),
-            color::TEXT,
+            color::text(),
             close_rect.left() - rect.left() - PAD_X,
         );
         paint_galley_left(
@@ -149,7 +149,7 @@ pub fn show(ui: &mut Ui, tabs: &[TabInfo], active: Option<usize>) -> Option<TabA
             rect.left() + PAD_X,
             rect.center().y,
             galley,
-            color::TEXT,
+            color::text(),
         );
         if !tabs.is_empty() {
             paint_icon_button(ui, close_rect, &close, Icon::Close);
@@ -203,13 +203,13 @@ fn paint_tab(ui: &Ui, rect: Rect, selected: bool, hovered: bool) {
         se: 0,
     };
     if selected {
-        painter.rect_filled(rect, radius, color::BAR_BG);
+        painter.rect_filled(rect, radius, color::bar_bg());
         painter.hline(
             rect.x_range(),
             rect.top() + 0.5,
-            Stroke::new(1.0, color::ACCENT.gamma_multiply(0.6)),
+            Stroke::new(1.0, color::accent().gamma_multiply(0.6)),
         );
     } else if hovered {
-        painter.rect_filled(rect, radius, color::HOVER_ROW_BG);
+        painter.rect_filled(rect, radius, color::hover_row_bg());
     }
 }
