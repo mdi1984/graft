@@ -664,13 +664,56 @@ fn remotes(
     busy: bool,
     actions: &mut Vec<Action>,
 ) {
-    if repo.remotes.is_empty() {
-        faint_row(ui, "No remotes");
-        return;
-    }
+    let add = Action::OpenDialog(DialogKind::Remote {
+        original: None,
+        name: if repo.remotes.is_empty() {
+            "origin".to_owned()
+        } else {
+            String::new()
+        },
+        url: String::new(),
+        fetch: true,
+    });
     for remote in &repo.remotes {
         simple_row(ui, Icon::Cloud, &remote.name, color::TEXT_MID, 8.0)
-            .on_hover_text(&remote.fetch_url);
+            .on_hover_text(&remote.fetch_url)
+            .context_menu(|ui| {
+                menu_item(
+                    ui,
+                    "Edit…",
+                    !busy,
+                    actions,
+                    Action::OpenDialog(DialogKind::Remote {
+                        original: Some(remote.name.clone()),
+                        name: remote.name.clone(),
+                        url: remote.fetch_url.clone(),
+                        fetch: false,
+                    }),
+                );
+                if ui.button("Copy URL").clicked() {
+                    ui.ctx().copy_text(remote.fetch_url.clone());
+                    ui.close();
+                }
+                menu_item(
+                    ui,
+                    "Remove…",
+                    !busy,
+                    actions,
+                    Action::Ask(Box::new(Confirm {
+                        title: format!("Remove remote {}?", remote.name),
+                        body: format!(
+                            "Graft forgets {} and its remote branches. Nothing changes on the \
+                             server, and your local branches keep their commits; branches that \
+                             tracked it lose their upstream.",
+                            remote.fetch_url
+                        ),
+                        confirm_label: "Remove remote".to_owned(),
+                        action: Action::RemoveRemote(remote.name.clone()),
+                    })),
+                );
+                ui.separator();
+                menu_item(ui, "Add remote…", !busy, actions, add.clone());
+            });
         for branch in repo
             .remote_branches
             .iter()
@@ -689,6 +732,10 @@ fn remotes(
             response
                 .context_menu(|ui| remote_branch_menu(ui, project, repo, branch, busy, actions));
         }
+    }
+    let response = simple_row(ui, Icon::Plus, "Add remote…", color::TEXT_WEAK, 8.0);
+    if response.clicked() && !busy {
+        actions.push(add);
     }
 }
 

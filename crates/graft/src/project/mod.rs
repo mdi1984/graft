@@ -168,6 +168,7 @@ pub enum Action {
         force: bool,
     },
     DeleteTag(String),
+    RemoveRemote(String),
     CherryPick(Oid),
     Revert(Oid),
     /// Undo the selected worktree's last commit, keeping its changes staged.
@@ -799,6 +800,7 @@ impl Project {
             | Action::CheckoutDetached(_)
             | Action::DeleteBranch { .. }
             | Action::DeleteTag(_)
+            | Action::RemoveRemote(_)
             | Action::CherryPick(_)
             | Action::Revert(_)
             | Action::UndoCommit => self.apply_ref_action(action),

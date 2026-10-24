@@ -150,6 +150,38 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Vec<Action>)
                 }
                 "Reset"
             }
+            DialogKind::Remote {
+                original,
+                name,
+                url,
+                fetch,
+            } => {
+                match original {
+                    None => {
+                        title(ui, "Add remote");
+                        note(
+                            ui,
+                            "A copy of this repository somewhere else, usually on GitHub or \
+                             another server. Push and pull talk to it.",
+                        );
+                    }
+                    Some(old) => title(ui, &format!("Edit remote {old}")),
+                }
+                field_label(ui, "Name");
+                let r = text_field(ui, name, "origin", WIDTH);
+                if focus {
+                    r.request_focus();
+                }
+                field_label(ui, "URL");
+                text_field(ui, url, "https://github.com/you/repository.git", WIDTH);
+                if original.is_none() {
+                    ui.add_space(4.0);
+                    ui.checkbox(fetch, "Fetch its branches right away");
+                    "Add remote"
+                } else {
+                    "Save"
+                }
+            }
             DialogKind::Merge {
                 into,
                 rev,

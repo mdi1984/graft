@@ -120,3 +120,40 @@ pub(crate) fn run(
     }
     Ok(())
 }
+
+/// Add a remote, or change one (`original` is its current name): rename it
+/// and set its URL. With `fetch`, fetch from it afterwards.
+pub fn save_remote(
+    git: &Git,
+    original: Option<&str>,
+    name: &str,
+    url: &str,
+    fetch: bool,
+) -> Result<()> {
+    match original {
+        None => {
+            git.run(["remote", "add", name, url])?;
+        }
+        Some(old) => {
+            if old != name {
+                git.run(["remote", "rename", old, name])?;
+            }
+            git.run(["remote", "set-url", name, url])?;
+        }
+    }
+    if fetch && let Err(error) = git.run(["fetch", name]) {
+        // A new remote that can't be fetched is most likely a typo in the URL:
+        // take it back out so the dialog can simply be tried again.
+        if original.is_none() {
+            let _ = git.run(["remote", "remove", name]);
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Remove a remote and its remote branches.
+pub fn remove_remote(git: &Git, name: &str) -> Result<()> {
+    git.run(["remote", "remove", name])?;
+    Ok(())
+}
