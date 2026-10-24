@@ -11,7 +11,7 @@ const WIDTH: f32 = 440.0;
 
 pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Vec<Action>) {
     let busy = dialog.submitting;
-    let response = egui::Modal::new(Id::unique("ref-dialog")).show(ctx, |ui| {
+    let response = super::widgets::modal(ctx, Id::unique("ref-dialog")).show(ctx, |ui| {
         ui.set_width(WIDTH);
         ui.spacing_mut().item_spacing.y = 6.0;
         let focus = std::mem::take(&mut dialog.focus);

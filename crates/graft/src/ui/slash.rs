@@ -17,7 +17,7 @@ pub fn show(
     progress: Option<String>,
     actions: &mut Vec<Action>,
 ) {
-    let response = egui::Modal::new(Id::unique("slash-modal")).show(ctx, |ui| {
+    let response = super::widgets::modal(ctx, Id::unique("slash-modal")).show(ctx, |ui| {
         ui.set_width(WIDTH);
         ui.spacing_mut().item_spacing.y = 6.0;
         ui.label(

@@ -50,7 +50,7 @@ pub fn show(
         form.identity = identity.clone();
     }
     let mut outcome = Outcome::Open;
-    let response = egui::Modal::new(Id::unique("settings-modal")).show(ctx, |ui| {
+    let response = super::widgets::modal(ctx, Id::unique("settings-modal")).show(ctx, |ui| {
         ui.set_width(WIDTH);
         ui.spacing_mut().item_spacing.y = 6.0;
         ui.label(

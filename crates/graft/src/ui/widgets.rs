@@ -485,3 +485,15 @@ pub fn progress_bar(ui: &mut Ui, fraction: Option<f32>, width: f32) {
     painter.rect_filled(fill, 2, color::ACCENT);
     ui.ctx().request_repaint();
 }
+
+/// A modal dialog with Graft's frame. egui's default frame uses the tight
+/// menu padding; dialogs get more room.
+pub fn modal(ctx: &egui::Context, id: egui::Id) -> egui::Modal {
+    let frame = egui::Frame::popup(&ctx.global_style()).inner_margin(egui::Margin {
+        left: 22,
+        right: 22,
+        top: 18,
+        bottom: 20,
+    });
+    egui::Modal::new(id).frame(frame)
+}
