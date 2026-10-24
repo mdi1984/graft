@@ -4,7 +4,7 @@
 //! for a coding agent in one go), Open in IDE and Merge.
 
 use egui::{
-    Align, Frame, Key, Layout, Margin, Modifiers, Panel, Rect, RichText, ScrollArea, Sense, Stroke,
+    Align, Frame, Key, Layout, Margin, Panel, Rect, RichText, ScrollArea, Sense, Stroke,
     StrokeKind, TextEdit, Ui, pos2, vec2,
 };
 use graft_core::review::{Review, ReviewFile};
@@ -14,6 +14,7 @@ use graft_core::{RepoSnapshot, Worktree, same_path};
 use super::diff_view::{self, Marks};
 use super::history::{paint_change_letter, paint_path};
 use super::widgets::{Badge, ButtonKind, ahead, button, empty_state, progress_bar, spinner};
+use crate::keys::Command;
 use crate::project::comments::{self, LineComment};
 use crate::project::{Action, Confirm, Project};
 use crate::theme::{self, color};
@@ -549,7 +550,12 @@ fn file_header(
                         ButtonKind::Primary
                     };
                     if button(ui, label, kind, true)
-                        .on_hover_text("V · marks it and opens the next file")
+                        .on_hover_text(
+                            project
+                                .settings
+                                .keys
+                                .tip("Marks it and opens the next file", Command::MarkViewed),
+                        )
                         .clicked()
                     {
                         actions.push(Action::ToggleViewed(path.clone()));
@@ -567,8 +573,8 @@ fn file_header(
                 });
             });
         });
-    // V marks the open file as viewed (unless typing a comment).
-    if !ui.ctx().egui_wants_keyboard_input() && ui.input(|i| i.key_pressed(Key::V)) {
+    // Marks the open file as viewed (not while typing a comment).
+    if project.settings.keys.pressed(ui.ctx(), Command::MarkViewed) {
         actions.push(Action::ToggleViewed(path));
     }
 }
@@ -683,6 +689,7 @@ fn comment_panel(
 }
 
 fn comment_editor(ui: &mut Ui, project: &mut Project, title: &str, actions: &mut Vec<Action>) {
+    let keys = project.settings.keys.clone();
     let Some(view) = &mut project.review else {
         return;
     };
@@ -700,19 +707,22 @@ fn comment_editor(ui: &mut Ui, project: &mut Project, title: &str, actions: &mut
                         .font(theme::semibold(theme::SMALL_SIZE + 1.0))
                         .color(color::text()),
                 );
+                let save = keys
+                    .get(Command::SaveComment)
+                    .map(|s| format!(" · {} saves", crate::keys::format(s)))
+                    .unwrap_or_default();
                 ui.label(
-                    RichText::new(
-                        "Shift-click or drag to pick more lines · Ctrl+Enter saves · \
-                         only on this computer",
-                    )
+                    RichText::new(format!(
+                        "Shift-click or drag to pick more lines{save} · only on this computer"
+                    ))
                     .color(color::text_faint())
                     .size(theme::SMALL_SIZE),
                 );
             });
-            // Ctrl+Enter saves; taken before the text box turns it into a newline.
+            // The save shortcut is taken before the text box turns Enter into a newline.
             let id = ui.make_persistent_id("review-comment-draft");
-            let save_keys = ui.memory(|m| m.has_focus(id))
-                && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter));
+            let save_keys =
+                ui.memory(|m| m.has_focus(id)) && keys.pressed(ui.ctx(), Command::SaveComment);
             let response = ui.add(
                 TextEdit::multiline(&mut view.draft)
                     .id(id)

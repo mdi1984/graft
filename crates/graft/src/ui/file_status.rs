@@ -1,9 +1,7 @@
 //! File status: staged files above unstaged files on the left, the selected
 //! file's diff on the right, and the commit box across the bottom.
 
-use egui::{
-    Frame, Key, Margin, Modifiers, Panel, Rect, RichText, ScrollArea, Sense, Stroke, Ui, pos2, vec2,
-};
+use egui::{Frame, Margin, Panel, Rect, RichText, ScrollArea, Sense, Stroke, Ui, pos2, vec2};
 use graft_core::status::{Change, StatusEntry, WorktreeStatus};
 
 use super::history::{paint_change_letter, paint_path};
@@ -12,6 +10,7 @@ use super::widgets::{
     ButtonKind, button, empty_state, paint_icon_button, section_heading, text_field,
 };
 use super::{conflicts, diff_view};
+use crate::keys::{Command, Keymap};
 use crate::project::{Action, FileKey, Project};
 use crate::theme::{self, RADIUS, color};
 
@@ -24,6 +23,8 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
         );
         return;
     };
+
+    keyboard(ui, project, &status, actions);
 
     Panel::bottom("commit-box")
         .frame(
@@ -55,7 +56,69 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
     }
 }
 
+/// The file list from the keyboard: move, stage, unstage, discard.
+fn keyboard(ui: &Ui, project: &Project, status: &WorktreeStatus, actions: &mut Vec<Action>) {
+    let keys = &project.settings.keys;
+    let ctx = ui.ctx();
+    // Top to bottom as listed; `Some(true)` can be staged, `Some(false)`
+    // unstaged.
+    let rows: Vec<(FileKey, Option<bool>)> = status
+        .conflicted()
+        .map(|e| (FileKey::of(e, false), None))
+        .chain(status.staged().map(|e| (FileKey::of(e, true), Some(false))))
+        .chain(
+            status
+                .unstaged()
+                .map(|e| (FileKey::of(e, false), Some(true))),
+        )
+        .collect();
+    if rows.is_empty() {
+        return;
+    }
+    let selected = project.diff_view.as_ref().map(|v| &v.key);
+    let current = rows.iter().position(|(key, _)| Some(key) == selected);
+    if keys.pressed(ctx, Command::NextFile) {
+        let next = current.map_or(0, |i| (i + 1).min(rows.len() - 1));
+        actions.push(Action::SelectFile(rows[next].0.clone()));
+    }
+    if keys.pressed(ctx, Command::PreviousFile) {
+        let previous = current.map_or(0, |i| i.saturating_sub(1));
+        actions.push(Action::SelectFile(rows[previous].0.clone()));
+    }
+    if project.is_operating() {
+        return;
+    }
+    if keys.pressed(ctx, Command::StageFile)
+        && let Some((key, stage)) = current.map(|i| &rows[i])
+    {
+        let paths = vec![key.path.clone()];
+        match stage {
+            Some(true) => actions.push(Action::StageFiles(paths)),
+            Some(false) => actions.push(Action::UnstageFiles(paths)),
+            None => {}
+        }
+    }
+    if keys.pressed(ctx, Command::StageAll) {
+        let paths: Vec<String> = status.unstaged().map(|e| e.path.clone()).collect();
+        if !paths.is_empty() {
+            actions.push(Action::StageFiles(paths));
+        }
+    }
+    if keys.pressed(ctx, Command::UnstageAll) {
+        let paths: Vec<String> = status.staged().map(|e| e.path.clone()).collect();
+        if !paths.is_empty() {
+            actions.push(Action::UnstageFiles(paths));
+        }
+    }
+    if keys.pressed(ctx, Command::DiscardFile)
+        && let Some((key, Some(true))) = current.map(|i| &rows[i])
+    {
+        actions.push(diff_view::discard_file(&key.source, key.path.clone()));
+    }
+}
+
 fn file_lists(ui: &mut Ui, project: &Project, status: &WorktreeStatus, actions: &mut Vec<Action>) {
+    let keys = &project.settings.keys;
     let busy = project.is_operating();
     let selected = project.diff_view.as_ref().map(|v| &v.key);
     let staged: Vec<&StatusEntry> = status.staged().collect();
@@ -79,6 +142,7 @@ fn file_lists(ui: &mut Ui, project: &Project, status: &WorktreeStatus, actions: 
                         selected == Some(&key),
                         None,
                         busy,
+                        keys,
                         actions,
                     );
                 }
@@ -86,7 +150,14 @@ fn file_lists(ui: &mut Ui, project: &Project, status: &WorktreeStatus, actions: 
             }
 
             let all_staged: Vec<String> = staged.iter().map(|e| e.path.clone()).collect();
-            if section(ui, "STAGED", staged.len(), Some("Unstage all"), busy) {
+            let tip = keys.tip("Unstage every staged file", Command::UnstageAll);
+            if section(
+                ui,
+                "STAGED",
+                staged.len(),
+                Some(("Unstage all", &tip)),
+                busy,
+            ) {
                 actions.push(Action::UnstageFiles(all_staged));
             }
             if staged.is_empty() {
@@ -102,13 +173,21 @@ fn file_lists(ui: &mut Ui, project: &Project, status: &WorktreeStatus, actions: 
                     selected == Some(&key),
                     Some(false),
                     busy,
+                    keys,
                     actions,
                 );
             }
             ui.add_space(10.0);
 
             let all_unstaged: Vec<String> = unstaged.iter().map(|e| e.path.clone()).collect();
-            if section(ui, "UNSTAGED", unstaged.len(), Some("Stage all"), busy) {
+            let tip = keys.tip("Stage every changed file", Command::StageAll);
+            if section(
+                ui,
+                "UNSTAGED",
+                unstaged.len(),
+                Some(("Stage all", &tip)),
+                busy,
+            ) {
                 actions.push(Action::StageFiles(all_unstaged));
             }
             if unstaged.is_empty() {
@@ -124,6 +203,7 @@ fn file_lists(ui: &mut Ui, project: &Project, status: &WorktreeStatus, actions: 
                     selected == Some(&key),
                     Some(true),
                     busy,
+                    keys,
                     actions,
                 );
             }
@@ -132,7 +212,7 @@ fn file_lists(ui: &mut Ui, project: &Project, status: &WorktreeStatus, actions: 
 
 /// Section heading with a count and an optional link on the right; returns
 /// whether the link was clicked.
-fn section(ui: &mut Ui, title: &str, count: usize, link: Option<&str>, busy: bool) -> bool {
+fn section(ui: &mut Ui, title: &str, count: usize, link: Option<(&str, &str)>, busy: bool) -> bool {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
     let y = rect.center().y;
     section_heading(
@@ -142,7 +222,7 @@ fn section(ui: &mut Ui, title: &str, count: usize, link: Option<&str>, busy: boo
         y,
         &format!("{title}  {count}"),
     );
-    let Some(link) = link.filter(|_| count > 0) else {
+    let Some((link, tip)) = link.filter(|_| count > 0) else {
         return false;
     };
     let galley = ui
@@ -152,11 +232,13 @@ fn section(ui: &mut Ui, title: &str, count: usize, link: Option<&str>, busy: boo
         pos2(rect.right() - galley.size().x - 8.0, rect.top() + 3.0),
         vec2(galley.size().x + 6.0, 18.0),
     );
-    let response = ui.interact(
-        r,
-        ui.scope_id().with(("section-link", title)),
-        Sense::click(),
-    );
+    let response = ui
+        .interact(
+            r,
+            ui.scope_id().with(("section-link", title)),
+            Sense::click(),
+        )
+        .on_hover_text(tip);
     let fg = if busy {
         color::text_faint()
     } else if response.hovered() {
@@ -189,6 +271,7 @@ fn file_row(
     selected: bool,
     stage: Option<bool>,
     busy: bool,
+    keys: &Keymap,
     actions: &mut Vec<Action>,
 ) {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
@@ -231,11 +314,12 @@ fn file_row(
             Icon::Minus
         };
         paint_icon_button(ui, button_rect, &b, icon);
-        let tip = if stage == Some(true) {
+        let label = if stage == Some(true) {
             "Stage"
         } else {
             "Unstage"
         };
+        let tip = keys.tip(label, Command::StageFile);
         if b.on_hover_text(tip).clicked() {
             button_clicked = true;
             toggle(actions);
@@ -253,19 +337,26 @@ fn file_row(
         None => entry.path.clone(),
     };
     let response = response.on_hover_text(tip);
+    let item = |label: &str, command| {
+        let shortcut = keys.get(command).map(crate::keys::format);
+        egui::Button::new(label).shortcut_text(shortcut.unwrap_or_default())
+    };
     response.context_menu(|ui| {
         match stage {
             Some(true) => {
-                if ui.button("Stage").clicked() {
+                if ui.add(item("Stage", Command::StageFile)).clicked() {
                     toggle(actions);
                     ui.close();
                 }
-                if ui.button("Discard changes…").clicked() {
+                if ui
+                    .add(item("Discard changes…", Command::DiscardFile))
+                    .clicked()
+                {
                     actions.push(diff_view::discard_file(&key.source, entry.path.clone()));
                     ui.close();
                 }
             }
-            Some(false) if ui.button("Unstage").clicked() => {
+            Some(false) if ui.add(item("Unstage", Command::StageFile)).clicked() => {
                 toggle(actions);
                 ui.close();
             }
@@ -347,10 +438,11 @@ fn commit_box(
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let ready = !form.summary.trim().is_empty() && (staged > 0 || form.amend) && !busy;
             let label = if form.amend { "Amend commit" } else { "Commit" };
+            let keys = &project.settings.keys;
             let clicked = button(ui, label, ButtonKind::Primary, ready)
-                .on_hover_text("Ctrl+Enter")
+                .on_hover_text(keys.tip(label, Command::Commit))
                 .clicked();
-            let shortcut = ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter));
+            let shortcut = keys.pressed(ui.ctx(), Command::Commit);
             if ready && (clicked || shortcut) {
                 actions.push(Action::Commit);
             }

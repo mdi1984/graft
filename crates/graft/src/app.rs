@@ -12,6 +12,7 @@ use graft_core::repo::{self, Location, Progress};
 use graft_core::{CancelToken, Console, same_path};
 use serde::{Deserialize, Serialize};
 
+use crate::keys::Command;
 use crate::project::{Action, Project, ReviewState, SlashedBranch};
 use crate::settings::Settings;
 use crate::theme::color;
@@ -518,20 +519,25 @@ impl GraftApp {
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
         let ctrl = Modifiers::COMMAND;
-        let ctrl_shift = Modifiers::COMMAND | Modifiers::SHIFT;
-        let pressed = |mods, key| ctx.input_mut(|i| i.consume_key(mods, key));
+        let keys = self.settings.keys.clone();
+        let pressed = |command| keys.pressed(ctx, command);
+        // Fixed extras next to the configurable shortcuts.
+        let fixed = |mods, key| {
+            ctx.memory(|m| m.top_modal_layer()).is_none()
+                && ctx.input_mut(|i| i.consume_key(mods, key))
+        };
 
-        if pressed(ctrl, Key::Comma) {
+        if pressed(Command::Settings) {
             self.open_settings();
         }
 
-        if pressed(ctrl, Key::T) {
+        if pressed(Command::NewTab) {
             self.activate(None);
         }
-        if pressed(ctrl, Key::O) {
+        if pressed(Command::OpenFolder) {
             self.pick(Pick::Open, "Open a git repository", None);
         }
-        if pressed(ctrl, Key::W) {
+        if pressed(Command::CloseTab) {
             match self.active {
                 Some(i) => self.close_project(i),
                 None => self.close_start(),
@@ -540,9 +546,9 @@ impl GraftApp {
         let count = self.projects.len();
         if count > 0 {
             let current = self.active.unwrap_or(count - 1);
-            if pressed(ctrl_shift, Key::Tab) || pressed(ctrl, Key::PageUp) {
+            if pressed(Command::PreviousTab) || fixed(ctrl, Key::PageUp) {
                 self.activate(Some((current + count - 1) % count));
-            } else if pressed(ctrl, Key::Tab) || pressed(ctrl, Key::PageDown) {
+            } else if pressed(Command::NextTab) || fixed(ctrl, Key::PageDown) {
                 let next = if self.active.is_some() {
                     (current + 1) % count
                 } else {
@@ -562,17 +568,17 @@ impl GraftApp {
                 Key::Num9,
             ];
             for (n, key) in digits.into_iter().enumerate() {
-                if pressed(ctrl, key) && n < count {
+                if n < count && fixed(ctrl, key) {
                     self.activate(Some(n));
                 }
             }
         }
-        if (pressed(Modifiers::NONE, Key::F5) || pressed(ctrl, Key::R))
+        if (pressed(Command::Refresh) || fixed(ctrl, Key::R))
             && let Some(i) = self.active
         {
             self.projects[i].refresh();
         }
-        if pressed(ctrl, Key::Backtick) || pressed(ctrl, Key::J) {
+        if pressed(Command::Console) || fixed(ctrl, Key::Backtick) {
             self.console_open = !self.console_open;
         }
     }
@@ -768,7 +774,7 @@ impl eframe::App for GraftApp {
                     update::Status::Available(release) => Some(release.version.as_str()),
                     _ => None,
                 };
-                project_tabs::show(ui, &infos, self.active, update)
+                project_tabs::show(ui, &infos, self.active, update, &self.settings.keys)
             })
             .inner;
         if let Some(action) = tab_action {
@@ -791,6 +797,7 @@ impl eframe::App for GraftApp {
                     cancellable,
                     &self.console_view,
                     &mut self.console_open,
+                    &self.settings.keys,
                 )
             })
             .inner;
