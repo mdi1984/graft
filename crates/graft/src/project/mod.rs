@@ -3,6 +3,7 @@
 //! [`Action`]s; nothing here blocks on git.
 
 mod changes;
+mod refs;
 mod worktrees;
 
 use std::cell::Cell;
@@ -22,6 +23,7 @@ use graft_core::{
 };
 
 pub use changes::{CommitForm, Confirm, DiffView, FileKey, Highlights, Operation, RemoteOp};
+pub use refs::{Dialog, DialogKind};
 pub use worktrees::{BranchMode, NewWorktreeForm, checkout_choices, open_terminal};
 
 /// Commits loaded into the graph. Enough for years of history in big repos.
@@ -118,6 +120,28 @@ pub enum Action {
     PruneWorktrees,
     OpenTerminal(PathBuf),
     OpenFolder(PathBuf),
+
+    // Branches, tags, commits
+    OpenDialog(DialogKind),
+    CloseDialog,
+    SubmitDialog,
+    /// Switch the selected worktree to a local branch.
+    Checkout(String),
+    /// Create `local` tracking `remote` (e.g. origin/x) and switch to it.
+    CheckoutRemote {
+        local: String,
+        remote: String,
+    },
+    CheckoutDetached(Oid),
+    DeleteBranch {
+        name: String,
+        force: bool,
+    },
+    DeleteTag(String),
+    CherryPick(Oid),
+    Revert(Oid),
+    /// Undo the selected worktree's last commit, keeping its changes staged.
+    UndoCommit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -183,6 +207,8 @@ pub struct Project {
     history_cancel: CancelToken,
     /// The commit the "Uncommitted changes" row sits on in the current history.
     history_parent: Option<Oid>,
+    /// HEAD of the selected worktree moved: select it once history is rebuilt.
+    reselect_head: bool,
     pub labels: HashMap<Oid, Vec<RefLabel>>,
 
     pub selected: Option<Oid>,
@@ -205,6 +231,7 @@ pub struct Project {
     pub infos: Vec<String>,
 
     pub new_worktree: Option<NewWorktreeForm>,
+    pub dialog: Option<Dialog>,
     /// Select this worktree once a snapshot has it (just created).
     pending_open: Option<PathBuf>,
     watcher: Option<Watcher>,
@@ -244,6 +271,7 @@ impl Project {
             history_generation: 0,
             history_cancel: CancelToken::default(),
             history_parent: None,
+            reselect_head: false,
             labels: HashMap::new(),
             selected: None,
             details: None,
@@ -257,6 +285,7 @@ impl Project {
             notices: Vec::new(),
             infos: Vec::new(),
             new_worktree: None,
+            dialog: None,
             pending_open: None,
             watcher: None,
             watched: Vec::new(),
@@ -331,7 +360,10 @@ impl Project {
                     self.nav.worktree = main.path.clone();
                 }
                 let tips = collect_tips(&snap);
+                let had_snapshot = self.snapshot.is_some();
+                let old_head = self.worktree().and_then(|wt| wt.head);
                 self.snapshot = Some(snap);
+                let head_moved = had_snapshot && self.worktree().and_then(|wt| wt.head) != old_head;
                 if self.first_load {
                     self.first_load = false;
                     if self.worktree().is_some_and(|wt| wt.dirty() > 0) {
@@ -342,11 +374,22 @@ impl Project {
                     self.snapshot.as_ref().expect("just set"),
                     &self.nav.worktree,
                 );
-                if tips != self.tips || self.commits.is_none() {
+                let reload = if tips != self.tips || self.commits.is_none() {
                     self.tips = tips;
                     self.load_history(true);
+                    true
                 } else if self.worktree_parent() != self.history_parent {
                     self.load_history(false);
+                    true
+                } else {
+                    false
+                };
+                if head_moved {
+                    if reload {
+                        self.reselect_head = true;
+                    } else {
+                        self.select_head();
+                    }
                 }
                 self.sync_file_selection();
                 self.sync_watcher();
@@ -424,7 +467,7 @@ impl Project {
                     .selected
                     .is_some_and(|id| history.index.contains_key(&id));
                 self.history = Some(history);
-                if !keep {
+                if !keep || std::mem::take(&mut self.reselect_head) {
                     self.select_head();
                 }
             }
@@ -530,6 +573,17 @@ impl Project {
             }
             Action::Refresh => self.refresh(),
             Action::Close => {}
+            Action::OpenDialog(_)
+            | Action::CloseDialog
+            | Action::SubmitDialog
+            | Action::Checkout(_)
+            | Action::CheckoutRemote { .. }
+            | Action::CheckoutDetached(_)
+            | Action::DeleteBranch { .. }
+            | Action::DeleteTag(_)
+            | Action::CherryPick(_)
+            | Action::Revert(_)
+            | Action::UndoCommit => self.apply_ref_action(action),
             other => self.apply_change(other),
         }
     }

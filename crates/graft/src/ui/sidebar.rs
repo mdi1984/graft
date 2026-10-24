@@ -2,14 +2,14 @@
 //! TAGS, and STASHES.
 
 use egui::{Id, Rect, Response, ScrollArea, Sense, Ui, pos2, vec2};
-use graft_core::{Branch, RepoSnapshot, Upstream, Worktree, same_path};
+use graft_core::{Branch, RemoteBranch, RepoSnapshot, Upstream, Worktree, same_path};
 
 use super::icons::Icon;
 use super::widgets::{
     self, Badge, ICON_SIZE, elided, elided_path, paint_badges_right, paint_galley_left, paint_icon,
     paint_row_bg, section_heading,
 };
-use crate::project::{Action, Confirm, Project, Tab, WorkspaceView};
+use crate::project::{Action, Confirm, DialogKind, Project, RemoteOp, Tab, WorkspaceView};
 use crate::theme::{self, color};
 
 const SECTION_GAP: f32 = 14.0;
@@ -72,7 +72,9 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
                     if response.clicked() {
                         actions.push(Action::Reveal(branch.target));
                     }
-                    response.context_menu(|ui| branch_menu(ui, repo, &branch.name, actions));
+                    response.context_menu(|ui| {
+                        branch_menu(ui, repo, branch, head, project.is_operating(), actions)
+                    });
                 }
                 if repo.branches.is_empty() {
                     faint_row(ui, "No branches yet");
@@ -81,7 +83,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
             }
 
             if collapsible(ui, "REMOTES", repo.remotes.len(), false) {
-                remotes(ui, repo, actions);
+                remotes(ui, repo, project.is_operating(), actions);
                 ui.add_space(SECTION_GAP);
             }
 
@@ -91,6 +93,9 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
                     if response.clicked() {
                         actions.push(Action::Reveal(tag.target));
                     }
+                    response.context_menu(|ui| {
+                        tag_menu(ui, repo, &tag.name, project.is_operating(), actions)
+                    });
                 }
                 if repo.tags.is_empty() {
                     faint_row(ui, "No tags");
@@ -329,23 +334,213 @@ fn remove_confirm(wt: &Worktree) -> Confirm {
     }
 }
 
-fn branch_menu(ui: &mut Ui, repo: &RepoSnapshot, name: &str, actions: &mut Vec<Action>) {
-    match repo.worktree_for_branch(name) {
-        Some(wt) => {
-            if ui.button("Open its worktree").clicked() {
-                actions.push(Action::OpenWorktree(wt.path.clone()));
-                ui.close();
-            }
-        }
-        None => {
-            if ui.button("New worktree for this branch…").clicked() {
-                actions.push(Action::NewWorktree(Some(name.to_owned())));
-                ui.close();
-            }
-        }
+fn menu_item(ui: &mut Ui, label: &str, enabled: bool, actions: &mut Vec<Action>, action: Action) {
+    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+        actions.push(action);
+        ui.close();
     }
+}
+
+fn branch_menu(
+    ui: &mut Ui,
+    repo: &RepoSnapshot,
+    branch: &Branch,
+    head: Option<&str>,
+    busy: bool,
+    actions: &mut Vec<Action>,
+) {
+    let name = branch.name.as_str();
+    let is_head = head == Some(name);
+    let elsewhere = repo.worktree_for_branch(name).filter(|_| !is_head);
+    match elsewhere {
+        Some(wt) => menu_item(
+            ui,
+            "Open its worktree",
+            true,
+            actions,
+            Action::OpenWorktree(wt.path.clone()),
+        ),
+        None if !is_head => {
+            menu_item(
+                ui,
+                &format!("Check out {name}"),
+                !busy,
+                actions,
+                Action::Checkout(name.to_owned()),
+            );
+            menu_item(
+                ui,
+                "New worktree for this branch…",
+                !busy,
+                actions,
+                Action::NewWorktree(Some(name.to_owned())),
+            );
+        }
+        None => {}
+    }
+    menu_item(
+        ui,
+        "New branch from here…",
+        !busy,
+        actions,
+        Action::OpenDialog(DialogKind::NewBranch {
+            name: String::new(),
+            start: name.to_owned(),
+            start_label: name.to_owned(),
+            checkout: true,
+        }),
+    );
+    menu_item(
+        ui,
+        "Rename…",
+        !busy,
+        actions,
+        Action::OpenDialog(DialogKind::RenameBranch {
+            old: name.to_owned(),
+            name: name.to_owned(),
+        }),
+    );
+    let deletable = !is_head && elsewhere.is_none();
+    let delete = ui.add_enabled(!busy && deletable, egui::Button::new("Delete…"));
+    let delete = if deletable {
+        delete
+    } else {
+        delete.on_disabled_hover_text("It is checked out in a worktree")
+    };
+    if delete.clicked() {
+        actions.push(Action::Ask(Box::new(Confirm {
+            title: format!("Delete branch {name}?"),
+            body: match &branch.upstream {
+                Upstream::Tracking { name: up, .. } => {
+                    format!("The local branch goes away; {up} on the remote stays.")
+                }
+                _ => "The local branch goes away. If its commits are not merged anywhere, \
+                      Graft asks again."
+                    .to_owned(),
+            },
+            confirm_label: "Delete branch".to_owned(),
+            action: Action::DeleteBranch {
+                name: name.to_owned(),
+                force: false,
+            },
+        })));
+        ui.close();
+    }
+    ui.separator();
     if ui.button("Copy name").clicked() {
         ui.ctx().copy_text(name.to_owned());
+        ui.close();
+    }
+}
+
+fn remote_branch_menu(
+    ui: &mut Ui,
+    repo: &RepoSnapshot,
+    branch: &RemoteBranch,
+    busy: bool,
+    actions: &mut Vec<Action>,
+) {
+    let local = branch.branch_name();
+    match repo.branch(local) {
+        Some(_) if repo.worktree_for_branch(local).is_none() => menu_item(
+            ui,
+            &format!("Check out {local}"),
+            !busy,
+            actions,
+            Action::Checkout(local.to_owned()),
+        ),
+        Some(_) => {}
+        None => {
+            menu_item(
+                ui,
+                &format!("Check out as {local}"),
+                !busy,
+                actions,
+                Action::CheckoutRemote {
+                    local: local.to_owned(),
+                    remote: branch.name.clone(),
+                },
+            );
+            menu_item(
+                ui,
+                "New worktree for this branch…",
+                !busy,
+                actions,
+                Action::NewWorktree(Some(branch.name.clone())),
+            );
+        }
+    }
+    menu_item(
+        ui,
+        "New branch from here…",
+        !busy,
+        actions,
+        Action::OpenDialog(DialogKind::NewBranch {
+            name: String::new(),
+            start: branch.name.clone(),
+            start_label: branch.name.clone(),
+            checkout: true,
+        }),
+    );
+    menu_item(
+        ui,
+        &format!("Delete on {}…", branch.remote),
+        !busy,
+        actions,
+        Action::Ask(Box::new(Confirm {
+            title: format!("Delete {} on the remote?", branch.name),
+            body: format!(
+                "The branch {local} is deleted on {} for everyone. Local branches are not touched.",
+                branch.remote
+            ),
+            confirm_label: "Delete on remote".to_owned(),
+            action: Action::Remote(RemoteOp::DeleteRemoteBranch {
+                remote: branch.remote.clone(),
+                branch: local.to_owned(),
+            }),
+        })),
+    );
+    ui.separator();
+    if ui.button("Copy name").clicked() {
+        ui.ctx().copy_text(branch.name.clone());
+        ui.close();
+    }
+}
+
+fn tag_menu(ui: &mut Ui, repo: &RepoSnapshot, tag: &str, busy: bool, actions: &mut Vec<Action>) {
+    let remote = repo
+        .remotes
+        .iter()
+        .find(|r| r.name == "origin")
+        .or(repo.remotes.first());
+    if let Some(remote) = remote {
+        menu_item(
+            ui,
+            &format!("Push to {}", remote.name),
+            !busy,
+            actions,
+            Action::Remote(RemoteOp::PushTag {
+                remote: remote.name.clone(),
+                tag: tag.to_owned(),
+            }),
+        );
+    }
+    menu_item(
+        ui,
+        "Delete…",
+        !busy,
+        actions,
+        Action::Ask(Box::new(Confirm {
+            title: format!("Delete tag {tag}?"),
+            body: "Deletes the local tag. A copy already pushed to a remote stays there."
+                .to_owned(),
+            confirm_label: "Delete tag".to_owned(),
+            action: Action::DeleteTag(tag.to_owned()),
+        })),
+    );
+    ui.separator();
+    if ui.button("Copy name").clicked() {
+        ui.ctx().copy_text(tag.to_owned());
         ui.close();
     }
 }
@@ -409,7 +604,7 @@ fn branch_row(ui: &mut Ui, repo: &RepoSnapshot, branch: &Branch, head: Option<&s
     response.on_hover_text(tip)
 }
 
-fn remotes(ui: &mut Ui, repo: &RepoSnapshot, actions: &mut Vec<Action>) {
+fn remotes(ui: &mut Ui, repo: &RepoSnapshot, busy: bool, actions: &mut Vec<Action>) {
     if repo.remotes.is_empty() {
         faint_row(ui, "No remotes");
         return;
@@ -432,6 +627,7 @@ fn remotes(ui: &mut Ui, repo: &RepoSnapshot, actions: &mut Vec<Action>) {
             if response.clicked() {
                 actions.push(Action::Reveal(branch.target));
             }
+            response.context_menu(|ui| remote_branch_menu(ui, repo, branch, busy, actions));
         }
     }
 }

@@ -497,6 +497,9 @@ impl GraftApp {
         if let (Some(form), Some(snap)) = (&mut project.new_worktree, &project.snapshot) {
             ui::new_worktree::show(ui.ctx(), form, snap, &mut actions);
         }
+        if let Some(dialog) = &mut project.dialog {
+            ui::dialog::show(ui.ctx(), dialog, &mut actions);
+        }
         let project = &self.projects[index];
         let bar = |margin| Frame::new().fill(color::BAR_BG).inner_margin(margin);
 

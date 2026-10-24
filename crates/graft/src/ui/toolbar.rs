@@ -5,7 +5,7 @@ use egui::{Align, Frame, Id, Key, Layout, Margin, Modifiers, Sense, Stroke, Text
 
 use super::icons::{self, Icon};
 use super::widgets::{Tone, tool_button, toolbar_divider};
-use crate::project::{Action, Project, RemoteOp, Tab};
+use crate::project::{Action, DialogKind, Project, RemoteOp, Tab};
 use crate::theme::{RADIUS, color};
 
 const LATER: &str = "Coming in a later step";
@@ -46,7 +46,24 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>, search: &
         }
         toolbar_divider(ui);
 
-        tool_button(ui, None, "Branch", None, Tone::Normal).on_hover_text(LATER);
+        if tool_button(ui, None, "Branch", None, Tone::Normal)
+            .on_hover_text("New branch from the current commit")
+            .clicked()
+            && !busy
+            && let Some(wt) = project.worktree()
+        {
+            let (start, start_label) = match (&wt.branch, wt.head) {
+                (Some(b), _) => (b.clone(), b.clone()),
+                (None, Some(id)) => (id.to_string(), graft_core::short(&id)),
+                (None, None) => ("HEAD".to_owned(), "HEAD".to_owned()),
+            };
+            actions.push(Action::OpenDialog(DialogKind::NewBranch {
+                name: String::new(),
+                start,
+                start_label,
+                checkout: true,
+            }));
+        }
         tool_button(ui, None, "Merge", None, Tone::Normal).on_hover_text(LATER);
         if tool_button(ui, None, "Stash", None, Tone::Normal).clicked() {
             actions.push(Action::SetTab(Tab::Stashes));

@@ -87,3 +87,57 @@ fn add_copy_lock_and_remove() {
     worktree::prune(&git).unwrap();
     assert_eq!(snapshot::load(&git).unwrap().worktrees.len(), 1);
 }
+
+#[test]
+fn branches_tags_and_commit_ops() {
+    use graft_core::refs::{self, ResetMode};
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("r");
+    std::fs::create_dir(&dir).unwrap();
+    sh(&dir, &["init", "-q", "-b", "main"]);
+    sh(&dir, &["config", "user.name", "Ada"]);
+    sh(&dir, &["config", "user.email", "ada@example.com"]);
+    let git = Git::new(&dir, Console::default());
+    let commit = |file: &str, text: &str, msg: &str| {
+        std::fs::write(dir.join(file), text).unwrap();
+        sh(&dir, &["add", file]);
+        sh(&dir, &["commit", "-q", "-m", msg]);
+    };
+    commit("a.txt", "a\n", "one");
+    commit("a.txt", "a\nb\n", "two");
+
+    assert!(refs::check_branch_name(&git, "bad name").is_err());
+    assert!(refs::check_branch_name(&git, "bad..name").is_err());
+    refs::create_branch(&git, "topic", "HEAD~1", true).unwrap();
+    commit("t.txt", "t\n", "topic work");
+    refs::switch(&git, "main").unwrap();
+
+    // Not merged: plain delete refuses with a recognisable message.
+    let err = format!(
+        "{:#}",
+        refs::delete_branch(&git, "topic", false).unwrap_err()
+    );
+    assert!(err.contains(refs::NOT_MERGED), "{err}");
+    refs::rename_branch(&git, "topic", "topic2").unwrap();
+
+    refs::cherry_pick(&git, "topic2").unwrap();
+    assert!(dir.join("t.txt").exists());
+    refs::revert(&git, "HEAD").unwrap();
+    assert!(!dir.join("t.txt").exists());
+    refs::delete_branch(&git, "topic2", true).unwrap();
+
+    refs::create_tag(&git, "v1", "HEAD", Some("Release 1")).unwrap();
+    refs::create_tag(&git, "light", "HEAD~1", None).unwrap();
+    assert!(refs::create_tag(&git, "bad tag", "HEAD", None).is_err());
+    refs::delete_tag(&git, "light").unwrap();
+
+    refs::undo_last_commit(&git).unwrap();
+    let staged = Command::new("git")
+        .args(["diff", "--cached", "--name-only"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&staged.stdout).trim(), "t.txt");
+    refs::reset(&git, "HEAD", ResetMode::Hard).unwrap();
+    refs::switch_detached(&git, "v1").unwrap();
+}

@@ -48,6 +48,32 @@ pub fn push(git: &Git, cancel: &CancelToken, on_progress: impl FnMut(Progress)) 
     )
 }
 
+/// Push the current branch over a diverged upstream, but only if the upstream
+/// is still where we last saw it (someone else's new commits are never lost).
+pub fn force_push(
+    git: &Git,
+    cancel: &CancelToken,
+    on_progress: impl FnMut(Progress),
+) -> Result<()> {
+    current_branch(git)?;
+    if upstream(git)?.is_none() {
+        return push(git, cancel, on_progress);
+    }
+    run(
+        git,
+        &["push", "--progress", "--force-with-lease"],
+        cancel,
+        on_progress,
+    )
+}
+
+/// Whether a push failed because the remote has commits we don't.
+pub fn is_rejected_push(error: &str) -> bool {
+    error.contains("[rejected]")
+        || error.contains("non-fast-forward")
+        || error.contains("fetch first")
+}
+
 fn current_branch(git: &Git) -> Result<String> {
     let out = git.run_raw(["symbolic-ref", "--short", "-q", "HEAD"])?;
     let branch = out.stdout_str().trim().to_owned();
@@ -65,7 +91,7 @@ fn upstream(git: &Git) -> Result<Option<String>> {
         .filter(|s| !s.is_empty()))
 }
 
-fn run(
+pub(crate) fn run(
     git: &Git,
     args: &[&str],
     cancel: &CancelToken,
