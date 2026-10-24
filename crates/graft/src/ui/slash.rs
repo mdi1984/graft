@@ -2,9 +2,10 @@
 //! with checkboxes. Nothing is deleted until "Slash N" is clicked.
 
 use egui::{Align, Id, Key, Layout, RichText, ScrollArea, Ui};
+use graft_core::repo::Progress;
 use graft_core::slash::{Candidate, Plan, Reason};
 
-use super::widgets::{ButtonKind, button, elided_path, spinner};
+use super::widgets::{ButtonKind, button, elided_path, progress_bar, spinner};
 use crate::project::{Action, SlashView, SlashedBranch};
 use crate::theme::{self, color};
 
@@ -14,7 +15,7 @@ pub fn show(
     ctx: &egui::Context,
     view: &SlashView,
     slashed: &[SlashedBranch],
-    progress: Option<String>,
+    progress: Option<Progress>,
     actions: &mut Vec<Action>,
 ) {
     let response = super::widgets::modal(ctx, Id::unique("slash-modal")).show(ctx, |ui| {
@@ -38,7 +39,10 @@ pub fn show(
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
                     spinner(ui, rect.center(), 5.0, color::text_weak());
-                    let line = progress.unwrap_or_else(|| "Fetching and scanning…".to_owned());
+                    let line = progress
+                        .as_ref()
+                        .map(|p| p.line.clone())
+                        .unwrap_or_else(|| "Fetching and scanning…".to_owned());
                     ui.label(RichText::new(line).color(color::text_weak()));
                 });
                 ui.add_space(8.0);
@@ -57,7 +61,7 @@ pub fn show(
                     }
                 });
             }
-            Some(Ok(plan)) => plan_ui(ui, view, plan, slashed, actions),
+            Some(Ok(plan)) => plan_ui(ui, view, plan, slashed, progress.as_ref(), actions),
         }
     });
     let running = view.running;
@@ -71,6 +75,7 @@ fn plan_ui(
     view: &SlashView,
     plan: &Plan,
     slashed: &[SlashedBranch],
+    progress: Option<&Progress>,
     actions: &mut Vec<Action>,
 ) {
     if let Some(error) = &plan.fetch_error {
@@ -173,6 +178,13 @@ fn plan_ui(
     }
 
     ui.add_space(8.0);
+    if view.running {
+        // Deleting many worktrees takes a while: say where it is.
+        let line = progress.map_or("Starting…", |p| p.line.as_str());
+        ui.label(RichText::new(line).color(color::text_mid()));
+        progress_bar(ui, progress.and_then(|p| p.fraction), WIDTH);
+        ui.add_space(8.0);
+    }
     let count = view.checked.iter().filter(|on| **on).count();
     footer(ui, |ui| {
         let label = match count {
@@ -182,13 +194,16 @@ fn plan_ui(
         if button(ui, &label, ButtonKind::Primary, count > 0 && !view.running).clicked() {
             actions.push(Action::RunSlash);
         }
-        if button(ui, "Cancel", ButtonKind::Secondary, !view.running).clicked() {
-            actions.push(Action::CloseSlash);
-        }
         if view.running {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-            spinner(ui, rect.center(), 5.0, color::text_weak());
-            ui.label(RichText::new("Slashing…").color(color::text_weak()));
+            // Stops after the current item; what is done stays restorable.
+            if button(ui, "Stop", ButtonKind::Secondary, true)
+                .on_hover_text("Stop after the current item")
+                .clicked()
+            {
+                actions.push(Action::CancelOperation);
+            }
+        } else if button(ui, "Cancel", ButtonKind::Secondary, true).clicked() {
+            actions.push(Action::CloseSlash);
         }
     });
 }

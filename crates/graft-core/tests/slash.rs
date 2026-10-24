@@ -115,7 +115,7 @@ fn scan_execute_and_restore() {
         .filter(|c| c.suggested)
         .cloned()
         .collect();
-    let outcome = slash::execute(&git, &chosen);
+    let outcome = slash::execute(&git, &chosen, &CancelToken::default(), |_| {});
     assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
     assert!(!clean.exists());
     let snap = snapshot::load(&git).unwrap();
@@ -182,7 +182,7 @@ fn worktrees_with_very_long_paths_are_slashed() {
     assert_eq!(chosen.len(), 1);
     assert!(chosen[0].worktree.is_some());
 
-    let outcome = slash::execute(&git, &chosen);
+    let outcome = slash::execute(&git, &chosen, &CancelToken::default(), |_| {});
     assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
     assert_eq!(outcome.worktrees_removed, 1);
     assert_eq!(outcome.slashed.len(), 1);
@@ -190,11 +190,89 @@ fn worktrees_with_very_long_paths_are_slashed() {
 }
 
 #[test]
-fn a_dirty_worktree_with_long_paths_is_kept() {
+fn a_worktree_that_cannot_be_removed_keeps_its_branch() {
     let tmp = tempfile::tempdir().unwrap();
     let (git, wt) = repo_with_merged_branch(tmp.path());
+    let snap = snapshot::load(&git).unwrap();
+    let plan = slash::plan(&git, &snap, PROTECTED).unwrap();
+    let chosen: Vec<_> = plan
+        .candidates
+        .into_iter()
+        .filter(|c| c.branch.as_deref() == Some("merged-deep"))
+        .collect();
+    // Changed after the plan was made, so removing it fails.
     std::fs::write(wt.join("notes.txt"), "not committed\n").unwrap();
-
-    assert!(worktree::remove(&git, &wt, false).is_err());
+    let mut lines = Vec::new();
+    let outcome = slash::execute(&git, &chosen, &CancelToken::default(), |p| {
+        lines.push(p.line);
+    });
+    assert_eq!(outcome.worktrees_removed, 0);
+    assert_eq!(outcome.errors.len(), 1, "{:?}", outcome.errors);
+    // Its branch stays with it, and the progress says so.
+    assert!(outcome.slashed.is_empty());
+    assert_eq!(
+        lines.last().unwrap(),
+        "Keeping branch merged-deep: its worktree is still there (2 of 2)"
+    );
     assert!(wt.join("notes.txt").exists());
+    let branches = git.read(["branch", "--list", "merged-deep"]).unwrap();
+    assert!(branches.contains("merged-deep"));
+}
+
+fn repo_with_merged_branches(tmp: &Path, count: usize) -> (Git, Vec<slash::Candidate>) {
+    let main = tmp.join("app");
+    std::fs::create_dir(&main).unwrap();
+    sh(&main, &["init", "-q", "-b", "main"]);
+    sh(&main, &["config", "user.name", "Ada"]);
+    sh(&main, &["config", "user.email", "ada@example.com"]);
+    commit(&main, "a.txt", "a\n");
+    for i in 0..count {
+        sh(&main, &["branch", &format!("done/{i}")]);
+    }
+    let git = Git::new(&main, Console::default());
+    let snap = snapshot::load(&git).unwrap();
+    let mut chosen = slash::plan(&git, &snap, PROTECTED).unwrap().candidates;
+    chosen.sort_by(|a, b| a.branch.cmp(&b.branch));
+    assert_eq!(chosen.len(), count);
+    (git, chosen)
+}
+
+#[test]
+fn every_step_is_reported() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (git, chosen) = repo_with_merged_branches(tmp.path(), 5);
+    let mut lines = Vec::new();
+    let outcome = slash::execute(&git, &chosen, &CancelToken::default(), |p| {
+        lines.push((p.line, p.fraction));
+    });
+    assert_eq!(outcome.slashed.len(), 5);
+    assert!(!outcome.cancelled);
+    assert_eq!(lines.len(), 5);
+    assert_eq!(
+        lines[0],
+        ("Deleting branch done/0 (1 of 5)".to_owned(), Some(0.0))
+    );
+    assert_eq!(
+        lines[4],
+        ("Deleting branch done/4 (5 of 5)".to_owned(), Some(0.8))
+    );
+}
+
+#[test]
+fn cancelling_stops_after_the_current_step() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (git, chosen) = repo_with_merged_branches(tmp.path(), 5);
+    let cancel = CancelToken::default();
+    let mut steps = 0;
+    let outcome = slash::execute(&git, &chosen, &cancel, |_| {
+        steps += 1;
+        if steps == 2 {
+            cancel.cancel();
+        }
+    });
+    // The step that was running finishes; nothing after it starts.
+    assert!(outcome.cancelled);
+    assert_eq!(outcome.slashed.len(), 2);
+    let left = git.read(["branch", "--list", "done/*"]).unwrap();
+    assert_eq!(left.lines().count(), 3);
 }
