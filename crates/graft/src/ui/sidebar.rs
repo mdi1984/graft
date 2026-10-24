@@ -827,7 +827,7 @@ fn remotes(
     });
     for remote in &repo.remotes {
         simple_row(ui, Icon::Cloud, &remote.name, color::text_mid(), 8.0)
-            .on_hover_text(&remote.fetch_url)
+            .on_hover_text(graft_core::console::redact(&remote.fetch_url))
             .context_menu(|ui| {
                 menu_item(
                     ui,

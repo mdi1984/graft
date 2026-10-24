@@ -38,7 +38,7 @@ pub use file_history::{FileHistoryMode, FileHistoryView};
 pub use refs::{Dialog, DialogKind};
 pub use review::{ReviewState, ReviewView};
 pub use slash::{SlashView, SlashedBranch};
-pub use worktrees::{BranchMode, NewWorktreeForm, checkout_choices, open_in_ide, open_terminal};
+pub use worktrees::{BranchMode, NewWorktreeForm, checkout_choices};
 
 /// Commits loaded into the graph. Enough for years of history in big repos.
 const HISTORY_LIMIT: usize = 100_000;
@@ -796,9 +796,9 @@ impl Project {
             Action::RemoveWorktree { path, force } => self.remove_worktree(path, force),
             Action::LockWorktree { path, locked } => self.lock_worktree(path, locked),
             Action::PruneWorktrees => self.prune_worktrees(),
-            Action::OpenTerminal(dir) => open_terminal(&dir),
+            Action::OpenTerminal(dir) => crate::launch::open_terminal(&dir),
             Action::OpenFolder(dir) => {
-                if let Err(e) = open::that_detached(&dir) {
+                if let Err(e) = crate::launch::open_folder(&dir) {
                     self.notices
                         .push(format!("Could not open {}: {e}", dir.display()));
                 }
@@ -860,7 +860,9 @@ impl Project {
             | Action::MarkResolved(_)
             | Action::ContinueOp(_)
             | Action::AbortOp { .. } => self.apply_conflict_action(action),
-            Action::OpenInIde(path) => open_in_ide(&path, &self.settings.ide_command),
+            Action::OpenInIde(path) => {
+                crate::launch::open_in_ide(&path, &self.settings.ide_command)
+            }
             Action::SelectReviewFile(_)
             | Action::ToggleViewed(_)
             | Action::SetReviewBase(_)

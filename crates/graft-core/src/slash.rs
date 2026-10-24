@@ -234,7 +234,7 @@ pub fn execute(git: &Git, chosen: &[Candidate]) -> Outcome {
         {
             continue;
         }
-        match git.run(["branch", "-D", branch]) {
+        match git.run(["branch", "-D", "--end-of-options", branch]) {
             Ok(_) => outcome.slashed.push(Slashed {
                 branch: branch.clone(),
                 target,

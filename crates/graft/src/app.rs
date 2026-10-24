@@ -328,7 +328,7 @@ impl GraftApp {
                 let progress = Arc::new(Mutex::new(Progress::default()));
                 let cancel = CancelToken::default();
                 self.start.busy = Some(Busy {
-                    label: format!("Cloning {url}"),
+                    label: format!("Cloning {}", graft_core::console::redact(&url)),
                     progress: progress.clone(),
                     cancel: Some(cancel.clone()),
                 });

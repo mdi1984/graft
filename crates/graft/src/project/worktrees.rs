@@ -314,39 +314,3 @@ impl Project {
         }
     }
 }
-
-/// Open a terminal in `dir`: Windows Terminal if installed, else cmd.
-pub fn open_terminal(dir: &Path) {
-    let wt = std::process::Command::new("wt.exe")
-        .arg("-d")
-        .arg(dir)
-        .spawn();
-    if wt.is_err() {
-        let _ = std::process::Command::new("cmd.exe")
-            .args(["/c", "start", "", "/D"])
-            .arg(dir)
-            .arg("cmd.exe")
-            .spawn();
-    }
-}
-
-/// Open a folder or file in VS Code (`code` on the PATH); without it, open the
-/// path with its default program.
-pub fn open_in_ide(path: &Path, command: &str) {
-    let path = path.to_path_buf();
-    let command = command.trim().to_owned();
-    std::thread::spawn(move || {
-        let mut cmd = std::process::Command::new("cmd.exe");
-        cmd.arg("/c").args(command.split_whitespace()).arg(&path);
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-        let ok = !command.is_empty() && cmd.status().is_ok_and(|s| s.success());
-        if !ok {
-            let _ = open::that_detached(&path);
-        }
-    });
-}

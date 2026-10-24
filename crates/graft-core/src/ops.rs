@@ -149,6 +149,12 @@ fn remove_lines(
     diff: &FileDiff,
     selected: impl Fn(usize, usize) -> bool,
 ) -> Result<()> {
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        bail!(
+            "{} is a link; Graft only edits plain files.",
+            path.display()
+        );
+    }
     let mut out = Vec::new();
     for (h, hunk) in diff.hunks.iter().enumerate() {
         for (l, line) in hunk.lines.iter().enumerate() {

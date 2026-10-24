@@ -171,3 +171,32 @@ fn commit_diff_and_root_commit() {
     assert!(d.new_file);
     assert_eq!(d.added(), 5);
 }
+
+/// File names are never patterns: discarding `x[ab].txt` leaves `xa.txt` alone.
+#[test]
+fn discarding_a_file_with_glob_characters_touches_only_that_file() {
+    let (_tmp, git) = repo();
+    let dir = git.cwd().to_path_buf();
+    std::fs::write(dir.join("x[ab].txt"), "one\n").unwrap();
+    std::fs::write(dir.join("xa.txt"), "one\n").unwrap();
+    sh(&dir, &["add", "."]);
+    sh(&dir, &["commit", "-q", "-m", "two files"]);
+    std::fs::write(dir.join("x[ab].txt"), "changed\n").unwrap();
+    std::fs::write(dir.join("xa.txt"), "keep me\n").unwrap();
+
+    let d = diff::load(&git, &Source::Unstaged, "x[ab].txt").unwrap();
+    assert_eq!(d.path, "x[ab].txt");
+    let texts: Vec<String> = d
+        .hunks
+        .iter()
+        .flat_map(|h| &h.lines)
+        .map(|l| l.text())
+        .collect();
+    assert!(texts.contains(&"changed".to_owned()), "{texts:?}");
+    assert!(!texts.contains(&"keep me".to_owned()), "{texts:?}");
+
+    ops::discard_paths(&git, &["x[ab].txt".to_owned()], &[]).unwrap();
+    let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap();
+    assert_eq!(read("x[ab].txt").trim(), "one");
+    assert_eq!(read("xa.txt").trim(), "keep me");
+}

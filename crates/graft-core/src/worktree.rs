@@ -140,7 +140,10 @@ pub fn copy_ignored(from: &Git, to: &Path, patterns: &str) -> Result<Vec<String>
         }
         let src = from.cwd().join(rel.as_ref());
         let dst = to.join(rel.as_ref());
-        if dst.exists() || !src.is_file() {
+        // A link in the new worktree (a checked-in symlink folder) must not
+        // send the copy somewhere outside it.
+        if dst.exists() || !src.is_file() || crate::model::through_link(to, Path::new(rel.as_ref()))
+        {
             continue;
         }
         if let Some(parent) = dst.parent() {

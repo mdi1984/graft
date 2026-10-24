@@ -3,6 +3,7 @@
 
 mod app;
 mod fonts;
+mod launch;
 mod native;
 mod project;
 mod settings;

@@ -57,7 +57,7 @@ pub fn create_branch(git: &Git, name: &str, start: &str, checkout: bool) -> Resu
 
 /// Switch the worktree to a local branch.
 pub fn switch(git: &Git, branch: &str) -> Result<()> {
-    git.run(["switch", branch])?;
+    git.run(["switch", "--end-of-options", branch])?;
     Ok(())
 }
 
@@ -69,7 +69,7 @@ pub fn switch_tracking(git: &Git, local: &str, remote_branch: &str) -> Result<()
 
 /// Check out a commit without a branch.
 pub fn switch_detached(git: &Git, rev: &str) -> Result<()> {
-    git.run(["switch", "--detach", rev])?;
+    git.run(["switch", "--detach", "--end-of-options", rev])?;
     Ok(())
 }
 
@@ -82,7 +82,12 @@ pub fn rename_branch(git: &Git, old: &str, new: &str) -> Result<()> {
 /// Delete a local branch. Without `force`, git refuses if it is not merged;
 /// the error then contains [`NOT_MERGED`].
 pub fn delete_branch(git: &Git, name: &str, force: bool) -> Result<()> {
-    git.run(["branch", if force { "-D" } else { "-d" }, name])?;
+    git.run([
+        "branch",
+        if force { "-D" } else { "-d" },
+        "--end-of-options",
+        name,
+    ])?;
     Ok(())
 }
 
@@ -144,16 +149,16 @@ pub fn push_tag(
 
 /// Ok(true): stopped with conflicts (see [`crate::conflicts`]).
 pub fn cherry_pick(git: &Git, rev: &str) -> Result<bool> {
-    crate::conflicts::run_may_conflict(git, &["cherry-pick", rev])
+    crate::conflicts::run_may_conflict(git, &["cherry-pick", "--end-of-options", rev])
 }
 
 /// Ok(true): stopped with conflicts (see [`crate::conflicts`]).
 pub fn revert(git: &Git, rev: &str) -> Result<bool> {
-    crate::conflicts::run_may_conflict(git, &["revert", "--no-edit", rev])
+    crate::conflicts::run_may_conflict(git, &["revert", "--no-edit", "--end-of-options", rev])
 }
 
 pub fn reset(git: &Git, rev: &str, mode: ResetMode) -> Result<()> {
-    git.run(["reset", mode.flag(), rev])?;
+    git.run(["reset", mode.flag(), "--end-of-options", rev])?;
     Ok(())
 }
 
