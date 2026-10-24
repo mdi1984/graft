@@ -197,6 +197,8 @@ fn git_file_matters(inside: &Path) -> bool {
 fn check_ignore(root: &Path, paths: &[PathBuf]) -> Option<HashSet<PathBuf>> {
     let mut child = cli::command(root)
         .args(["check-ignore", "-z", "--stdin"])
+        // check-ignore refuses literal pathspecs; it reads plain paths anyway.
+        .env_remove("GIT_LITERAL_PATHSPECS")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

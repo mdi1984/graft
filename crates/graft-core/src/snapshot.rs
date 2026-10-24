@@ -78,6 +78,11 @@ fn parse_refs(text: &str) -> Refs {
         let Ok(oid) = Oid::from_hex(oid.as_bytes()) else {
             continue;
         };
+        // Git itself never creates names like `-x`, but a repository can
+        // contain them, and git would read one as an option. Leave them out.
+        if name.split('/').any(|part| part.starts_with('-')) {
+            continue;
+        }
         if let Some(branch) = name.strip_prefix("refs/heads/") {
             refs.branches.push(Branch {
                 name: branch.to_owned(),
@@ -230,6 +235,22 @@ fn load_stash_count(git: &Git) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refs_git_would_read_as_options_are_left_out() {
+        let oid = "1111111111111111111111111111111111111111";
+        let text = format!(
+            "refs/heads/--no-stat\0{oid}\0\0\0\0\n\
+             refs/heads/ok\0{oid}\0\0\0\0\n\
+             refs/remotes/origin/-x\0{oid}\0\0\0\0\n\
+             refs/tags/-d\0{oid}\0\0\0\0\n"
+        );
+        let refs = parse_refs(&text);
+        assert_eq!(refs.branches.len(), 1);
+        assert_eq!(refs.branches[0].name, "ok");
+        assert!(refs.remote_branches.is_empty());
+        assert!(refs.tags.is_empty());
+    }
 
     #[test]
     fn refs_and_tracking() {

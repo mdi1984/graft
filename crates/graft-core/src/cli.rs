@@ -111,6 +111,11 @@ impl Git {
         if let Some(index) = &self.index_file {
             cmd.env("GIT_INDEX_FILE", index);
         }
+        // `stash push -u` stores untracked files but leaves them in place when
+        // pathspecs are literal (git 2.5x). Graft never passes paths to stash.
+        if args.first().is_some_and(|a| a == "stash") {
+            cmd.env_remove("GIT_LITERAL_PATHSPECS");
+        }
         cmd.args(&args);
         cmd.stdin(if input.is_some() {
             Stdio::piped()
@@ -266,6 +271,9 @@ pub(crate) fn command(cwd: &Path) -> Command {
         // Reads like `status` must not rewrite the index: that would wake the
         // file watcher and refresh forever.
         .env("GIT_OPTIONAL_LOCKS", "0")
+        // Paths are file names, never patterns: `x[ab].txt` must not also
+        // match `xa.txt` when discarding or staging.
+        .env("GIT_LITERAL_PATHSPECS", "1")
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE");
@@ -303,9 +311,9 @@ fn keep_final_progress(stderr: &[u8]) -> Vec<u8> {
 
 /// The most useful line(s) of a failed git command, for showing to the user.
 pub fn failure_message(out: &Output) -> String {
-    let stderr = out.stderr_str();
+    let stderr = crate::console::redact(&out.stderr_str());
     let text = if stderr.is_empty() {
-        out.stdout_str().trim().to_owned()
+        crate::console::redact(out.stdout_str().trim())
     } else {
         stderr
     };

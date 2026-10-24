@@ -76,7 +76,7 @@ pub fn default_base(git: &Git, branches: &[String], current: Option<&str>) -> Op
 /// `git` points at the worktree under review.
 pub fn load(git: &Git, base: &str) -> Result<Review> {
     let merge_base = git
-        .read(["merge-base", base, "HEAD"])
+        .read(["merge-base", "--end-of-options", base, "HEAD"])
         .with_context(|| format!("{base} and this branch have no common history"))?;
     let merge_base = merge_base.trim().to_owned();
     let commits = git

@@ -83,8 +83,34 @@ struct Inner {
     generation: u64,
 }
 
+/// `text` with the credentials of any URL in it masked:
+/// `https://user:token@host/x` becomes `https://***@host/x`.
+pub fn redact(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("://") {
+        let (head, tail) = rest.split_at(at + 3);
+        out.push_str(head);
+        let authority = tail
+            .find(|c: char| c == '/' || c.is_whitespace() || c == '\'' || c == '"')
+            .unwrap_or(tail.len());
+        match tail[..authority].rfind('@') {
+            Some(user_end) => {
+                out.push_str("***");
+                rest = &tail[user_end..];
+            }
+            None => rest = tail,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 impl Console {
-    pub fn push(&self, entry: Entry) {
+    pub fn push(&self, mut entry: Entry) {
+        entry.command = redact(&entry.command);
+        entry.stdout = redact(&entry.stdout);
+        entry.stderr = redact(&entry.stderr);
         let mut inner = self.inner.lock().expect("console lock");
         if inner.entries.len() == MAX_ENTRIES {
             inner.entries.pop_front();
@@ -112,5 +138,24 @@ impl Console {
         let mut inner = self.inner.lock().expect("console lock");
         inner.entries.clear();
         inner.generation += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact;
+
+    #[test]
+    fn credentials_in_urls_are_masked() {
+        assert_eq!(
+            redact("git clone -- https://ada:ghp_secret@github.com/a/b.git C:\\x"),
+            "git clone -- https://***@github.com/a/b.git C:\\x"
+        );
+        assert_eq!(
+            redact("fatal: 'https://tok@host/r' and https://host/@not-user"),
+            "fatal: 'https://***@host/r' and https://host/@not-user"
+        );
+        assert_eq!(redact("no urls here"), "no urls here");
+        assert_eq!(redact("ssh://git@host:22/x"), "ssh://***@host:22/x");
     }
 }

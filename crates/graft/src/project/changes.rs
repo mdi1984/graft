@@ -432,17 +432,13 @@ impl Project {
             Action::ConfirmNo => self.confirm = None,
             Action::OpenPath(path) => {
                 let full = self.nav.worktree.join(&path);
-                if let Err(e) = open::that_detached(&full) {
+                if let Err(e) = crate::launch::open_path(&full, &self.settings.ide_command) {
                     self.notices
                         .push(format!("Could not open {}: {e}", full.display()));
                 }
             }
             Action::RevealPath(path) => {
-                let full =
-                    graft_core::repo::native(&self.nav.worktree.join(&path).to_string_lossy());
-                let mut arg = std::ffi::OsString::from("/select,");
-                arg.push(&full);
-                if let Err(e) = std::process::Command::new("explorer").arg(arg).spawn() {
+                if let Err(e) = crate::launch::reveal(&self.nav.worktree.join(&path)) {
                     self.notices.push(format!("Could not open Explorer: {e}"));
                 }
             }

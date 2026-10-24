@@ -166,6 +166,16 @@ pub fn null_oid() -> Oid {
     Oid::null(gix::hash::Kind::Sha1)
 }
 
+/// Whether `rel` under `root` passes through a symlink or junction (or is
+/// one). Writing there could land outside the repository.
+pub fn through_link(root: &Path, rel: &Path) -> bool {
+    let mut at = root.to_path_buf();
+    rel.components().any(|part| {
+        at.push(part);
+        std::fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink())
+    })
+}
+
 /// Compare paths the way Windows does: case-insensitive, either slash, no
 /// trailing separator.
 pub fn same_path(a: &Path, b: &Path) -> bool {

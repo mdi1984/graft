@@ -54,7 +54,9 @@ pub fn active(main: &Path) -> Option<Preview> {
             }
             "source" => source = Some(PathBuf::from(value)),
             "head" => head = Oid::from_hex(value.as_bytes()).ok(),
-            "added" => added.push(value.to_owned()),
+            // Only paths inside main: this file is in .git, which a
+            // repository's tooling can write to.
+            "added" if is_inside(value) => added.push(value.to_owned()),
             _ => {}
         }
     }
@@ -64,6 +66,14 @@ pub fn active(main: &Path) -> Option<Preview> {
         head: head?,
         added,
     })
+}
+
+/// A relative path made of plain names: no drive, root, `..` or `.`.
+fn is_inside(path: &str) -> bool {
+    !path.is_empty()
+        && Path::new(path)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
 }
 
 fn write_marker(main: &Path, preview: &Preview) -> Result<()> {
@@ -221,11 +231,33 @@ pub fn restore_main(main: &Git) -> Result<()> {
     };
     clear(main, &preview)?;
     match &preview.restore {
-        Restore::Branch(b) => main.run(["checkout", "-q", b])?,
+        Restore::Branch(b) => main.run(["checkout", "-q", "--end-of-options", b])?,
         Restore::Detached(id) => main.run(["checkout", "-q", "--detach", &id.to_string()])?,
     };
     if let Some(path) = marker_path(main.cwd()) {
         std::fs::remove_file(path)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_inside;
+
+    #[test]
+    fn marker_paths_stay_inside_main() {
+        assert!(is_inside("src/new.rs"));
+        assert!(is_inside("a"));
+        for bad in [
+            "",
+            "../x",
+            "src/../../x",
+            r"C:\Windows\x",
+            r"\\server\share\x",
+            "/etc/x",
+            "./x",
+        ] {
+            assert!(!is_inside(bad), "{bad}");
+        }
+    }
 }

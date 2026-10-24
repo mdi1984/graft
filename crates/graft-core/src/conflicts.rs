@@ -148,13 +148,13 @@ pub fn merge(git: &Git, rev: &str, no_ff: bool) -> Result<bool> {
     if no_ff {
         args.push("--no-ff");
     }
-    args.push(rev);
+    args.extend(["--end-of-options", rev]);
     run_may_conflict(git, &args)
 }
 
 /// Rebase the current branch onto `onto`. Ok(true): stopped with conflicts.
 pub fn rebase(git: &Git, onto: &str) -> Result<bool> {
-    run_may_conflict(git, &["rebase", onto])
+    run_may_conflict(git, &["rebase", "--end-of-options", onto])
 }
 
 /// Continue after all conflicts are resolved, without opening an editor.
