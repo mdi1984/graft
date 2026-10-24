@@ -28,7 +28,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
     Panel::bottom("commit-box")
         .frame(
             Frame::new()
-                .fill(color::SIDEBAR_BG)
+                .fill(color::sidebar_bg())
                 .inner_margin(Margin::symmetric(14, 10)),
         )
         .show(ui, |ui| commit_box(ui, project, &status, actions));
@@ -39,7 +39,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
         .size_range(240.0..=720.0)
         .frame(
             Frame::new()
-                .fill(color::APP_BG)
+                .fill(color::app_bg())
                 .inner_margin(Margin::symmetric(8, 8)),
         )
         .show(ui, |ui| file_lists(ui, project, &status, actions));
@@ -147,7 +147,7 @@ fn section(ui: &mut Ui, title: &str, count: usize, link: Option<&str>, busy: boo
     };
     let galley = ui
         .painter()
-        .layout_no_wrap(link.to_owned(), theme::small(), color::AHEAD_FG);
+        .layout_no_wrap(link.to_owned(), theme::small(), color::ahead_fg());
     let r = Rect::from_min_size(
         pos2(rect.right() - galley.size().x - 8.0, rect.top() + 3.0),
         vec2(galley.size().x + 6.0, 18.0),
@@ -158,11 +158,11 @@ fn section(ui: &mut Ui, title: &str, count: usize, link: Option<&str>, busy: boo
         Sense::click(),
     );
     let fg = if busy {
-        color::TEXT_FAINT
+        color::text_faint()
     } else if response.hovered() {
-        color::TEXT
+        color::text()
     } else {
-        color::AHEAD_FG
+        color::ahead_fg()
     };
     ui.painter()
         .galley(pos2(r.left() + 3.0, y - galley.size().y / 2.0), galley, fg);
@@ -173,7 +173,7 @@ fn hint(ui: &mut Ui, text: &str) {
     ui.add_space(2.0);
     ui.label(
         RichText::new(text)
-            .color(color::TEXT_FAINT)
+            .color(color::text_faint())
             .size(theme::SMALL_SIZE),
     );
     ui.add_space(2.0);
@@ -194,9 +194,9 @@ fn file_row(
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
     let painter = ui.painter();
     if selected {
-        painter.rect_filled(rect, RADIUS, color::SELECTED_ROW_BG);
+        painter.rect_filled(rect, RADIUS, color::selected_row_bg());
     } else if response.hovered() {
-        painter.rect_filled(rect, RADIUS, color::HOVER_ROW_BG);
+        painter.rect_filled(rect, RADIUS, color::hover_row_bg());
     }
     let y = rect.center().y;
     paint_change_letter(ui, rect.left() + 6.0, y, change);
@@ -313,9 +313,9 @@ fn commit_box(
         );
         let len = form.summary.chars().count();
         let fg = if len > 72 {
-            color::DIRTY_FG
+            color::dirty_fg()
         } else {
-            color::TEXT_FAINT
+            color::text_faint()
         };
         ui.label(
             RichText::new(len.to_string())
@@ -325,15 +325,15 @@ fn commit_box(
         .on_hover_text("Summaries read best under 72 characters");
     });
     Frame::new()
-        .fill(color::APP_BG)
-        .stroke(Stroke::new(1.0, color::CONTROL_BORDER))
+        .fill(color::app_bg())
+        .stroke(Stroke::new(1.0, color::control_border()))
         .corner_radius(RADIUS)
         .inner_margin(Margin::symmetric(8, 6))
         .show(ui, |ui| {
             ui.add(
                 egui::TextEdit::multiline(&mut form.body)
                     .frame(Frame::NONE)
-                    .hint_text(RichText::new("Description (optional)").color(color::TEXT_FAINT))
+                    .hint_text(RichText::new("Description (optional)").color(color::text_faint()))
                     .desired_rows(3)
                     .desired_width(f32::INFINITY),
             );
@@ -359,7 +359,7 @@ fn commit_box(
                 (0, true) => "Rewords the last commit".to_owned(),
                 (n, _) => format!("{n} file{} staged", if n == 1 { "" } else { "s" }),
             };
-            ui.label(RichText::new(note).color(color::TEXT_WEAK));
+            ui.label(RichText::new(note).color(color::text_weak()));
         });
     });
 }

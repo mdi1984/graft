@@ -68,11 +68,11 @@ impl Toasts {
                 for (i, toast) in self.items.iter_mut().enumerate() {
                     toast.shown_at.get_or_insert(now);
                     let (accent, title) = match toast.kind {
-                        Kind::Error => (color::REMOVED, "Something went wrong"),
-                        Kind::Info => (color::ACCENT, "Done"),
+                        Kind::Error => (color::removed(), "Something went wrong"),
+                        Kind::Info => (color::accent(), "Done"),
                     };
                     let response = Frame::new()
-                        .fill(color::CONTROL_BG)
+                        .fill(color::control_bg())
                         .stroke(Stroke::new(1.0, accent.gamma_multiply(0.5)))
                         .corner_radius(8)
                         .inner_margin(Margin::symmetric(14, 10))
@@ -84,7 +84,7 @@ impl Toasts {
                                     .color(accent),
                             );
                             ui.add(
-                                egui::Label::new(RichText::new(&toast.text).color(color::TEXT))
+                                egui::Label::new(RichText::new(&toast.text).color(color::text()))
                                     .wrap(),
                             );
                         })

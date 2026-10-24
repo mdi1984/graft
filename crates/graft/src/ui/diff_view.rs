@@ -54,7 +54,7 @@ pub fn body(ui: &mut Ui, view: &DiffView, busy: bool, split: bool, actions: &mut
             empty_state(ui, "Could not load the diff", error);
         } else {
             let rect = ui.available_rect_before_wrap();
-            spinner(ui, rect.center(), 9.0, color::TEXT_WEAK);
+            spinner(ui, rect.center(), 9.0, color::text_weak());
         }
         return;
     };
@@ -136,7 +136,7 @@ fn side_by_side(ui: &mut Ui, view: &DiffView, diff: &FileDiff) {
                     Pair::Hunk(h) => {
                         let hunk = &diff.hunks[h];
                         let painter = ui.painter();
-                        painter.rect_filled(rect, 0, color::SIDEBAR_BG);
+                        painter.rect_filled(rect, 0, color::sidebar_bg());
                         let header = format!(
                             "@@ -{},{} +{},{} @@ {}",
                             hunk.old_start,
@@ -146,13 +146,13 @@ fn side_by_side(ui: &mut Ui, view: &DiffView, diff: &FileDiff) {
                             hunk.section
                         );
                         let galley =
-                            painter.layout_no_wrap(header, theme::mono(), color::TEXT_FAINT);
+                            painter.layout_no_wrap(header, theme::mono(), color::text_faint());
                         paint_galley_left(
                             painter,
                             rect.left() + 8.0,
                             rect.center().y,
                             galley,
-                            color::TEXT_FAINT,
+                            color::text_faint(),
                         );
                     }
                     Pair::Lines(left, right) => {
@@ -163,7 +163,7 @@ fn side_by_side(ui: &mut Ui, view: &DiffView, diff: &FileDiff) {
                         half(ui, right_rect, view, diff, right, false);
                         ui.painter().line_segment(
                             [pos2(mid, rect.top()), pos2(mid, rect.bottom())],
-                            Stroke::new(1.0, color::BORDER),
+                            Stroke::new(1.0, color::border()),
                         );
                     }
                 }
@@ -182,17 +182,21 @@ fn half(
 ) {
     let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
     let Some((h, l)) = at else {
-        painter.rect_filled(rect, 0, color::SIDEBAR_BG.lerp_to_gamma(color::APP_BG, 0.4));
+        painter.rect_filled(
+            rect,
+            0,
+            color::sidebar_bg().lerp_to_gamma(color::app_bg(), 0.4),
+        );
         return;
     };
     let line = &diff.hunks[h].lines[l];
     let tint = match line.kind {
-        Kind::Added => Some(color::ADDED),
-        Kind::Removed => Some(color::REMOVED),
+        Kind::Added => Some(color::added()),
+        Kind::Removed => Some(color::removed()),
         Kind::Context => None,
     };
     if let Some(tint) = tint {
-        painter.rect_filled(rect, 0, color::APP_BG.lerp_to_gamma(tint, 0.09));
+        painter.rect_filled(rect, 0, color::app_bg().lerp_to_gamma(tint, 0.09));
     }
     let y = rect.center().y;
     let number = if old { line.old_no } else { line.new_no };
@@ -202,14 +206,14 @@ fn half(
             Align2::RIGHT_CENTER,
             n.to_string(),
             theme::mono(),
-            color::TEXT_FAINT,
+            color::text_faint(),
         );
     }
     let text = line.text();
     let text_color = if tint.is_some() {
-        color::TEXT
+        color::text()
     } else {
-        color::TEXT_MID
+        color::text_mid()
     };
     let galley = painter.layout_no_wrap(text.clone(), theme::mono(), text_color);
     let origin = pos2(rect.left() + NUM + 8.0, y - galley.size().y / 2.0);
@@ -225,7 +229,7 @@ fn half(
             origin + vec2(a.left(), 1.0),
             origin + vec2(b.left(), galley.size().y - 1.0),
         );
-        painter.rect_filled(r, 2, color::APP_BG.lerp_to_gamma(tint, 0.35));
+        painter.rect_filled(r, 2, color::app_bg().lerp_to_gamma(tint, 0.35));
     }
     let too_wide = origin.x + galley.size().x > rect.right();
     painter.galley(origin, galley, text_color);
@@ -244,7 +248,7 @@ fn header(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Action>) {
     Panel::top("diff-header")
         .frame(
             Frame::new()
-                .fill(color::BAR_BG)
+                .fill(color::bar_bg())
                 .inner_margin(Margin::symmetric(12, 6)),
         )
         .show(ui, |ui| {
@@ -276,7 +280,7 @@ fn header(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Action>) {
                     ui,
                     &path,
                     theme::semibold(theme::BODY_SIZE),
-                    color::TEXT,
+                    color::text(),
                     room,
                 );
                 let (rect, _) = ui.allocate_exact_size(vec2(galley.size().x, 30.0), Sense::hover());
@@ -285,16 +289,16 @@ fn header(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Action>) {
                     rect.left(),
                     rect.center().y,
                     galley,
-                    color::TEXT,
+                    color::text(),
                 );
                 ui.label(
                     RichText::new(side)
-                        .color(color::TEXT_FAINT)
+                        .color(color::text_faint())
                         .size(theme::SMALL_SIZE),
                 );
                 ui.label(
                     RichText::new(stats)
-                        .color(color::TEXT_WEAK)
+                        .color(color::text_weak())
                         .size(theme::SMALL_SIZE),
                 );
 
@@ -356,7 +360,7 @@ fn selection_bar(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Act
     Panel::bottom("diff-selection")
         .frame(
             Frame::new()
-                .fill(color::SELECTED_ROW_BG)
+                .fill(color::selected_row_bg())
                 .inner_margin(Margin::symmetric(12, 6)),
         )
         .show(ui, |ui| {
@@ -365,9 +369,9 @@ fn selection_bar(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Act
                 ui.label(
                     RichText::new(format!("{n} line{} selected", if n == 1 { "" } else { "s" }))
                         .font(theme::semibold(theme::BODY_SIZE))
-                        .color(color::TEXT),
+                        .color(color::text()),
                 );
-                ui.label(RichText::new("Shift-click or drag to select more · Esc clears").color(color::TEXT_FAINT).size(theme::SMALL_SIZE));
+                ui.label(RichText::new("Shift-click or drag to select more · Esc clears").color(color::text_faint()).size(theme::SMALL_SIZE));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     match view.key.source {
                         Source::Staged => {
@@ -419,7 +423,7 @@ fn lines(ui: &mut Ui, view: &DiffView, diff: &FileDiff, busy: bool, actions: &mu
         .collect();
     let char_width = ui
         .painter()
-        .layout_no_wrap("M".to_owned(), theme::mono(), color::TEXT)
+        .layout_no_wrap("M".to_owned(), theme::mono(), color::text())
         .size()
         .x;
     let longest = diff
@@ -485,18 +489,18 @@ fn hunk_row(
 ) {
     let hunk = &diff.hunks[h];
     let painter = ui.painter();
-    painter.rect_filled(rect, 0, color::SIDEBAR_BG);
+    painter.rect_filled(rect, 0, color::sidebar_bg());
     let header = format!(
         "@@ -{},{} +{},{} @@ {}",
         hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count, hunk.section
     );
-    let galley = painter.layout_no_wrap(header, theme::mono(), color::TEXT_FAINT);
+    let galley = painter.layout_no_wrap(header, theme::mono(), color::text_faint());
     paint_galley_left(
         painter,
         rect.left() + GUTTER,
         rect.center().y,
         galley,
-        color::TEXT_FAINT,
+        color::text_faint(),
     );
 
     if view.read_only {
@@ -508,7 +512,7 @@ fn hunk_row(
     let mut small = |label: &str, action: Action, danger: bool| {
         let text = ui
             .painter()
-            .layout_no_wrap(label.to_owned(), theme::small(), color::TEXT);
+            .layout_no_wrap(label.to_owned(), theme::small(), color::text());
         let w = text.size().x + 16.0;
         x -= w;
         let r = Rect::from_min_size(pos2(x, rect.top() + 2.0), vec2(w, ROW - 4.0));
@@ -520,20 +524,20 @@ fn hunk_row(
         );
         let enabled = !busy;
         let fill = if response.hovered() && enabled {
-            color::CONTROL_HOVER_BG
+            color::control_hover_bg()
         } else {
-            color::CONTROL_BG
+            color::control_bg()
         };
         let fg = match (enabled, danger) {
-            (false, _) => color::TEXT_FAINT,
-            (true, true) => color::REMOVED,
-            (true, false) => color::TEXT,
+            (false, _) => color::text_faint(),
+            (true, true) => color::removed(),
+            (true, false) => color::text(),
         };
         ui.painter().rect(
             r,
             4,
             fill,
-            Stroke::new(1.0, color::CONTROL_BORDER),
+            Stroke::new(1.0, color::control_border()),
             StrokeKind::Inside,
         );
         ui.painter()
@@ -575,13 +579,13 @@ fn paint_line(
 ) {
     let painter = ui.painter();
     let tint = match line.kind {
-        Kind::Added => Some(color::ADDED),
-        Kind::Removed => Some(color::REMOVED),
+        Kind::Added => Some(color::added()),
+        Kind::Removed => Some(color::removed()),
         Kind::Context => None,
     };
     if let Some(tint) = tint {
         let strength = if selected { 0.22 } else { 0.09 };
-        painter.rect_filled(rect, 0, color::APP_BG.lerp_to_gamma(tint, strength));
+        painter.rect_filled(rect, 0, color::app_bg().lerp_to_gamma(tint, strength));
     }
     let y = rect.center().y;
 
@@ -589,22 +593,27 @@ fn paint_line(
     if line.is_change() && selectable {
         let b = Rect::from_center_size(pos2(rect.left() + GUTTER / 2.0, y), vec2(12.0, 12.0));
         if selected {
-            painter.rect_filled(b, 3, color::ACCENT);
+            painter.rect_filled(b, 3, color::accent());
             painter.line(
                 vec![
                     pos2(b.left() + 2.5, y),
                     pos2(b.left() + 5.0, y + 2.5),
                     pos2(b.right() - 2.5, y - 2.5),
                 ],
-                Stroke::new(1.6, color::ON_ACCENT),
+                Stroke::new(1.6, color::on_accent()),
             );
         } else if ui.rect_contains_pointer(rect) {
-            painter.rect_stroke(b, 3, Stroke::new(1.0, color::TEXT_WEAK), StrokeKind::Inside);
+            painter.rect_stroke(
+                b,
+                3,
+                Stroke::new(1.0, color::text_weak()),
+                StrokeKind::Inside,
+            );
         } else {
             painter.rect_stroke(
                 b,
                 3,
-                Stroke::new(1.0, color::CONTROL_BORDER),
+                Stroke::new(1.0, color::control_border()),
                 StrokeKind::Inside,
             );
         }
@@ -617,7 +626,7 @@ fn paint_line(
                 Align2::RIGHT_CENTER,
                 n.to_string(),
                 theme::mono(),
-                color::TEXT_FAINT,
+                color::text_faint(),
             );
         }
     };
@@ -625,9 +634,9 @@ fn paint_line(
     num(line.new_no, rect.left() + GUTTER + 2.0 * NUM - 6.0);
 
     let (marker, fg) = match line.kind {
-        Kind::Added => ("+", color::ADDED),
-        Kind::Removed => ("−", color::REMOVED),
-        Kind::Context => ("", color::TEXT_FAINT),
+        Kind::Added => ("+", color::added()),
+        Kind::Removed => ("−", color::removed()),
+        Kind::Context => ("", color::text_faint()),
     };
     painter.text(
         pos2(rect.left() + GUTTER + 2.0 * NUM + 4.0, y),
@@ -639,9 +648,9 @@ fn paint_line(
 
     let text = line.text();
     let text_color = if line.kind == Kind::Context {
-        color::TEXT_MID
+        color::text_mid()
     } else {
-        color::TEXT
+        color::text()
     };
     let galley = painter.layout_no_wrap(text.clone(), theme::mono(), text_color);
     let origin = pos2(rect.left() + text_x, y - galley.size().y / 2.0);
@@ -656,7 +665,7 @@ fn paint_line(
             origin + vec2(a.left(), 1.0),
             origin + vec2(b.left(), galley.size().y - 1.0),
         );
-        painter.rect_filled(r, 2, color::APP_BG.lerp_to_gamma(tint, 0.35));
+        painter.rect_filled(r, 2, color::app_bg().lerp_to_gamma(tint, 0.35));
     }
     let text_width = galley.size().x;
     painter.galley(origin, galley, text_color);
@@ -667,7 +676,7 @@ fn paint_line(
             Align2::LEFT_CENTER,
             "no newline at end of file",
             theme::small(),
-            color::TEXT_FAINT,
+            color::text_faint(),
         );
     }
 }

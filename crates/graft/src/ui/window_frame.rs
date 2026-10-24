@@ -101,8 +101,8 @@ pub fn caption_buttons(ui: &Ui, rect: Rect, glyph_y: f32) {
         let hovered = response.hovered();
         let (bg, fg) = match (glyph, hovered) {
             (Glyph::Close, true) => (Some(CLOSE_HOVER_BG), Color32::WHITE),
-            (_, true) => (Some(color::CONTROL_HOVER_BG), color::TEXT),
-            _ => (None, color::TEXT_WEAK),
+            (_, true) => (Some(color::control_hover_bg()), color::text()),
+            _ => (None, color::text_weak()),
         };
         if let Some(bg) = bg {
             ui.painter().rect_filled(button, 0, bg);

@@ -161,15 +161,15 @@ pub fn show(ui: &mut Ui, project: &Project, text: &mut String, actions: &mut Vec
         text.clear();
     }
     let border = if focused {
-        color::ACCENT
+        color::accent()
     } else {
-        color::CONTROL_BORDER
+        color::control_border()
     };
     let width = ui.available_width().clamp(160.0, 300.0);
 
     let before = text.clone();
     let frame = Frame::new()
-        .fill(color::APP_BG)
+        .fill(color::app_bg())
         .stroke(Stroke::new(1.0, border))
         .corner_radius(RADIUS)
         .inner_margin(Margin::symmetric(8, 0))
@@ -178,7 +178,7 @@ pub fn show(ui: &mut Ui, project: &Project, text: &mut String, actions: &mut Vec
             ui.set_height(28.0);
             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                 let (rect, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
-                icons::paint(ui.painter(), rect, Icon::Search, color::TEXT_WEAK);
+                icons::paint(ui.painter(), rect, Icon::Search, color::text_weak());
                 ui.add(
                     TextEdit::singleline(text)
                         .id(id)
@@ -233,14 +233,14 @@ pub fn show(ui: &mut Ui, project: &Project, text: &mut String, actions: &mut Vec
         ))
         .show(ui.ctx(), |ui| {
             Frame::new()
-                .fill(color::SIDEBAR_BG)
-                .stroke(Stroke::new(1.0, color::BORDER))
+                .fill(color::sidebar_bg())
+                .stroke(Stroke::new(1.0, color::border()))
                 .corner_radius(RADIUS)
                 .inner_margin(Margin::same(6))
                 .show(ui, |ui| {
                     ui.set_width(popup_width - 12.0);
                     if results.is_empty() {
-                        ui.label(RichText::new("No matches").color(color::TEXT_FAINT));
+                        ui.label(RichText::new("No matches").color(color::text_faint()));
                         return;
                     }
                     // The popup keeps last frame's size; ask for this list's height.
@@ -286,16 +286,16 @@ fn row(ui: &mut Ui, hit: &Hit, selected: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
     let painter = ui.painter();
     if selected {
-        painter.rect_filled(rect, RADIUS, color::SELECTED_ROW_BG);
+        painter.rect_filled(rect, RADIUS, color::selected_row_bg());
     } else if response.hovered() {
-        painter.rect_filled(rect, RADIUS, color::HOVER_ROW_BG);
+        painter.rect_filled(rect, RADIUS, color::hover_row_bg());
     }
     let y = rect.center().y;
-    let kind = painter.layout_no_wrap(hit.kind.to_owned(), theme::small(), color::TEXT_FAINT);
+    let kind = painter.layout_no_wrap(hit.kind.to_owned(), theme::small(), color::text_faint());
     painter.galley(
         egui::pos2(rect.left() + 8.0, y - kind.size().y / 2.0),
         kind,
-        color::TEXT_FAINT,
+        color::text_faint(),
     );
     let detail_width = 150.0;
     let font = if matches!(hit.kind, "Commit" | "Changed") {
@@ -307,18 +307,18 @@ fn row(ui: &mut Ui, hit: &Hit, selected: bool) -> egui::Response {
         ui,
         &hit.title,
         font,
-        color::TEXT,
+        color::text(),
         rect.width() - 80.0 - detail_width - 16.0,
     );
-    super::widgets::paint_galley_left(painter, rect.left() + 80.0, y, title, color::TEXT);
+    super::widgets::paint_galley_left(painter, rect.left() + 80.0, y, title, color::text());
     let detail = super::widgets::elided_path(
         ui,
         &hit.detail,
         theme::small(),
-        color::TEXT_WEAK,
+        color::text_weak(),
         detail_width,
     );
     let x = rect.right() - 8.0 - detail.size().x;
-    super::widgets::paint_galley_left(painter, x, y, detail, color::TEXT_WEAK);
+    super::widgets::paint_galley_left(painter, x, y, detail, color::text_weak());
     response
 }

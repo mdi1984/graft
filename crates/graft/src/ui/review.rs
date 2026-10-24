@@ -26,7 +26,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
             ui,
             ui.available_rect_before_wrap().center(),
             9.0,
-            color::TEXT_WEAK,
+            color::text_weak(),
         );
         return;
     };
@@ -36,7 +36,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
                 ui,
                 ui.available_rect_before_wrap().center(),
                 9.0,
-                color::TEXT_WEAK,
+                color::text_weak(),
             );
             return;
         }
@@ -84,7 +84,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
         .size_range(220.0..=640.0)
         .frame(
             Frame::new()
-                .fill(color::APP_BG)
+                .fill(color::app_bg())
                 .inner_margin(Margin::symmetric(8, 8)),
         )
         .show(ui, |ui| {
@@ -108,14 +108,14 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
             ui,
             ui.available_rect_before_wrap().center(),
             9.0,
-            color::TEXT_WEAK,
+            color::text_weak(),
         ),
     }
 }
 
 fn header_frame() -> Frame {
     Frame::new()
-        .fill(color::BAR_BG)
+        .fill(color::bar_bg())
         .inner_margin(Margin::symmetric(14, 8))
 }
 
@@ -207,17 +207,17 @@ fn stats(ui: &mut Ui, review: &Review) {
     };
     ui.label(
         RichText::new(format!("{commits} · {files}"))
-            .color(color::TEXT_WEAK)
+            .color(color::text_weak())
             .size(theme::SMALL_SIZE),
     );
     ui.label(
         RichText::new(format!("+{}", review.added()))
-            .color(color::ADDED)
+            .color(color::added())
             .size(theme::SMALL_SIZE),
     );
     ui.label(
         RichText::new(format!("−{}", review.removed()))
-            .color(color::REMOVED)
+            .color(color::removed())
             .size(theme::SMALL_SIZE),
     );
 }
@@ -228,9 +228,9 @@ fn progress(ui: &mut Ui, review: &Review, viewed: usize) {
     ui.label(
         RichText::new(format!("{viewed} of {total} viewed"))
             .color(if viewed == total {
-                color::ADDED
+                color::added()
             } else {
-                color::TEXT_WEAK
+                color::text_weak()
             })
             .size(theme::SMALL_SIZE),
     );
@@ -249,13 +249,13 @@ fn base_picker(
     base: Option<&str>,
     actions: &mut Vec<Action>,
 ) {
-    ui.label(RichText::new("Reviewing").color(color::TEXT_WEAK));
+    ui.label(RichText::new("Reviewing").color(color::text_weak()));
     ui.label(
         RichText::new(wt.label())
             .font(theme::mono())
-            .color(color::DIRTY_FG),
+            .color(color::dirty_fg()),
     );
-    ui.label(RichText::new("against").color(color::TEXT_WEAK));
+    ui.label(RichText::new("against").color(color::text_weak()));
     let current = wt.branch.as_deref();
     egui::ComboBox::from_id_salt("review-base")
         .selected_text(RichText::new(base.unwrap_or("pick a branch")).font(theme::mono()))
@@ -353,7 +353,7 @@ fn file_list(
     ui.label(
         RichText::new(format!("FILES  {}", review.files.len()))
             .font(theme::semibold(theme::SMALL_SIZE))
-            .color(color::TEXT_FAINT),
+            .color(color::text_faint()),
     );
     ui.add_space(4.0);
     ScrollArea::vertical()
@@ -369,9 +369,9 @@ fn file_list(
                     ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
                 let painter = ui.painter();
                 if is_selected {
-                    painter.rect_filled(rect, 4, color::SELECTED_ROW_BG);
+                    painter.rect_filled(rect, 4, color::selected_row_bg());
                 } else if response.hovered() {
-                    painter.rect_filled(rect, 4, color::HOVER_ROW_BG);
+                    painter.rect_filled(rect, 4, color::hover_row_bg());
                 }
                 let y = rect.center().y;
                 let check = Rect::from_center_size(pos2(rect.left() + 12.0, y), vec2(14.0, 14.0));
@@ -399,9 +399,9 @@ fn file_list(
                     stats,
                     theme::small(),
                     if note.is_some() {
-                        color::DIRTY_FG
+                        color::dirty_fg()
                     } else {
-                        color::TEXT_FAINT
+                        color::text_faint()
                     },
                 );
                 let stats_x = rect.right() - 6.0 - stats_galley.size().x;
@@ -410,14 +410,14 @@ fn file_list(
                 ui.painter().galley(
                     pos2(stats_x, y - stats_galley.size().y / 2.0),
                     stats_galley,
-                    color::TEXT_FAINT,
+                    color::text_faint(),
                 );
                 if viewed {
                     // Dim viewed files so what is left stands out.
                     ui.painter().rect_filled(
                         Rect::from_min_max(pos2(rect.left() + 24.0, rect.top()), rect.max),
                         4,
-                        color::APP_BG.gamma_multiply(0.55),
+                        color::app_bg().gamma_multiply(0.55),
                     );
                 }
 
@@ -438,7 +438,7 @@ fn file_list(
 fn paint_check(ui: &Ui, rect: Rect, checked: bool, hovered: bool) {
     let painter = ui.painter();
     if checked {
-        painter.rect_filled(rect, 3, color::ACCENT);
+        painter.rect_filled(rect, 3, color::accent());
         let y = rect.center().y;
         painter.line(
             vec![
@@ -446,13 +446,13 @@ fn paint_check(ui: &Ui, rect: Rect, checked: bool, hovered: bool) {
                 pos2(rect.left() + 6.0, y + 3.0),
                 pos2(rect.right() - 3.0, y - 3.0),
             ],
-            Stroke::new(1.6, color::ON_ACCENT),
+            Stroke::new(1.6, color::on_accent()),
         );
     } else {
         let stroke = if hovered {
-            color::TEXT_WEAK
+            color::text_weak()
         } else {
-            color::CONTROL_BORDER
+            color::control_border()
         };
         painter.rect_stroke(rect, 3, Stroke::new(1.0, stroke), StrokeKind::Inside);
     }
@@ -471,7 +471,7 @@ fn file_header(
     Panel::top("review-file-header")
         .frame(
             Frame::new()
-                .fill(color::BAR_BG)
+                .fill(color::bar_bg())
                 .inner_margin(Margin::symmetric(12, 6)),
         )
         .show(ui, |ui| {
@@ -481,12 +481,12 @@ fn file_header(
                 ui.label(
                     RichText::new(&path)
                         .font(theme::semibold(theme::BODY_SIZE))
-                        .color(color::TEXT),
+                        .color(color::text()),
                 );
                 if let Some(orig) = &file.change.orig_path {
                     ui.label(
                         RichText::new(format!("from {orig}"))
-                            .color(color::TEXT_FAINT)
+                            .color(color::text_faint())
                             .size(theme::SMALL_SIZE),
                     );
                 }
@@ -533,7 +533,7 @@ fn notes(ui: &mut Ui, project: &mut Project, path: &str) {
     Panel::bottom("review-notes")
         .frame(
             Frame::new()
-                .fill(color::SIDEBAR_BG)
+                .fill(color::sidebar_bg())
                 .inner_margin(Margin::symmetric(12, 6)),
         )
         .show(ui, |ui| {
@@ -547,7 +547,7 @@ fn notes(ui: &mut Ui, project: &mut Project, path: &str) {
                     .add(
                         egui::Label::new(
                             RichText::new(title)
-                                .color(color::TEXT_MID)
+                                .color(color::text_mid())
                                 .size(theme::SMALL_SIZE),
                         )
                         .sense(Sense::click()),
@@ -558,7 +558,7 @@ fn notes(ui: &mut Ui, project: &mut Project, path: &str) {
                 }
                 ui.label(
                     RichText::new("Only on this computer; never committed.")
-                        .color(color::TEXT_FAINT)
+                        .color(color::text_faint())
                         .size(theme::SMALL_SIZE),
                 );
             });

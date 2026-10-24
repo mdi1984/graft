@@ -33,13 +33,15 @@ fn main() -> eframe::Result {
         "Graft",
         options,
         Box::new(|cc| {
-            native::style_window(cc);
             // `graft <folder>…` opens those folders as projects.
             let folders = std::env::args_os()
                 .skip(1)
                 .map(std::path::PathBuf::from)
                 .collect();
-            Ok(Box::new(app::GraftApp::new(cc, folders)))
+            let app = app::GraftApp::new(cc, folders);
+            // After the app picked the theme, for the border color.
+            native::style_window(cc);
+            Ok(Box::new(app))
         }),
     )
 }

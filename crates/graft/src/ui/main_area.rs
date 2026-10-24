@@ -68,23 +68,23 @@ fn preview_banner(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
     Panel::top("preview-banner")
         .frame(
             Frame::new()
-                .fill(color::AHEAD_BG)
+                .fill(color::ahead_bg())
                 .inner_margin(Margin::symmetric(14, 8))
-                .stroke(egui::Stroke::new(1.0, color::AHEAD_FG.gamma_multiply(0.4))),
+                .stroke(egui::Stroke::new(1.0, color::ahead_fg().gamma_multiply(0.4))),
         )
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new("Preview in main")
                         .font(theme::semibold(theme::BODY_SIZE))
-                        .color(color::AHEAD_FG),
+                        .color(color::ahead_fg()),
                 );
                 ui.label(
                     egui::RichText::new(format!(
                         "The main worktree shows {name} at {}, with its uncommitted changes.",
                         graft_core::short(&preview.head)
                     ))
-                    .color(color::TEXT_MID),
+                    .color(color::text_mid()),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if button(ui, "Restore main", ButtonKind::Primary, !busy)
@@ -111,7 +111,7 @@ fn header(ui: &mut Ui, title: &str, worktree: Option<&Worktree>) {
     Panel::top("main-header")
         .frame(
             Frame::new()
-                .fill(color::SIDEBAR_BG.lerp_to_gamma(color::APP_BG, 0.5))
+                .fill(color::sidebar_bg().lerp_to_gamma(color::app_bg(), 0.5))
                 .inner_margin(Margin::symmetric(14, 0)),
         )
         .show(ui, |ui| {
@@ -123,19 +123,23 @@ fn header(ui: &mut Ui, title: &str, worktree: Option<&Worktree>) {
             let title = painter.layout_no_wrap(
                 title.to_owned(),
                 theme::semibold(theme::BODY_SIZE),
-                color::TEXT,
+                color::text(),
             );
             let mut x = rect.left() + title.size().x + 10.0;
-            paint_galley_left(painter, rect.left(), y, title, color::TEXT);
+            paint_galley_left(painter, rect.left(), y, title, color::text());
 
             let Some(wt) = worktree else { return };
-            let chip_text = painter.layout_no_wrap(wt.label(), theme::mono(), color::DIRTY_FG);
+            let chip_text = painter.layout_no_wrap(wt.label(), theme::mono(), color::dirty_fg());
             let chip = Rect::from_min_size(
                 egui::pos2(x, y - 10.0),
                 vec2(chip_text.size().x + 16.0, 20.0),
             );
-            painter.rect_filled(chip, 5, color::DIRTY_BG.lerp_to_gamma(color::APP_BG, 0.3));
-            paint_galley_left(painter, chip.left() + 8.0, y, chip_text, color::DIRTY_FG);
+            painter.rect_filled(
+                chip,
+                5,
+                color::dirty_bg().lerp_to_gamma(color::app_bg(), 0.3),
+            );
+            paint_galley_left(painter, chip.left() + 8.0, y, chip_text, color::dirty_fg());
             x = chip.right() + 10.0;
 
             let path = wt.path.display().to_string();
@@ -143,10 +147,10 @@ fn header(ui: &mut Ui, title: &str, worktree: Option<&Worktree>) {
                 ui,
                 &path,
                 theme::small(),
-                color::TEXT_WEAK,
+                color::text_weak(),
                 rect.right() - x,
             );
-            paint_galley_left(painter, x, y, path, color::TEXT_WEAK);
+            paint_galley_left(painter, x, y, path, color::text_weak());
         });
 }
 
@@ -154,13 +158,13 @@ fn header(ui: &mut Ui, title: &str, worktree: Option<&Worktree>) {
 fn not_loaded(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
     let rect = ui.available_rect_before_wrap();
     let Some(error) = &project.error else {
-        spinner(ui, rect.center() - vec2(0.0, 16.0), 9.0, color::TEXT_WEAK);
+        spinner(ui, rect.center() - vec2(0.0, 16.0), 9.0, color::text_weak());
         ui.painter().text(
             rect.center() + vec2(0.0, 10.0),
             Align2::CENTER_CENTER,
             format!("Opening {}…", project.root.display()),
             theme::body(),
-            color::TEXT_WEAK,
+            color::text_weak(),
         );
         return;
     };
@@ -170,11 +174,11 @@ fn not_loaded(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
         ui.label(
             egui::RichText::new(format!("Could not open {}", project.name))
                 .font(theme::semibold(15.0))
-                .color(color::TEXT),
+                .color(color::text()),
         );
-        ui.label(egui::RichText::new(project.root.display().to_string()).color(color::TEXT_WEAK));
+        ui.label(egui::RichText::new(project.root.display().to_string()).color(color::text_weak()));
         ui.add_space(4.0);
-        ui.add(egui::Label::new(egui::RichText::new(error).color(color::REMOVED)).wrap());
+        ui.add(egui::Label::new(egui::RichText::new(error).color(color::removed())).wrap());
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if button(ui, "Try again", ButtonKind::Primary, true).clicked() {

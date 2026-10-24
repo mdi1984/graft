@@ -1,12 +1,12 @@
-//! The Settings dialog: commit identity for the open repository, editor,
-//! background fetch, Slash's protected branches and the files copied into
-//! new worktrees.
+//! The Settings dialog: theme, commit identity for the open repository,
+//! editor, background fetch, Slash's protected branches and the files copied
+//! into new worktrees.
 
 use egui::{Align, ComboBox, Id, Key, Layout, RichText, Ui};
 use graft_core::identity::Identity;
 
 use super::widgets::{ButtonKind, button, spinner, text_field};
-use crate::settings::Settings;
+use crate::settings::{Settings, ThemeChoice};
 use crate::theme::{self, color};
 
 const WIDTH: f32 = 520.0;
@@ -56,8 +56,16 @@ pub fn show(
         ui.label(
             RichText::new("Settings")
                 .font(theme::semibold(15.0))
-                .color(color::TEXT),
+                .color(color::text()),
         );
+
+        section(ui, "Appearance");
+        ui.horizontal(|ui| {
+            for choice in ThemeChoice::ALL {
+                ui.radio_value(&mut form.draft.theme, choice, choice.label());
+                ui.add_space(8.0);
+            }
+        });
 
         if let Some((name, identity)) = repo {
             section(ui, "Commit identity");
@@ -69,10 +77,10 @@ pub fn show(
                 None => {
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-                    spinner(ui, rect.center(), 5.0, color::TEXT_WEAK);
+                    spinner(ui, rect.center(), 5.0, color::text_weak());
                 }
                 Some(Err(error)) => {
-                    ui.label(RichText::new(error).color(color::REMOVED));
+                    ui.label(RichText::new(error).color(color::removed()));
                 }
                 Some(Ok(_)) => {
                     let half = (WIDTH - 8.0) / 2.0;
@@ -105,7 +113,9 @@ pub fn show(
 
         section(ui, "Fetching");
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Fetch open repositories in the background").color(color::TEXT));
+            ui.label(
+                RichText::new("Fetch open repositories in the background").color(color::text()),
+            );
             let label = |m: u32| match m {
                 0 => "Never".to_owned(),
                 m => format!("Every {m} minutes"),
@@ -172,7 +182,7 @@ fn section(ui: &mut Ui, title: &str) {
     ui.add_space(8.0);
     ui.label(
         RichText::new(title.to_uppercase())
-            .color(color::TEXT_FAINT)
+            .color(color::text_faint())
             .size(theme::SMALL_SIZE),
     );
 }
@@ -180,7 +190,7 @@ fn section(ui: &mut Ui, title: &str) {
 fn field_label(ui: &mut Ui, text: &str) {
     ui.label(
         RichText::new(text)
-            .color(color::TEXT_MID)
+            .color(color::text_mid())
             .size(theme::SMALL_SIZE),
     );
 }
@@ -189,7 +199,7 @@ fn hint(ui: &mut Ui, text: &str) {
     ui.add(
         egui::Label::new(
             RichText::new(text)
-                .color(color::TEXT_FAINT)
+                .color(color::text_faint())
                 .size(theme::SMALL_SIZE),
         )
         .wrap(),

@@ -128,7 +128,7 @@ impl StartPage {
                         }
                         if let Some(error) = &self.error {
                             ui.add_space(4.0);
-                            ui.label(egui::RichText::new(error).color(color::REMOVED));
+                            ui.label(egui::RichText::new(error).color(color::removed()));
                         }
                         ui.add_space(24.0);
                         recent_list(ui, recent, width, &mut action);
@@ -137,7 +137,7 @@ impl StartPage {
                             egui::RichText::new(
                                 "Tip: drop a folder onto this window to open it. Ctrl+O opens, Ctrl+T shows this page.",
                             )
-                            .color(color::TEXT_FAINT)
+                            .color(color::text_faint())
                             .size(theme::SMALL_SIZE),
                         );
                     });
@@ -170,11 +170,11 @@ impl StartPage {
                 ui.label(
                     egui::RichText::new("Graft")
                         .font(theme::semibold(24.0))
-                        .color(color::TEXT),
+                        .color(color::text()),
                 );
                 ui.label(
                     egui::RichText::new("Open a repository to get started.")
-                        .color(color::TEXT_WEAK),
+                        .color(color::text_weak()),
                 );
             });
         });
@@ -276,17 +276,17 @@ impl StartPage {
                 let prefix = ui.painter().layout_no_wrap(
                     "Will clone to ".to_owned(),
                     theme::small(),
-                    color::TEXT_FAINT,
+                    color::text_faint(),
                 );
                 let prefix_width = prefix.size().x;
                 let y = rect.center().y;
-                paint_galley_left(ui.painter(), rect.left(), y, prefix, color::TEXT_FAINT);
+                paint_galley_left(ui.painter(), rect.left(), y, prefix, color::text_faint());
                 let dest = self.clone_dest().display().to_string();
                 let dest = elided_path(
                     ui,
                     &dest,
                     theme::small(),
-                    color::TEXT_WEAK,
+                    color::text_weak(),
                     inner - prefix_width,
                 );
                 paint_galley_left(
@@ -294,7 +294,7 @@ impl StartPage {
                     rect.left() + prefix_width,
                     y,
                     dest,
-                    color::TEXT_WEAK,
+                    color::text_weak(),
                 );
             }
             ui.add_space(6.0);
@@ -343,8 +343,8 @@ impl StartPage {
 
 fn form_frame(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     egui::Frame::new()
-        .fill(color::SIDEBAR_BG)
-        .stroke(Stroke::new(1.0, color::BORDER))
+        .fill(color::sidebar_bg())
+        .stroke(Stroke::new(1.0, color::border()))
         .corner_radius(8)
         .inner_margin(egui::Margin::same(16))
         .show(ui, |ui| {
@@ -357,7 +357,7 @@ fn form_frame(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
 fn field_label(ui: &mut Ui, text: &str) {
     ui.label(
         egui::RichText::new(text)
-            .color(color::TEXT_WEAK)
+            .color(color::text_weak())
             .size(theme::SMALL_SIZE),
     );
 }
@@ -373,27 +373,30 @@ fn card(
     let (rect, response) = ui.allocate_exact_size(vec2(width, 92.0), Sense::click());
     let painter = ui.painter();
     let (fill, border) = if active {
-        (color::SELECTED_ROW_BG, color::ACCENT.gamma_multiply(0.6))
+        (
+            color::selected_row_bg(),
+            color::accent().gamma_multiply(0.6),
+        )
     } else if response.hovered() {
-        (color::CONTROL_HOVER_BG, color::CONTROL_BORDER)
+        (color::control_hover_bg(), color::control_border())
     } else {
-        (color::CONTROL_BG, color::CONTROL_BORDER)
+        (color::control_bg(), color::control_border())
     };
     painter.rect(rect, 8, fill, Stroke::new(1.0, border), StrokeKind::Inside);
     let icon_rect = Rect::from_min_size(rect.min + vec2(14.0, 14.0), vec2(20.0, 20.0));
-    icons::paint(painter, icon_rect, icon, color::ACCENT);
+    icons::paint(painter, icon_rect, icon, color::accent());
     painter.text(
         pos2(rect.left() + 14.0, rect.top() + 52.0),
         Align2::LEFT_CENTER,
         title,
         theme::semibold(theme::BODY_SIZE),
-        color::TEXT,
+        color::text(),
     );
     let detail = elided(
         ui,
         detail,
         theme::small(),
-        color::TEXT_WEAK,
+        color::text_weak(),
         rect.width() - 28.0,
     );
     paint_galley_left(
@@ -401,7 +404,7 @@ fn card(
         rect.left() + 14.0,
         rect.top() + 72.0,
         detail,
-        color::TEXT_WEAK,
+        color::text_weak(),
     );
     response
 }
@@ -410,14 +413,14 @@ fn busy_panel(ui: &mut Ui, busy: &Busy, width: f32, action: &mut Option<StartAct
     let progress = busy.progress.lock().map(|p| p.clone()).unwrap_or_default();
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(&busy.label).color(color::TEXT));
+        ui.label(egui::RichText::new(&busy.label).color(color::text()));
         if !progress.phase.is_empty() {
             let pct = progress
                 .fraction
                 .map(|f| format!(" {:.0}%", f * 100.0))
                 .unwrap_or_default();
             ui.label(
-                egui::RichText::new(format!("· {}{pct}", progress.phase)).color(color::TEXT_WEAK),
+                egui::RichText::new(format!("· {}{pct}", progress.phase)).color(color::text_weak()),
             );
         }
     });
@@ -434,7 +437,7 @@ fn recent_list(ui: &mut Ui, recent: &[Recent], width: f32, action: &mut Option<S
     section_heading(ui, ui.painter(), rect.left(), rect.center().y, "RECENT");
     if recent.is_empty() {
         ui.label(
-            egui::RichText::new("Repositories you open show up here.").color(color::TEXT_FAINT),
+            egui::RichText::new("Repositories you open show up here.").color(color::text_faint()),
         );
         return;
     }
@@ -448,16 +451,16 @@ fn recent_list(ui: &mut Ui, recent: &[Recent], width: f32, action: &mut Option<S
         let hovered = response.hovered() || close_response.hovered();
         let painter = ui.painter();
         if hovered {
-            painter.rect_filled(rect, RADIUS, color::HOVER_ROW_BG);
+            painter.rect_filled(rect, RADIUS, color::hover_row_bg());
         }
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
         let fg = if exists {
-            color::TEXT
+            color::text()
         } else {
-            color::TEXT_FAINT
+            color::text_faint()
         };
         let name = elided(
             ui,
@@ -472,13 +475,19 @@ fn recent_list(ui: &mut Ui, recent: &[Recent], width: f32, action: &mut Option<S
         } else {
             format!("{} (missing)", path.display())
         };
-        let detail = elided_path(ui, &detail, theme::small(), color::TEXT_WEAK, width - 60.0);
+        let detail = elided_path(
+            ui,
+            &detail,
+            theme::small(),
+            color::text_weak(),
+            width - 60.0,
+        );
         paint_galley_left(
             painter,
             rect.left() + 10.0,
             rect.top() + 31.0,
             detail,
-            color::TEXT_WEAK,
+            color::text_weak(),
         );
         if hovered {
             paint_icon_button(ui, close, &close_response, Icon::Close);

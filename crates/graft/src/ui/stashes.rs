@@ -19,7 +19,7 @@ use crate::time;
 pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
     let Some(stashes) = &project.stashes else {
         let rect = ui.available_rect_before_wrap();
-        spinner(ui, rect.center(), 9.0, color::TEXT_WEAK);
+        spinner(ui, rect.center(), 9.0, color::text_weak());
         return;
     };
     let stashes = match stashes {
@@ -47,7 +47,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
         .size_range(240.0..=600.0)
         .frame(
             Frame::new()
-                .fill(color::APP_BG)
+                .fill(color::app_bg())
                 .inner_margin(Margin::symmetric(8, 8)),
         )
         .show(ui, |ui| list(ui, project, snap, stashes, actions));
@@ -69,7 +69,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
         .exact_size(height)
         .frame(
             Frame::new()
-                .fill(color::SIDEBAR_BG)
+                .fill(color::sidebar_bg())
                 .inner_margin(Margin::symmetric(16, 12)),
         )
         .show(ui, |ui| details(ui, project, snap, stash, actions));
@@ -91,11 +91,11 @@ fn list(
     ui.label(
         RichText::new(format!("STASHES  {}", stashes.len()))
             .font(theme::semibold(theme::SMALL_SIZE))
-            .color(color::TEXT_FAINT),
+            .color(color::text_faint()),
     );
     ui.label(
         RichText::new("Shared by all worktrees of this repository.")
-            .color(color::TEXT_FAINT)
+            .color(color::text_faint())
             .size(theme::SMALL_SIZE),
     );
     ui.add_space(6.0);
@@ -112,15 +112,15 @@ fn list(
                 paint_row_bg(painter, rect, &response, selected);
                 let x = rect.left() + 10.0;
                 let width = rect.width() - 20.0;
-                let title = elided(ui, &stash.message, theme::body(), color::TEXT, width);
-                paint_galley_left(painter, x, rect.top() + 15.0, title, color::TEXT);
+                let title = elided(ui, &stash.message, theme::body(), color::text(), width);
+                paint_galley_left(painter, x, rect.top() + 15.0, title, color::text());
                 let meta = format!(
                     "{} · {}",
                     origin(snap, stash),
                     time::relative(stash.time, now)
                 );
-                let meta = elided(ui, &meta, theme::small(), color::TEXT_WEAK, width);
-                paint_galley_left(painter, x, rect.top() + 33.0, meta, color::TEXT_WEAK);
+                let meta = elided(ui, &meta, theme::small(), color::text_weak(), width);
+                paint_galley_left(painter, x, rect.top() + 33.0, meta, color::text_weak());
                 if response.clicked() {
                     actions.push(Action::SelectStash(stash.id));
                 }
@@ -180,7 +180,7 @@ fn details(
     ui.label(
         RichText::new(&stash.message)
             .font(theme::semibold(15.0))
-            .color(color::TEXT),
+            .color(color::text()),
     );
     ui.label(
         RichText::new(format!(
@@ -190,7 +190,7 @@ fn details(
             origin(snap, stash),
             time::absolute(stash.time)
         ))
-        .color(color::TEXT_WEAK)
+        .color(color::text_weak())
         .size(theme::SMALL_SIZE),
     );
 
@@ -246,18 +246,18 @@ fn details(
         RichText::new(format!(
             "Apply and Pop go to the selected worktree: {here_label}"
         ))
-        .color(color::TEXT_FAINT)
+        .color(color::text_faint())
         .size(theme::SMALL_SIZE),
     );
     ui.add_space(4.0);
 
     let files = match &project.stash_files {
         None => {
-            ui.label(RichText::new("Loading files…").color(color::TEXT_WEAK));
+            ui.label(RichText::new("Loading files…").color(color::text_weak()));
             return;
         }
         Some(Err(e)) => {
-            ui.label(RichText::new(e).color(color::REMOVED));
+            ui.label(RichText::new(e).color(color::removed()));
             return;
         }
         Some(Ok(files)) => files,

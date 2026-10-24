@@ -62,29 +62,29 @@ pub fn status_bar(
     let painter = ui.painter();
     let mut x = rect.left() + 4.0;
     if let Some(activity) = activity {
-        spinner(ui, pos2(x + 5.0, y), 5.0, color::TEXT_WEAK);
+        spinner(ui, pos2(x + 5.0, y), 5.0, color::text_weak());
         x += 16.0;
         let text = elided(
             ui,
             activity,
             theme::small(),
-            color::TEXT_WEAK,
+            color::text_weak(),
             rect.width() / 2.0,
         );
         let width = text.size().x;
-        paint_galley_left(painter, x, y, text, color::TEXT_WEAK);
+        paint_galley_left(painter, x, y, text, color::text_weak());
         if cancellable {
             let galley =
-                painter.layout_no_wrap("Cancel".to_owned(), theme::small(), color::AHEAD_FG);
+                painter.layout_no_wrap("Cancel".to_owned(), theme::small(), color::ahead_fg());
             let r = egui::Rect::from_min_size(
                 pos2(x + width + 10.0, rect.top() + 4.0),
                 vec2(galley.size().x + 8.0, rect.height() - 8.0),
             );
             let response = ui.interact(r, ui.scope_id().with("cancel-activity"), Sense::click());
             let fg = if response.hovered() {
-                color::TEXT
+                color::text()
             } else {
-                color::AHEAD_FG
+                color::ahead_fg()
             };
             paint_galley_left(painter, r.left() + 4.0, y, galley, fg);
             cancel = response.clicked();
@@ -95,10 +95,10 @@ pub fn status_bar(
             ui,
             &text,
             theme::small(),
-            color::TEXT_FAINT,
+            color::text_faint(),
             rect.width() / 2.0,
         );
-        paint_galley_left(painter, x, y, text, color::TEXT_FAINT);
+        paint_galley_left(painter, x, y, text, color::text_faint());
     }
 
     // Console toggle on the right.
@@ -109,9 +109,9 @@ pub fn status_bar(
         "Console".to_owned()
     };
     let fg = if failures > 0 {
-        color::REMOVED
+        color::removed()
     } else {
-        color::TEXT_WEAK
+        color::text_weak()
     };
     let galley = painter.layout_no_wrap(label, theme::small(), fg);
     let width = galley.size().x + ICON_SIZE + 22.0;
@@ -123,7 +123,7 @@ pub fn status_bar(
         .interact(button, ui.scope_id().with("console-toggle"), Sense::click())
         .on_hover_text("Git commands Graft ran  (Ctrl+J)");
     if response.hovered() || *console_open {
-        painter.rect_filled(button, 4, color::CONTROL_HOVER_BG);
+        painter.rect_filled(button, 4, color::control_hover_bg());
     }
     paint_icon(painter, pos2(button.left() + 8.0, y), Icon::Terminal, fg);
     paint_galley_left(painter, button.left() + 14.0 + ICON_SIZE, y, galley, fg);
@@ -140,11 +140,11 @@ pub fn console(ui: &mut Ui, view: &mut ConsoleView, open: &mut bool) {
         ui.label(
             RichText::new("Git console")
                 .font(theme::semibold(theme::BODY_SIZE))
-                .color(color::TEXT),
+                .color(color::text()),
         );
         ui.label(
             RichText::new("Every git command Graft runs, newest at the bottom.")
-                .color(color::TEXT_FAINT)
+                .color(color::text_faint())
                 .size(theme::SMALL_SIZE),
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -168,7 +168,7 @@ pub fn console(ui: &mut Ui, view: &mut ConsoleView, open: &mut bool) {
             ui.spacing_mut().item_spacing.y = 2.0;
             let start = view.cleared_at.min(view.entries.len());
             if start == view.entries.len() {
-                ui.label(RichText::new("No commands yet.").color(color::TEXT_FAINT));
+                ui.label(RichText::new("No commands yet.").color(color::text_faint()));
             }
             for (i, entry) in view.entries.iter().enumerate().skip(start) {
                 entry_row(ui, i, entry);
@@ -181,7 +181,7 @@ fn entry_row(ui: &mut Ui, index: usize, entry: &Entry) {
     let mut expanded = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
     if response.hovered() {
-        ui.painter().rect_filled(rect, 3, color::HOVER_ROW_BG);
+        ui.painter().rect_filled(rect, 3, color::hover_row_bg());
     }
     let y = rect.center().y;
     let painter = ui.painter();
@@ -198,14 +198,14 @@ fn entry_row(ui: &mut Ui, index: usize, entry: &Entry) {
         })
         .unwrap_or_default();
     let mut x = rect.left() + 4.0;
-    let time = painter.layout_no_wrap(clock, theme::mono(), color::TEXT_FAINT);
+    let time = painter.layout_no_wrap(clock, theme::mono(), color::text_faint());
     let time_width = time.size().x;
-    paint_galley_left(painter, x, y, time, color::TEXT_FAINT);
+    paint_galley_left(painter, x, y, time, color::text_faint());
     x += time_width + 10.0;
     let (mark, mark_color) = if entry.failed() {
-        (format!("exit {}", entry.status), color::REMOVED)
+        (format!("exit {}", entry.status), color::removed())
     } else {
-        ("ok".to_owned(), color::ADDED)
+        ("ok".to_owned(), color::added())
     };
     let mark = painter.layout_no_wrap(mark, theme::small(), mark_color);
     paint_galley_left(painter, x, y, mark, mark_color);
@@ -213,18 +213,18 @@ fn entry_row(ui: &mut Ui, index: usize, entry: &Entry) {
     let duration = painter.layout_no_wrap(
         format!("{} ms", entry.duration.as_millis()),
         theme::small(),
-        color::TEXT_FAINT,
+        color::text_faint(),
     );
     let duration_x = rect.right() - 6.0 - duration.size().x;
-    paint_galley_left(painter, duration_x, y, duration, color::TEXT_FAINT);
+    paint_galley_left(painter, duration_x, y, duration, color::text_faint());
     let command = elided(
         ui,
         &entry.command,
         theme::mono(),
-        color::TEXT_MID,
+        color::text_mid(),
         duration_x - 10.0 - x,
     );
-    paint_galley_left(painter, x, y, command, color::TEXT_MID);
+    paint_galley_left(painter, x, y, command, color::text_mid());
     if response
         .on_hover_text(format!("in {}", entry.cwd))
         .clicked()
@@ -247,7 +247,7 @@ fn entry_row(ui: &mut Ui, index: usize, entry: &Entry) {
             text.push_str("(no output)");
         }
         egui::Frame::new()
-            .fill(color::APP_BG)
+            .fill(color::app_bg())
             .corner_radius(4)
             .inner_margin(egui::Margin::symmetric(10, 6))
             .show(ui, |ui| {
@@ -256,7 +256,7 @@ fn entry_row(ui: &mut Ui, index: usize, entry: &Entry) {
                     egui::Label::new(
                         RichText::new(text)
                             .font(theme::mono())
-                            .color(color::TEXT_WEAK),
+                            .color(color::text_weak()),
                     )
                     .selectable(true)
                     .wrap(),
