@@ -36,18 +36,16 @@ jobs:
       - name: Build
         run: cargo build --release --locked -p graft
 
-      - name: Package
+      - name: Install Inno Setup
         shell: pwsh
         run: |
-          New-Item -ItemType Directory dist, pack | Out-Null
-          Copy-Item target/release/graft.exe, LICENSE, README.md pack/
-          Compress-Archive pack/* "dist/Graft-$env:VERSION-x64.zip"
-          # A stable name the in-app updater downloads.
-          Copy-Item target/release/graft.exe dist/graft-x64.exe
-          $sums = Get-ChildItem dist | ForEach-Object {
-            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
           }
-          $sums | Out-File -Encoding ascii dist/SHA256SUMS.txt
+
+      - name: Package
+        shell: pwsh
+        run: ./tools/package.ps1 -Version $env:VERSION
 
       - name: Publish the release
         shell: pwsh

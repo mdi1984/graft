@@ -113,10 +113,13 @@ main once checks pass.
   `git tag v1.2.3 <sha>` and `git push origin v1.2.3`.
 - `.github/workflows/release.yml` runs on the tag: it fails unless the tag
   matches Cargo.toml, runs the tests, builds, and publishes a GitHub release
-  with `Graft-X.Y.Z-x64.zip` (exe, LICENSE, README), `graft-x64.exe` (stable
-  name for the in-app updater) and `SHA256SUMS.txt`, with generated notes.
+  with generated notes. `tools/package.ps1` makes the files:
+  `Graft-X.Y.Z-x64.zip` (exe, LICENSE, README), `Graft-X.Y.Z-x64-setup.exe`
+  (per-user Inno Setup installer from `installer/graft.iss`, used by winget),
+  `graft-x64.exe` (stable name for the in-app updater) and `SHA256SUMS.txt`.
 - `.github/workflows/ci.yml` checks fmt, clippy (-D warnings) and tests on
-  every PR and push to main.
+  every PR and push to main, and builds the packages (artifact
+  `graft-packages`).
 
 ## MVP order
 1. Cargo workspace + egui shell + theme
