@@ -269,14 +269,21 @@ pub fn execute(
         let (Some(branch), Some(target)) = (&c.branch, c.target) else {
             continue;
         };
-        if !step(format!("Deleting branch {branch}")) {
+        // A branch whose worktree stayed stays too.
+        let kept = c
+            .worktree
+            .as_ref()
+            .is_some_and(|p| failed_worktrees.contains(p));
+        let what = if kept {
+            format!("Keeping branch {branch}: its worktree is still there")
+        } else {
+            format!("Deleting branch {branch}")
+        };
+        if !step(what) {
             outcome.cancelled = true;
             return outcome;
         }
-        if c.worktree
-            .as_ref()
-            .is_some_and(|p| failed_worktrees.contains(p))
-        {
+        if kept {
             continue;
         }
         match git.run(["branch", "-D", "--end-of-options", branch]) {

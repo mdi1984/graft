@@ -190,13 +190,33 @@ fn worktrees_with_very_long_paths_are_slashed() {
 }
 
 #[test]
-fn a_dirty_worktree_with_long_paths_is_kept() {
+fn a_worktree_that_cannot_be_removed_keeps_its_branch() {
     let tmp = tempfile::tempdir().unwrap();
     let (git, wt) = repo_with_merged_branch(tmp.path());
+    let snap = snapshot::load(&git).unwrap();
+    let plan = slash::plan(&git, &snap, PROTECTED).unwrap();
+    let chosen: Vec<_> = plan
+        .candidates
+        .into_iter()
+        .filter(|c| c.branch.as_deref() == Some("merged-deep"))
+        .collect();
+    // Changed after the plan was made, so removing it fails.
     std::fs::write(wt.join("notes.txt"), "not committed\n").unwrap();
-
-    assert!(worktree::remove(&git, &wt, false).is_err());
+    let mut lines = Vec::new();
+    let outcome = slash::execute(&git, &chosen, &CancelToken::default(), |p| {
+        lines.push(p.line);
+    });
+    assert_eq!(outcome.worktrees_removed, 0);
+    assert_eq!(outcome.errors.len(), 1, "{:?}", outcome.errors);
+    // Its branch stays with it, and the progress says so.
+    assert!(outcome.slashed.is_empty());
+    assert_eq!(
+        lines.last().unwrap(),
+        "Keeping branch merged-deep: its worktree is still there (2 of 2)"
+    );
     assert!(wt.join("notes.txt").exists());
+    let branches = git.read(["branch", "--list", "merged-deep"]).unwrap();
+    assert!(branches.contains("merged-deep"));
 }
 
 fn repo_with_merged_branches(tmp: &Path, count: usize) -> (Git, Vec<slash::Candidate>) {
