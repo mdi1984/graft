@@ -65,7 +65,7 @@ pub fn show_view(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Act
     if diff.hunks.is_empty() {
         let detail = if view.key.source == Source::Unstaged && diff.header.starts_with(b"diff --cc")
         {
-            "This file has a merge conflict. Resolving conflicts comes in a later step."
+            "This file has a merge conflict."
         } else {
             "Only the file mode or whitespace changed, or the file is empty."
         };

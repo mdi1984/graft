@@ -59,6 +59,8 @@ pub struct Worktree {
     pub prunable: bool,
     /// `None` if status could not be read (e.g. prunable worktree).
     pub status: Option<WorktreeStatus>,
+    /// A merge, cherry-pick, revert or rebase that stopped part-way.
+    pub in_progress: Option<crate::conflicts::InProgress>,
 }
 
 impl Worktree {

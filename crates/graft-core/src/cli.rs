@@ -78,6 +78,21 @@ impl Git {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        self.run_expecting(args, input, |out| out.success())
+    }
+
+    /// Run git; `expected` says which outcomes are normal, so the console
+    /// does not list e.g. "stopped with conflicts" as a failure.
+    pub fn run_expecting<I, S>(
+        &self,
+        args: I,
+        input: Option<&[u8]>,
+        expected: impl Fn(&Output) -> bool,
+    ) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
         let args: Vec<_> = args.into_iter().map(|a| a.as_ref().to_owned()).collect();
         let started = Instant::now();
         let mut cmd = command(&self.cwd);
@@ -106,13 +121,10 @@ impl Git {
             stdout: out.stdout,
             stderr: out.stderr,
         };
-        self.console.push(Entry::finished(
-            &self.cwd,
-            &args,
-            output.status,
-            started.elapsed(),
-            &output,
-        ));
+        let mut entry =
+            Entry::finished(&self.cwd, &args, output.status, started.elapsed(), &output);
+        entry.expected = expected(&output);
+        self.console.push(entry);
         Ok(output)
     }
 

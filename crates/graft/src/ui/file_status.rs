@@ -6,12 +6,12 @@ use egui::{
 };
 use graft_core::status::{Change, StatusEntry, WorktreeStatus};
 
-use super::diff_view;
 use super::history::{paint_change_letter, paint_path};
 use super::icons::Icon;
 use super::widgets::{
     ButtonKind, button, empty_state, paint_icon_button, section_heading, text_field,
 };
+use super::{conflicts, diff_view};
 use crate::project::{Action, FileKey, Project};
 use crate::theme::{self, RADIUS, color};
 
@@ -48,7 +48,11 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
         empty_state(ui, "Nothing to commit", "The working tree is clean.");
         return;
     }
-    diff_view::show(ui, project, actions);
+    if project.conflict.is_some() {
+        conflicts::resolver(ui, project, actions);
+    } else {
+        diff_view::show(ui, project, actions);
+    }
 }
 
 fn file_lists(ui: &mut Ui, project: &Project, status: &WorktreeStatus, actions: &mut Vec<Action>) {

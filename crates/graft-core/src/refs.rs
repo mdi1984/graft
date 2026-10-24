@@ -142,14 +142,14 @@ pub fn push_tag(
     )
 }
 
-pub fn cherry_pick(git: &Git, rev: &str) -> Result<()> {
-    git.run(["cherry-pick", rev])?;
-    Ok(())
+/// Ok(true): stopped with conflicts (see [`crate::conflicts`]).
+pub fn cherry_pick(git: &Git, rev: &str) -> Result<bool> {
+    crate::conflicts::run_may_conflict(git, &["cherry-pick", rev])
 }
 
-pub fn revert(git: &Git, rev: &str) -> Result<()> {
-    git.run(["revert", "--no-edit", rev])?;
-    Ok(())
+/// Ok(true): stopped with conflicts (see [`crate::conflicts`]).
+pub fn revert(git: &Git, rev: &str) -> Result<bool> {
+    crate::conflicts::run_may_conflict(git, &["revert", "--no-edit", rev])
 }
 
 pub fn reset(git: &Git, rev: &str, mode: ResetMode) -> Result<()> {

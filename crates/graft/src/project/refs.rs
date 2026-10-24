@@ -47,6 +47,16 @@ pub enum DialogKind {
         label: String,
         name: String,
     },
+    /// Merge a branch into the selected worktree's branch.
+    Merge {
+        /// The selected worktree's branch.
+        into: String,
+        rev: String,
+        /// Branches to pick from.
+        choices: Vec<String>,
+        filter: String,
+        no_ff: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -111,6 +121,10 @@ impl Project {
                 }
             }
             DialogKind::Reset { .. } | DialogKind::Stash { .. } => None,
+            DialogKind::Merge { rev, .. } if rev.is_empty() => {
+                Some("Pick what to merge.".to_owned())
+            }
+            DialogKind::Merge { .. } => None,
         };
         if let Some(problem) = problem {
             dialog.error = Some(problem);
@@ -176,6 +190,15 @@ impl Project {
                 self.run_op("Creating branch", Then::Dialog(done), move |git| {
                     stash::branch(&git, &name, id)
                 });
+            }
+            DialogKind::Merge {
+                into, rev, no_ff, ..
+            } => {
+                dialog.submitting = false;
+                self.apply_conflict_action(Action::Merge { rev, no_ff, into });
+                if let Some(dialog) = &mut self.dialog {
+                    dialog.submitting = self.op.is_some();
+                }
             }
             DialogKind::Reset {
                 target,
@@ -287,16 +310,30 @@ impl Project {
             Action::CherryPick(id) => {
                 let rev = id.to_string();
                 let done = format!("Cherry-picked {}", graft_core::short(&id));
-                self.run_op("Cherry-picking", Then::Info(done), move |git| {
-                    refs::cherry_pick(&git, &rev)
-                });
+                let stopped = format!(
+                    "Cherry-picking {} stopped with conflicts. Resolve them in File status, then Continue.",
+                    graft_core::short(&id)
+                );
+                self.run_op_at(
+                    self.wt_git(),
+                    "Cherry-picking",
+                    Then::MayConflict(done),
+                    move |git| Ok(refs::cherry_pick(&git, &rev)?.then_some(stopped)),
+                );
             }
             Action::Revert(id) => {
                 let rev = id.to_string();
                 let done = format!("Reverted {}", graft_core::short(&id));
-                self.run_op("Reverting", Then::Info(done), move |git| {
-                    refs::revert(&git, &rev)
-                });
+                let stopped = format!(
+                    "Reverting {} stopped with conflicts. Resolve them in File status, then Continue.",
+                    graft_core::short(&id)
+                );
+                self.run_op_at(
+                    self.wt_git(),
+                    "Reverting",
+                    Then::MayConflict(done),
+                    move |git| Ok(refs::revert(&git, &rev)?.then_some(stopped)),
+                );
             }
             Action::UndoCommit => {
                 self.run_op(

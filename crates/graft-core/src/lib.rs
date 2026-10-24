@@ -6,6 +6,7 @@
 //! results match git exactly and hooks, config and credentials keep working.
 
 pub mod cli;
+pub mod conflicts;
 pub mod console;
 pub mod details;
 pub mod diff;
