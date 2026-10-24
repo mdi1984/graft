@@ -1,0 +1,58 @@
+# Builds and publishes a release when a version tag (v1.2.3) is pushed.
+# The tag must match the version in Cargo.toml; see "Releases" in CLAUDE.md.
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check the tag matches Cargo.toml
+        shell: pwsh
+        run: |
+          $meta = cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json
+          $version = ($meta.packages | Where-Object name -eq 'graft').version
+          if ("v$version" -ne $env:GITHUB_REF_NAME) {
+            throw "Tag $env:GITHUB_REF_NAME does not match the version in Cargo.toml ($version)."
+          }
+          "VERSION=$version" | Out-File -Append $env:GITHUB_ENV
+
+      - name: Tests
+        run: cargo test --workspace --locked
+
+      - name: Build
+        run: cargo build --release --locked -p graft
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist, pack | Out-Null
+          Copy-Item target/release/graft.exe, LICENSE, README.md pack/
+          Compress-Archive pack/* "dist/Graft-$env:VERSION-x64.zip"
+          # A stable name the in-app updater downloads.
+          Copy-Item target/release/graft.exe dist/graft-x64.exe
+          $sums = Get-ChildItem dist | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          }
+          $sums | Out-File -Encoding ascii dist/SHA256SUMS.txt
+
+      - name: Publish the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME (Get-ChildItem dist).FullName `
+            --title "Graft $env:VERSION" --generate-notes --verify-tag
