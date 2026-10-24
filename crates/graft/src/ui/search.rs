@@ -7,6 +7,7 @@ use egui::{
 };
 
 use super::icons::{self, Icon};
+use crate::keys::Command;
 use crate::project::{Action, FileKey, Project};
 use crate::theme::{self, RADIUS, color};
 
@@ -141,7 +142,8 @@ pub fn show(ui: &mut Ui, project: &Project, text: &mut String, actions: &mut Vec
     let id = Id::unique("toolbar-search");
     let selected_id = id.with("selected");
     let popup_id = id.with("popup-rect");
-    if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {
+    let keys = &project.settings.keys;
+    if keys.pressed(ui.ctx(), Command::Search) {
         ui.memory_mut(|m| m.request_focus(id));
         // Select the old query so typing replaces it.
         let mut state = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
@@ -186,7 +188,7 @@ pub fn show(ui: &mut Ui, project: &Project, text: &mut String, actions: &mut Vec
                         .margin(Margin::ZERO)
                         .min_size(vec2(0.0, 28.0))
                         .align(egui::Align2::LEFT_CENTER)
-                        .hint_text("Commits, branches, files…  Ctrl+K")
+                        .hint_text(keys.tip("Commits, branches, files…", Command::Search))
                         .desired_width(f32::INFINITY),
                 );
             });

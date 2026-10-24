@@ -124,6 +124,9 @@ cargo run --release
 <details>
 <summary><b>Keyboard shortcuts</b></summary>
 
+The defaults below can all be changed in **Settings → Keyboard**. Tooltips show the current
+shortcut for each action.
+
 | Keys | Does |
 | --- | --- |
 | Ctrl+K | Search worktrees, branches, tags, commits and files |
@@ -132,8 +135,13 @@ cargo run --release
 | Ctrl+W | Close the tab |
 | Ctrl+Tab, Ctrl+Shift+Tab | Next / previous tab |
 | Ctrl+, | Settings |
-| Ctrl+Enter | Commit (in the commit message), save (in a review comment) |
-| ↑ / ↓ | Move through commits and search results |
+| F5 | Refresh |
+| Ctrl+J | Show or hide the git console |
+| ↑ / ↓ | Move through files, commits and search results |
+| Space | Stage or unstage the selected file (File status) |
+| Ctrl+S, Ctrl+Shift+S | Stage all / unstage all (File status) |
+| Delete | Discard the selected file's changes, after asking (File status) |
+| Ctrl+Enter | Commit (in File status), save (in a review comment) |
 | V | Mark the file viewed (Review) |
 | Esc | Clear the selected lines |
 

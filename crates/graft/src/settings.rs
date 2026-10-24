@@ -4,6 +4,8 @@ use graft_core::slash::PROTECTED;
 use graft_core::worktree::DEFAULT_COPY_PATTERNS;
 use serde::{Deserialize, Serialize};
 
+use crate::keys::Keymap;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -18,6 +20,8 @@ pub struct Settings {
     pub copy_patterns: String,
     /// Ask GitHub for a newer Graft when it starts.
     pub check_updates: bool,
+    /// Keyboard shortcuts; only the ones changed from the defaults are saved.
+    pub keys: Keymap,
 }
 
 impl Default for Settings {
@@ -29,6 +33,7 @@ impl Default for Settings {
             protected: PROTECTED.to_owned(),
             copy_patterns: DEFAULT_COPY_PATTERNS.to_owned(),
             check_updates: true,
+            keys: Keymap::default(),
         }
     }
 }

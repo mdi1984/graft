@@ -7,6 +7,7 @@ use egui::{CornerRadius, Rect, Sense, Stroke, Ui, pos2, vec2};
 use super::icons::Icon;
 use super::widgets::{elided, paint_galley_left, paint_icon_button, spinner};
 use super::window_frame;
+use crate::keys::{Command, Keymap};
 use crate::theme::{self, color};
 
 pub const HEIGHT: f32 = 40.0;
@@ -48,6 +49,7 @@ pub fn show(
     tabs: &[TabInfo],
     active: Option<usize>,
     update: Option<&str>,
+    keys: &Keymap,
 ) -> Option<TabAction> {
     let mut action = None;
     let full = ui.available_rect_before_wrap();
@@ -192,7 +194,7 @@ pub fn show(
     let plus = Rect::from_center_size(pos2(x + 16.0, top + TAB_HEIGHT / 2.0), vec2(26.0, 26.0));
     let response = ui
         .interact(plus, ui.scope_id().with("new-tab"), Sense::click())
-        .on_hover_text("Open a repository  (Ctrl+T)");
+        .on_hover_text(keys.tip("Open a repository", Command::NewTab));
     paint_icon_button(ui, plus, &response, Icon::Plus);
     if response.clicked() {
         action = Some(TabAction::NewTab);
@@ -207,7 +209,7 @@ pub fn show(
     );
     let response = ui
         .interact(gear, ui.scope_id().with("settings"), Sense::click())
-        .on_hover_text("Settings  (Ctrl+,)");
+        .on_hover_text(keys.tip("Settings", Command::Settings));
     paint_icon_button(ui, gear, &response, Icon::Settings);
     if response.clicked() {
         action = Some(TabAction::OpenSettings);

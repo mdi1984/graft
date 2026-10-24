@@ -1,11 +1,12 @@
 //! The Settings dialog: theme, commit identity for the open repository,
 //! editor, background fetch, Slash's protected branches, the files copied
-//! into new worktrees and update checks.
+//! into new worktrees, keyboard shortcuts and update checks.
 
-use egui::{Align, ComboBox, Id, Key, Layout, RichText, Ui};
+use egui::{Align, ComboBox, Id, Key, Layout, RichText, ScrollArea, Ui};
 use graft_core::identity::Identity;
 
 use super::widgets::{ButtonKind, button, spinner, text_field};
+use crate::keys::{self, Command, Scope};
 use crate::settings::{Settings, ThemeChoice};
 use crate::theme::{self, color};
 
@@ -14,6 +15,10 @@ const FETCH_CHOICES: [u32; 6] = [0, 5, 10, 15, 30, 60];
 
 pub struct SettingsForm {
     pub draft: Settings,
+    /// The action whose new shortcut is being recorded.
+    recording: Option<Command>,
+    /// Why the last recorded shortcut was not taken.
+    key_error: Option<String>,
     /// The identity as loaded, to tell whether it was edited.
     loaded: Option<Identity>,
     pub identity: Identity,
@@ -32,6 +37,8 @@ impl SettingsForm {
     pub fn new(settings: &Settings) -> Self {
         Self {
             draft: settings.clone(),
+            recording: None,
+            key_error: None,
             loaded: None,
             identity: Identity::default(),
         }
@@ -152,6 +159,11 @@ pub fn show(
         field_label(ui, "Ignored files to copy into new worktrees");
         text_field(ui, &mut form.draft.copy_patterns, ".env, .env.*", WIDTH);
 
+        section(ui, "Keyboard");
+        egui::CollapsingHeader::new(RichText::new("Shortcuts").color(color::text()))
+            .id_salt("settings-shortcuts")
+            .show(ui, |ui| shortcuts(ui, form));
+
         section(ui, "Updates");
         ui.horizontal(|ui| {
             ui.checkbox(
@@ -191,6 +203,100 @@ pub fn show(
         outcome = Outcome::Cancel;
     }
     outcome
+}
+
+/// Every action with its shortcut; click one to record a new one.
+fn shortcuts(ui: &mut Ui, form: &mut SettingsForm) {
+    if let Some(command) = form.recording {
+        let pressed = ui.input(keys::recorded);
+        // Keys go to the recorder only: nothing else may act on them.
+        ui.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Key { .. })));
+        match pressed {
+            Some(s) if s.modifiers.is_none() && s.logical_key == Key::Escape => {
+                form.recording = None;
+            }
+            Some(shortcut) => {
+                form.recording = None;
+                form.key_error = form.draft.keys.refusal(command, shortcut);
+                if form.key_error.is_none() {
+                    form.draft.keys.set(command, Some(shortcut));
+                }
+            }
+            None => {}
+        }
+    }
+    hint(
+        ui,
+        "Click a shortcut, then press the new keys (Esc cancels). Shortcuts without Ctrl or Alt \
+         don't fire while you type.",
+    );
+    if let Some(error) = &form.key_error {
+        ui.label(RichText::new(error).color(color::removed()));
+    }
+    ScrollArea::vertical()
+        .max_height(260.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for scope in [Scope::General, Scope::FileStatus, Scope::Review] {
+                ui.add_space(4.0);
+                field_label(ui, scope.label());
+                for command in Command::ALL.into_iter().filter(|c| c.scope() == scope) {
+                    shortcut_row(ui, form, command);
+                }
+            }
+        });
+}
+
+fn shortcut_row(ui: &mut Ui, form: &mut SettingsForm, command: Command) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(command.label()).color(color::text()));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let current = form.draft.keys.get(command);
+            let changed = current != command.default_shortcut();
+            if ui
+                .add_enabled(changed, egui::Button::new("Reset").small())
+                .on_hover_text(match command.default_shortcut() {
+                    Some(s) => format!("Back to {}", keys::format(s)),
+                    None => "Back to no shortcut".to_owned(),
+                })
+                .clicked()
+            {
+                // The default may be in use by now, too.
+                let default = command.default_shortcut();
+                form.key_error = default.and_then(|s| form.draft.keys.refusal(command, s));
+                if form.key_error.is_none() {
+                    form.draft.keys.set(command, default);
+                }
+            }
+            if ui
+                .add_enabled(current.is_some(), egui::Button::new("Clear").small())
+                .on_hover_text("No shortcut for this")
+                .clicked()
+            {
+                form.draft.keys.set(command, None);
+                form.key_error = None;
+            }
+            let recording = form.recording == Some(command);
+            let text = if recording {
+                "Press keys…".to_owned()
+            } else {
+                current.map_or_else(|| "None".to_owned(), keys::format)
+            };
+            let text = RichText::new(text).font(theme::mono()).color(if recording {
+                color::accent()
+            } else {
+                color::text()
+            });
+            if ui
+                .add(egui::Button::new(text).min_size(egui::vec2(120.0, 0.0)))
+                .on_hover_text("Click, then press the new keys")
+                .clicked()
+            {
+                form.recording = if recording { None } else { Some(command) };
+                form.key_error = None;
+            }
+        });
+    });
 }
 
 fn section(ui: &mut Ui, title: &str) {

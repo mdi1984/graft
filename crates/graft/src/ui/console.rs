@@ -8,6 +8,7 @@ use graft_core::console::Entry;
 
 use super::icons::Icon;
 use super::widgets::{ICON_SIZE, elided, icon_button, paint_galley_left, paint_icon, spinner};
+use crate::keys::{Command, Keymap};
 use crate::theme::{self, color};
 
 pub const STATUS_HEIGHT: f32 = 26.0;
@@ -54,6 +55,7 @@ pub fn status_bar(
     cancellable: bool,
     view: &ConsoleView,
     console_open: &mut bool,
+    keys: &Keymap,
 ) -> bool {
     let mut cancel = false;
     let (rect, _) =
@@ -121,7 +123,7 @@ pub fn status_bar(
     );
     let response = ui
         .interact(button, ui.scope_id().with("console-toggle"), Sense::click())
-        .on_hover_text("Git commands Graft ran  (Ctrl+J)");
+        .on_hover_text(keys.tip("Git commands Graft ran", Command::Console));
     if response.hovered() || *console_open {
         painter.rect_filled(button, 4, color::control_hover_bg());
     }
