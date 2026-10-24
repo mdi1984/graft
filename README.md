@@ -5,7 +5,7 @@
 <h1 align="center">Graft</h1>
 
 <p align="center">
-  <b>An opinionated git client for Windows, written by Claude.</b><br>
+  <b>An opinionated git client for Windows.</b><br>
   Fast on big repositories, built around worktrees, and made for reviewing what your coding agents did.
 </p>
 
@@ -146,15 +146,5 @@ cargo run --release
 - Settings, review marks and comments are stored in `%APPDATA%\Graft`.
 
 `CLAUDE.md` has the design notes.
-
-</details>
-
-<details>
-<summary><b>Written by Claude</b></summary>
-
-Graft was built by Claude (Anthropic's AI model) in Claude Code, from a short spec and a lot of
-feedback. Its owner does not read the code. Instead, every change is checked before it lands:
-formatting, `clippy` with no warnings, tests against throwaway repositories, and launching Graft to
-look at the screen. Each step is its own pull request.
 
 </details>
