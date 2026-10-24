@@ -101,3 +101,24 @@ mod win {
         }
     }
 }
+
+/// Wait (up to 10 seconds) for the process `pid` to end.
+pub fn wait_for_exit(pid: u32) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+        };
+        // SAFETY: plain Win32 calls; the handle is checked and closed.
+        unsafe {
+            let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+            if !handle.is_null() {
+                WaitForSingleObject(handle, 10_000);
+                CloseHandle(handle);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = pid;
+}

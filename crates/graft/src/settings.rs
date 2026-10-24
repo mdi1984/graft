@@ -16,6 +16,8 @@ pub struct Settings {
     pub protected: String,
     /// Ignored files copied into new worktrees.
     pub copy_patterns: String,
+    /// Ask GitHub for a newer Graft when it starts.
+    pub check_updates: bool,
 }
 
 impl Default for Settings {
@@ -26,6 +28,7 @@ impl Default for Settings {
             auto_fetch_minutes: 10,
             protected: PROTECTED.to_owned(),
             copy_patterns: DEFAULT_COPY_PATTERNS.to_owned(),
+            check_updates: true,
         }
     }
 }

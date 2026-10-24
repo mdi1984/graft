@@ -15,11 +15,13 @@ use serde::{Deserialize, Serialize};
 use crate::project::{Action, Project, ReviewState, SlashedBranch};
 use crate::settings::Settings;
 use crate::theme::color;
+use crate::ui::about::AboutAction;
 use crate::ui::console::{self as console_ui, ConsoleView, STATUS_HEIGHT};
 use crate::ui::project_tabs::{self, TabAction, TabInfo};
 use crate::ui::settings::{self as settings_ui, SettingsForm};
 use crate::ui::start::{Busy, Recent, StartAction, StartPage};
 use crate::ui::toasts::Toasts;
+use crate::update::{self, Release};
 use crate::{fonts, theme, ui};
 
 const STORAGE_KEY: &str = "graft";
@@ -51,6 +53,13 @@ enum Pick {
 enum AppEvent {
     Picked(Pick, Option<PathBuf>),
     Opened(Result<Location, String>),
+    /// `manual` when the user asked (About), so failures are shown.
+    UpdateChecked {
+        result: Result<Release, String>,
+        manual: bool,
+    },
+    /// The new program, ready to start.
+    UpdateInstalled(Result<PathBuf, String>),
 }
 
 pub struct GraftApp {
@@ -77,6 +86,10 @@ pub struct GraftApp {
     slashed: HashMap<PathBuf, Vec<SlashedBranch>>,
     settings: Settings,
     settings_form: Option<SettingsForm>,
+    update: update::Status,
+    about_open: bool,
+    /// An update is installed and the new Graft started: close this one.
+    closing: bool,
 }
 
 impl GraftApp {
@@ -148,7 +161,13 @@ impl GraftApp {
             slashed,
             settings,
             settings_form: None,
+            update: update::Status::Idle,
+            about_open: false,
+            closing: false,
         };
+        if app.settings.check_updates && update::check_on_start() {
+            app.check_update(false);
+        }
         for folder in folders {
             let folder = std::path::absolute(&folder).unwrap_or(folder);
             app.open_folder(folder);
@@ -177,6 +196,24 @@ impl GraftApp {
                         self.start.error = Some(error);
                     } else {
                         self.toasts.error(error);
+                    }
+                }
+                AppEvent::UpdateChecked { result, manual } => {
+                    self.update = match result {
+                        Ok(release) if release.is_newer() => update::Status::Available(release),
+                        Ok(_) => update::Status::UpToDate,
+                        Err(error) if manual => update::Status::Failed(error),
+                        Err(error) => {
+                            tracing::info!("update check: {error}");
+                            update::Status::Idle
+                        }
+                    };
+                }
+                AppEvent::UpdateInstalled(result) => {
+                    match result.and_then(|exe| update::restart(&exe).map_err(|e| format!("{e:#}")))
+                    {
+                        Ok(()) => self.closing = true,
+                        Err(error) => self.update = update::Status::Failed(error),
                     }
                 }
             }
@@ -311,6 +348,7 @@ impl GraftApp {
             TabAction::NewTab => self.activate(None),
             TabAction::CloseStart => self.close_start(),
             TabAction::OpenSettings => self.open_settings(),
+            TabAction::OpenAbout => self.about_open = true,
         }
     }
 
@@ -375,6 +413,42 @@ impl GraftApp {
         });
     }
 
+    fn check_update(&mut self, manual: bool) {
+        self.update = update::Status::Checking;
+        self.pool.spawn(&self.tx, move || AppEvent::UpdateChecked {
+            result: update::check().map_err(|e| format!("{e:#}")),
+            manual,
+        });
+    }
+
+    fn about_ui(&mut self, ctx: &egui::Context) {
+        if !self.about_open {
+            return;
+        }
+        match ui::about::show(ctx, &self.update) {
+            None => {}
+            Some(AboutAction::Close) => self.about_open = false,
+            Some(AboutAction::Check) => self.check_update(true),
+            Some(AboutAction::Open(url)) => {
+                if let Err(e) = open::that_detached(&url) {
+                    self.toasts.error(format!("Could not open {url}: {e}"));
+                }
+            }
+            Some(AboutAction::Install) => {
+                let update::Status::Available(release) = &self.update else {
+                    return;
+                };
+                let release = release.clone();
+                self.update = update::Status::Installing(release.clone());
+                self.pool.spawn_long(&self.tx, move |_| {
+                    AppEvent::UpdateInstalled(
+                        update::install(&release).map_err(|e| format!("{e:#}")),
+                    )
+                });
+            }
+        }
+    }
+
     fn open_settings(&mut self) {
         if self.settings_form.is_some() {
             return;
@@ -401,6 +475,11 @@ impl GraftApp {
             settings_ui::Outcome::Cancel => {
                 self.settings_form = None;
                 theme = self.settings.theme;
+            }
+            settings_ui::Outcome::About => {
+                self.settings_form = None;
+                theme = self.settings.theme;
+                self.about_open = true;
             }
             settings_ui::Outcome::Save(settings, identity) => {
                 self.settings_form = None;
@@ -642,6 +721,10 @@ impl eframe::App for GraftApp {
         self.refresh_on_focus(&ctx);
         self.sync_window_title(&ctx);
         self.settings_ui(&ctx);
+        self.about_ui(&ctx);
+        if self.closing {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         if self.settings.auto_fetch_minutes > 0 && !self.projects.is_empty() {
             ctx.request_repaint_after(std::time::Duration::from_secs(20));
         }
@@ -661,7 +744,13 @@ impl eframe::App for GraftApp {
             .frame(Frame::new().fill(color::tabstrip_bg()))
             .exact_size(project_tabs::HEIGHT)
             .show_separator_line(false)
-            .show(ui, |ui| project_tabs::show(ui, &infos, self.active))
+            .show(ui, |ui| {
+                let update = match &self.update {
+                    update::Status::Available(release) => Some(release.version.as_str()),
+                    _ => None,
+                };
+                project_tabs::show(ui, &infos, self.active, update)
+            })
             .inner;
         if let Some(action) = tab_action {
             self.on_tab_action(action);
