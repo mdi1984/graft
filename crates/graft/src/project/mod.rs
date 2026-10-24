@@ -3,6 +3,7 @@
 //! [`Action`]s; nothing here blocks on git.
 
 mod changes;
+pub mod comments;
 mod conflicts;
 mod file_history;
 mod preview;
@@ -216,6 +217,20 @@ pub enum Action {
     ToggleViewed(String),
     SetReviewBase(String),
     ToggleReviewSplit,
+    /// Pick a line of the review diff; `extend` grows the pick to it.
+    PickLine {
+        at: (usize, usize),
+        side: Option<comments::Side>,
+        extend: bool,
+    },
+    /// Save the draft as a comment on the picked lines (or the edited one).
+    SaveComment,
+    /// Drop the pick and the draft.
+    CancelComment,
+    EditComment(u64),
+    DeleteComment(u64),
+    /// Remove every line comment and file note of this review.
+    ClearReviewComments,
     /// Merge the reviewed branch into its base, in the worktree that has the
     /// base checked out.
     MergeReviewed {
@@ -844,6 +859,12 @@ impl Project {
             | Action::ToggleViewed(_)
             | Action::SetReviewBase(_)
             | Action::ToggleReviewSplit
+            | Action::PickLine { .. }
+            | Action::SaveComment
+            | Action::CancelComment
+            | Action::EditComment(_)
+            | Action::DeleteComment(_)
+            | Action::ClearReviewComments
             | Action::MergeReviewed { .. } => self.apply_review_action(action),
             Action::OpenSlash
             | Action::CloseSlash
