@@ -21,3 +21,4 @@ pub mod tabs;
 pub mod toasts;
 pub mod toolbar;
 pub mod widgets;
+pub mod window_frame;

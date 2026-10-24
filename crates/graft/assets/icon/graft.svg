@@ -1,9 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
   <!-- Graft "Splice": a branch (orange) joins main (blue) at a commit that sprouts a leaf. -->
-  <rect x="2" y="2" width="96" height="96" rx="22" fill="#16191d" stroke="#2a2f36" stroke-width="2"/>
-  <path d="M38 84 V54" stroke="#79b8ff" stroke-width="8" stroke-linecap="round" fill="none"/>
-  <path d="M70 24 C70 42 40 38 38 54" stroke="#f2a65a" stroke-width="8" stroke-linecap="round" fill="none"/>
-  <path d="M36 54 C20 50 14 34 20 20 C34 24 42 38 36 54 Z" fill="#8fd19e"/>
-  <circle cx="38" cy="56" r="10" fill="#8fd19e" stroke="#16191d" stroke-width="3"/>
-  <circle cx="70" cy="22" r="7" fill="#f2a65a"/>
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b3139"/>
+      <stop offset="1" stop-color="#16191d"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5a636f"/>
+      <stop offset="1" stop-color="#2a2f36"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="3" width="94" height="94" rx="22" fill="url(#plate)" stroke="url(#edge)" stroke-width="2.5"/>
+  <path d="M44 86 V56" stroke="#79b8ff" stroke-width="10" stroke-linecap="round" fill="none"/>
+  <path d="M75 21 C75 40 46 36 44 56" stroke="#f2a65a" stroke-width="10" stroke-linecap="round" fill="none"/>
+  <path d="M42 53 C23 49 15 31 21 13 C38 17 49 34 42 53 Z" fill="#8fd19e"/>
+  <circle cx="44" cy="56" r="12" fill="#8fd19e" stroke="#1d2126" stroke-width="3.5"/>
+  <circle cx="75" cy="21" r="8.5" fill="#f2a65a"/>
 </svg>

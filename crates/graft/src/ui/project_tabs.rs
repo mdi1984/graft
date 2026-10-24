@@ -1,10 +1,12 @@
 //! The strip of project tabs at the very top, like browser tabs: one per open
 //! repository, a "+" for the start page, drag to reorder, middle-click to close.
+//! It is also the window's title bar (see `window_frame`).
 
 use egui::{CornerRadius, Rect, Sense, Stroke, Ui, pos2, vec2};
 
 use super::icons::Icon;
 use super::widgets::{elided, paint_galley_left, paint_icon_button, spinner};
+use super::window_frame;
 use crate::theme::{self, color};
 
 pub const HEIGHT: f32 = 40.0;
@@ -13,6 +15,8 @@ const MIN_WIDTH: f32 = 110.0;
 const MAX_WIDTH: f32 = 220.0;
 const PAD_X: f32 = 12.0;
 const CLOSE: f32 = 18.0;
+/// The app icon at the left end of the strip.
+const ICON: f32 = 18.0;
 
 pub struct TabInfo {
     pub name: String,
@@ -42,16 +46,21 @@ pub fn show(ui: &mut Ui, tabs: &[TabInfo], active: Option<usize>) -> Option<TabA
     let full = ui.available_rect_before_wrap();
     let bottom = full.top() + HEIGHT;
     let top = bottom - TAB_HEIGHT;
-    ui.allocate_rect(
-        Rect::from_min_max(full.min, pos2(full.right(), bottom)),
-        Sense::hover(),
+    let strip = Rect::from_min_max(full.min, pos2(full.right(), bottom));
+    ui.allocate_rect(strip, Sense::hover());
+    window_frame::drag_area(ui, strip);
+
+    let icon = Rect::from_center_size(
+        pos2(full.left() + 22.0, top + TAB_HEIGHT / 2.0),
+        vec2(ICON, ICON),
     );
+    window_frame::paint_app_icon(ui, icon);
 
     let count = tabs.len() + usize::from(active.is_none());
-    let room = full.width() - 16.0 - 40.0 - 40.0;
+    let room = full.width() - 40.0 - 40.0 - 40.0 - window_frame::BUTTONS_WIDTH - 16.0;
     let width = (room / count.max(1) as f32).clamp(MIN_WIDTH, MAX_WIDTH);
 
-    let mut x = full.left() + 8.0;
+    let mut x = full.left() + 40.0;
     let mut rects = Vec::with_capacity(tabs.len());
     let mut dragged = None;
     for (i, tab) in tabs.iter().enumerate() {
@@ -161,7 +170,10 @@ pub fn show(ui: &mut Ui, tabs: &[TabInfo], active: Option<usize>) -> Option<TabA
     }
 
     let gear = Rect::from_center_size(
-        pos2(full.right() - 20.0, top + TAB_HEIGHT / 2.0),
+        pos2(
+            full.right() - window_frame::BUTTONS_WIDTH - 22.0,
+            top + TAB_HEIGHT / 2.0,
+        ),
         vec2(26.0, 26.0),
     );
     let response = ui
@@ -171,6 +183,7 @@ pub fn show(ui: &mut Ui, tabs: &[TabInfo], active: Option<usize>) -> Option<TabA
     if response.clicked() {
         action = Some(TabAction::OpenSettings);
     }
+    window_frame::caption_buttons(ui, strip, top + TAB_HEIGHT / 2.0);
     action
 }
 

@@ -1710,10 +1710,12 @@ dependencies = [
  "graft-core",
  "jiff",
  "open",
+ "raw-window-handle",
  "rfd",
  "serde",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
  "winresource",
 ]
 

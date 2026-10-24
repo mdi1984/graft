@@ -3,6 +3,7 @@
 
 mod app;
 mod fonts;
+mod native;
 mod project;
 mod settings;
 mod theme;
@@ -23,6 +24,8 @@ fn main() -> eframe::Result {
             .with_title("Graft")
             .with_inner_size([1440.0, 900.0])
             .with_min_inner_size([960.0, 560.0])
+            // Graft draws its own title bar (see ui::window_frame).
+            .with_decorations(false)
             .with_icon(window_icon()),
         ..Default::default()
     };
@@ -30,6 +33,7 @@ fn main() -> eframe::Result {
         "Graft",
         options,
         Box::new(|cc| {
+            native::style_window(cc);
             // `graft <folder>…` opens those folders as projects.
             let folders = std::env::args_os()
                 .skip(1)
