@@ -366,7 +366,8 @@ pub struct Project {
     rx: Receiver<Event>,
 
     pub nav: Nav,
-    pub snapshot: Option<RepoSnapshot>,
+    /// Shared, so screens can hold it without copying it every frame.
+    pub snapshot: Option<Arc<RepoSnapshot>>,
     /// Why the snapshot could not be loaded (only while there is none).
     pub error: Option<String>,
     pub loading: bool,
@@ -523,7 +524,7 @@ impl Project {
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.snapshot.as_ref().is_some_and(RepoSnapshot::is_dirty)
+        self.snapshot.as_ref().is_some_and(|s| s.is_dirty())
     }
 
     /// The selected worktree.
@@ -594,7 +595,7 @@ impl Project {
                 let tips = collect_tips(&snap);
                 let had_snapshot = self.snapshot.is_some();
                 let old_head = self.worktree().and_then(|wt| wt.head);
-                self.snapshot = Some(snap);
+                self.snapshot = Some(Arc::new(snap));
                 let head_moved = had_snapshot && self.worktree().and_then(|wt| wt.head) != old_head;
                 if self.first_load {
                     self.first_load = false;

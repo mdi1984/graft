@@ -505,7 +505,10 @@ pub fn progress_bar(ui: &mut Ui, fraction: Option<f32>, width: f32) {
         }
     };
     painter.rect_filled(fill, 2, color::accent());
-    ui.ctx().request_repaint();
+    // Only the sliding bar moves on its own.
+    if fraction.is_none() {
+        ui.ctx().request_repaint();
+    }
 }
 
 /// A modal dialog with Graft's frame. egui's default frame uses the tight

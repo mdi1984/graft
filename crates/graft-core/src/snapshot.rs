@@ -12,31 +12,46 @@ use crate::model::{
 use crate::repo::native;
 use crate::status;
 
-/// Read the whole snapshot. `git` must point at the main worktree.
+/// Read the whole snapshot. `git` must point at the main worktree. The git
+/// calls run side by side: each one costs tens of milliseconds just to start
+/// on Windows, and a repo with many worktrees needs one status per worktree.
 pub fn load(git: &Git) -> Result<RepoSnapshot> {
     let root = git.cwd().to_path_buf();
-    let refs = load_refs(git)?;
-    let mut worktrees = load_worktrees(git, &root)?;
-    for wt in &mut worktrees {
-        if !wt.prunable {
-            wt.status = status::load(&git.at(&wt.path)).ok();
-            wt.in_progress = conflicts::in_progress(&wt.path);
+    std::thread::scope(|s| {
+        let refs = s.spawn(|| load_refs(git));
+        let remotes = s.spawn(|| load_remotes(git));
+        let stash_count = s.spawn(|| load_stash_count(git));
+        let mut worktrees = load_worktrees(git, &root)?;
+        let statuses: Vec<_> = worktrees
+            .iter()
+            .map(|wt| {
+                let at = git.at(&wt.path);
+                (!wt.prunable).then(|| {
+                    s.spawn(move || (status::load(&at).ok(), conflicts::in_progress(at.cwd())))
+                })
+            })
+            .collect();
+        for (wt, job) in worktrees.iter_mut().zip(statuses) {
+            if let Some(job) = job {
+                (wt.status, wt.in_progress) = job.join().expect("status thread");
+            }
         }
-    }
-    Ok(RepoSnapshot {
-        name: root
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| root.display().to_string()),
-        root,
-        worktrees,
-        branches: refs.branches,
-        remote_branches: refs.remote_branches,
-        tags: refs.tags,
-        remote_default: refs.remote_default,
-        remotes: load_remotes(git)?,
-        stash_count: load_stash_count(git)?,
-        preview: crate::preview::active(git.cwd()),
+        let refs = refs.join().expect("refs thread")?;
+        Ok(RepoSnapshot {
+            name: root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| root.display().to_string()),
+            root: root.clone(),
+            worktrees,
+            branches: refs.branches,
+            remote_branches: refs.remote_branches,
+            tags: refs.tags,
+            remote_default: refs.remote_default,
+            remotes: remotes.join().expect("remotes thread")?,
+            stash_count: stash_count.join().expect("stash thread")?,
+            preview: crate::preview::active(git.cwd()),
+        })
     })
 }
 
@@ -51,7 +66,7 @@ struct Refs {
 fn load_refs(git: &Git) -> Result<Refs> {
     let out = git.read([
         "for-each-ref",
-        "--format=%(refname)%00%(objectname)%00%(*objectname)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(symref)",
+        "--format=%(refname)%00%(objectname)%00%(*objectname)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(symref)%00%(objecttype)%00%(*objecttype)",
         "refs/heads",
         "refs/remotes",
         "refs/tags",
@@ -63,7 +78,7 @@ fn parse_refs(text: &str) -> Refs {
     let mut refs = Refs::default();
     for line in text.lines() {
         let f: Vec<&str> = line.split('\0').collect();
-        let [name, oid, peeled, upstream, track, symref] = f[..] else {
+        let [name, oid, peeled, upstream, track, symref, ref types @ ..] = f[..] else {
             continue;
         };
         if !symref.is_empty() {
@@ -97,6 +112,12 @@ fn parse_refs(text: &str) -> Refs {
                 target: oid,
             });
         } else if let Some(tag) = name.strip_prefix("refs/tags/") {
+            // Tags can point at a file or folder (git.git has one); the
+            // history walk only takes commits.
+            let kind = types.get(1).filter(|t| !t.is_empty()).or(types.first());
+            if kind.is_some_and(|k| *k != "commit") {
+                continue;
+            }
             let peeled_oid = Oid::from_hex(peeled.as_bytes()).ok();
             refs.tags.push(Tag {
                 name: tag.to_owned(),

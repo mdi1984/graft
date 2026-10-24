@@ -19,7 +19,15 @@ use crate::project::{Action, Confirm, Project};
 use crate::theme::{self, color};
 
 pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
-    let (Some(snap), Some(wt)) = (project.snapshot.clone(), project.worktree().cloned()) else {
+    // Shared handles: the screen reads them while `project` takes actions.
+    let Some(snap) = project.snapshot.clone() else {
+        return;
+    };
+    let Some(wt) = snap
+        .worktrees
+        .iter()
+        .find(|wt| same_path(&wt.path, &project.nav.worktree))
+    else {
         return;
     };
     let Some(view) = &project.review else {
@@ -46,7 +54,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
             Panel::top("review-header")
                 .frame(header_frame())
                 .show(ui, |ui| {
-                    ui.horizontal(|ui| base_picker(ui, &snap, &wt, base.as_deref(), actions));
+                    ui.horizontal(|ui| base_picker(ui, &snap, wt, base.as_deref(), actions));
                 });
             empty_state(ui, "Nothing to review", e);
             return;
@@ -58,7 +66,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
     Panel::top("review-header")
         .frame(header_frame())
         .show(ui, |ui| {
-            header(ui, project, &snap, &wt, &review, viewed, actions)
+            header(ui, project, &snap, wt, &review, viewed, actions)
         });
 
     if review.files.is_empty() {
@@ -89,7 +97,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
                 .inner_margin(Margin::symmetric(8, 8)),
         )
         .show(ui, |ui| {
-            comments_bar(ui, project, &wt, &review, actions);
+            comments_bar(ui, project, wt, &review, actions);
             file_list(ui, project, &review, &uncommitted, actions)
         });
 
@@ -99,7 +107,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
         return;
     };
     let file = file.clone();
-    file_header(ui, project, &wt, &file, actions);
+    file_header(ui, project, wt, &file, actions);
     let path = file.change.path.as_str();
     let diff = project.commit_diff.as_ref().and_then(|d| d.diff.as_ref());
     let (placed, outdated) = match (diff, project.review_state()) {

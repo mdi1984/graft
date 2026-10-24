@@ -166,3 +166,27 @@ fn dunce(p: std::path::PathBuf) -> String {
         .trim_start_matches(r"\\?\")
         .to_lowercase()
 }
+
+/// Tags on a file or a folder (git.git and the Linux kernel have them) are
+/// left out, so the history walk over all tags still works.
+#[test]
+fn tags_on_files_and_folders_do_not_break_history() {
+    let tmp = fixture();
+    let dir = tmp.path().join("demo");
+    let blob = sh(&dir, &["rev-parse", "HEAD:a.txt"]);
+    let tree = sh(&dir, &["rev-parse", "HEAD^{tree}"]);
+    sh(&dir, &["tag", "file-tag", blob.trim()]);
+    sh(
+        &dir,
+        &["tag", "-a", "-m", "a folder", "tree-tag", tree.trim()],
+    );
+
+    let git = Git::new(&dir, Console::default());
+    let snap = snapshot::load(&git).unwrap();
+    let names: Vec<_> = snap.tags.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(names, ["v1"]);
+
+    let tips: Vec<_> = snap.tags.iter().map(|t| t.target).collect();
+    let commits = history::walk(&dir, &tips, 1000, &CancelToken::default()).unwrap();
+    assert_eq!(commits.list.len(), 5);
+}
