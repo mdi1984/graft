@@ -18,6 +18,7 @@ pub mod refs;
 pub mod remote;
 pub mod repo;
 pub mod review;
+pub mod slash;
 pub mod snapshot;
 pub mod stash;
 pub mod status;

@@ -111,7 +111,13 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>, search: &
         toolbar_divider(ui);
 
         tool_button(ui, None, "Preview in main", None, Tone::Normal).on_hover_text(LATER);
-        tool_button(ui, Some(Icon::Slash), "Slash", None, Tone::Danger).on_hover_text(LATER);
+        if tool_button(ui, Some(Icon::Slash), "Slash", None, Tone::Danger)
+            .on_hover_text("Clean up finished branches and worktrees (shows a preview first)")
+            .clicked()
+            && !busy
+        {
+            actions.push(Action::OpenSlash);
+        }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             search_box(ui, search)

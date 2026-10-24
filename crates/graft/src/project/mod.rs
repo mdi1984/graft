@@ -6,6 +6,7 @@ mod changes;
 mod conflicts;
 mod refs;
 mod review;
+mod slash;
 mod stashes;
 mod worktrees;
 
@@ -31,6 +32,7 @@ pub use changes::{CommitForm, Confirm, DiffView, FileKey, Highlights, Operation,
 pub use conflicts::{ConflictView, merge_dialog};
 pub use refs::{Dialog, DialogKind};
 pub use review::{ReviewState, ReviewView};
+pub use slash::{SlashView, SlashedBranch};
 pub use worktrees::{BranchMode, NewWorktreeForm, checkout_choices, open_in_ide, open_terminal};
 
 /// Commits loaded into the graph. Enough for years of history in big repos.
@@ -209,6 +211,15 @@ pub enum Action {
         into: String,
     },
     OpenInIde(PathBuf),
+
+    // Slash
+    /// Fetch, scan and show the Slash dialog.
+    OpenSlash,
+    CloseSlash,
+    ToggleSlashItem(usize),
+    RunSlash,
+    /// Bring back an entry of "Recently slashed".
+    RestoreSlashed(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -259,6 +270,8 @@ enum Event {
         generation: u64,
         result: Result<graft_core::review::Review, String>,
     },
+    SlashPlan(Result<graft_core::slash::Plan, String>),
+    SlashDone(graft_core::slash::Outcome),
     /// The file watcher saw a change that matters.
     Changed,
     PickedFolder(Option<PathBuf>),
@@ -313,6 +326,10 @@ pub struct Project {
     pub reviews: HashMap<PathBuf, ReviewState>,
     /// A merge runs in this other worktree: show its conflicts if it stops.
     pending_conflicts: Option<PathBuf>,
+    /// The Slash dialog while open.
+    pub slash: Option<SlashView>,
+    /// Deleted branches, newest first. Saved by the app.
+    pub slashed: Vec<SlashedBranch>,
     diff_generation: u64,
     pub commit_form: CommitForm,
     /// A git command that changes things, while it runs.
@@ -381,6 +398,8 @@ impl Project {
             review: None,
             reviews: HashMap::new(),
             pending_conflicts: None,
+            slash: None,
+            slashed: Vec::new(),
             diff_generation: 0,
             commit_form: CommitForm::default(),
             op: None,
@@ -435,6 +454,8 @@ impl Project {
                 Event::Stashes(result) => self.on_stashes(result),
                 Event::Conflict { generation, result } => self.on_conflict(generation, result),
                 Event::Review { generation, result } => self.on_review(generation, result),
+                Event::SlashPlan(result) => self.on_slash_plan(result),
+                Event::SlashDone(outcome) => self.on_slash_done(outcome),
                 Event::StashFiles(id, result) => {
                     if self.selected_stash == Some(id) {
                         self.stash_files = Some(result);
@@ -744,6 +765,11 @@ impl Project {
             | Action::SetReviewBase(_)
             | Action::ToggleReviewSplit
             | Action::MergeReviewed { .. } => self.apply_review_action(action),
+            Action::OpenSlash
+            | Action::CloseSlash
+            | Action::ToggleSlashItem(_)
+            | Action::RunSlash
+            | Action::RestoreSlashed(_) => self.apply_slash_action(action),
             other => self.apply_change(other),
         }
     }

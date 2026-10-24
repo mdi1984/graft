@@ -11,6 +11,21 @@ pub fn fetch(git: &Git, cancel: &CancelToken, on_progress: impl FnMut(Progress))
     run(git, &["fetch", "--all", "--progress"], cancel, on_progress)
 }
 
+/// Fetch every remote and drop remote branches that were deleted there, so
+/// local branches tracking them show as gone.
+pub fn fetch_prune(
+    git: &Git,
+    cancel: &CancelToken,
+    on_progress: impl FnMut(Progress),
+) -> Result<()> {
+    run(
+        git,
+        &["fetch", "--all", "--prune", "--progress"],
+        cancel,
+        on_progress,
+    )
+}
+
 /// Pull the current branch from its upstream (merge or rebase, as configured).
 pub fn pull(git: &Git, cancel: &CancelToken, on_progress: impl FnMut(Progress)) -> Result<()> {
     current_branch(git)?;

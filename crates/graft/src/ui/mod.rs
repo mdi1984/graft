@@ -11,6 +11,7 @@ pub mod new_worktree;
 pub mod project_tabs;
 pub mod review;
 pub mod sidebar;
+pub mod slash;
 pub mod start;
 pub mod stashes;
 pub mod tabs;
