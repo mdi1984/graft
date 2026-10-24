@@ -1,6 +1,11 @@
+pub mod console;
+pub mod history;
 pub mod icons;
 pub mod main_area;
+pub mod project_tabs;
 pub mod sidebar;
+pub mod start;
 pub mod tabs;
+pub mod toasts;
 pub mod toolbar;
 pub mod widgets;

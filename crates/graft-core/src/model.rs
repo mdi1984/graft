@@ -1,59 +1,162 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-/// Everything the sidebar and toolbar need to know about one open repository.
+pub use gix::ObjectId as Oid;
+
+use crate::status::WorktreeStatus;
+
+/// Everything the sidebar, toolbar and tabs need to know about one repository.
 #[derive(Clone, Debug, Default)]
 pub struct RepoSnapshot {
     pub name: String,
-    pub path: PathBuf,
+    /// The main worktree (where `.git` lives).
+    pub root: PathBuf,
     pub worktrees: Vec<Worktree>,
     pub branches: Vec<Branch>,
-    pub remotes: Vec<String>,
+    pub remote_branches: Vec<RemoteBranch>,
+    pub tags: Vec<Tag>,
+    pub remotes: Vec<Remote>,
     pub stash_count: usize,
-    pub tag_count: usize,
 }
 
 impl RepoSnapshot {
-    /// The worktree at the repository root (the one that is not a linked worktree).
     pub fn main_worktree(&self) -> Option<&Worktree> {
         self.worktrees.iter().find(|wt| wt.is_main)
     }
+
+    pub fn branch(&self, name: &str) -> Option<&Branch> {
+        self.branches.iter().find(|b| b.name == name)
+    }
+
+    /// Worktree that has `branch` checked out, if any.
+    pub fn worktree_for_branch(&self, branch: &str) -> Option<&Worktree> {
+        self.worktrees
+            .iter()
+            .find(|wt| wt.branch.as_deref() == Some(branch))
+    }
+
+    /// The default branch: origin/HEAD's target if known, else main/master.
+    pub fn default_branch(&self) -> Option<&str> {
+        ["main", "master", "trunk", "develop"]
+            .into_iter()
+            .find(|name| self.branch(name).is_some())
+    }
+
+    /// True if any worktree has uncommitted changes.
+    pub fn is_dirty(&self) -> bool {
+        self.worktrees.iter().any(|wt| wt.dirty() > 0)
+    }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Worktree {
+    pub path: PathBuf,
     /// Checked-out branch, or `None` for a detached HEAD.
     pub branch: Option<String>,
-    pub path: PathBuf,
+    pub head: Option<Oid>,
     pub is_main: bool,
-    /// Number of changed files (staged + unstaged + untracked).
-    pub dirty: usize,
-    /// Commits not yet pushed to the upstream.
-    pub ahead: usize,
-    pub behind: usize,
+    pub locked: bool,
+    /// The folder is gone; `git worktree prune` would remove the entry.
+    pub prunable: bool,
+    /// `None` if status could not be read (e.g. prunable worktree).
+    pub status: Option<WorktreeStatus>,
 }
 
 impl Worktree {
-    pub fn label(&self) -> &str {
-        self.branch.as_deref().unwrap_or("(detached)")
+    pub fn label(&self) -> String {
+        match (&self.branch, self.head) {
+            (Some(b), _) => b.clone(),
+            (None, Some(oid)) => format!("detached at {}", short(&oid)),
+            (None, None) => "(no commits yet)".to_owned(),
+        }
+    }
+
+    /// Number of changed files (staged, unstaged, untracked, conflicted).
+    pub fn dirty(&self) -> usize {
+        self.status.as_ref().map_or(0, |s| s.entries.len())
+    }
+
+    pub fn ahead(&self) -> usize {
+        self.status.as_ref().map_or(0, |s| s.ahead)
+    }
+
+    pub fn behind(&self) -> usize {
+        self.status.as_ref().map_or(0, |s| s.behind)
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Branch {
     pub name: String,
+    pub target: Oid,
     pub upstream: Upstream,
-    /// True for the branch checked out in the main worktree.
-    pub is_head: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Upstream {
     /// No upstream configured: the branch only exists locally.
     None,
     Tracking {
+        name: String,
         ahead: usize,
         behind: usize,
     },
     /// An upstream is configured but the remote branch was deleted.
-    Gone,
+    Gone { name: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteBranch {
+    /// Short name, e.g. `origin/main`.
+    pub name: String,
+    pub remote: String,
+    pub target: Oid,
+}
+
+impl RemoteBranch {
+    /// The branch name without the remote prefix, e.g. `main`.
+    pub fn branch_name(&self) -> &str {
+        self.name
+            .strip_prefix(&self.remote)
+            .and_then(|s| s.strip_prefix('/'))
+            .unwrap_or(&self.name)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Tag {
+    pub name: String,
+    /// The commit the tag points at (annotated tags are peeled).
+    pub target: Oid,
+    pub annotated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Remote {
+    pub name: String,
+    pub fetch_url: String,
+    pub push_url: String,
+}
+
+/// First 7 hex digits of an object id.
+pub fn short(oid: &Oid) -> String {
+    let mut s = oid.to_string();
+    s.truncate(7);
+    s
+}
+
+/// The all-zero id. In the history it stands for "uncommitted changes".
+pub fn null_oid() -> Oid {
+    Oid::null(gix::hash::Kind::Sha1)
+}
+
+/// Compare paths the way Windows does: case-insensitive, either slash, no
+/// trailing separator.
+pub fn same_path(a: &Path, b: &Path) -> bool {
+    let norm = |p: &Path| {
+        p.to_string_lossy()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_lowercase()
+    };
+    norm(a) == norm(b)
 }

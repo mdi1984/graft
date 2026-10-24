@@ -5,7 +5,10 @@ git worktree support (for parallel AI-agent work), pleasant code review.
 
 ## Stack
 - UI: eframe/egui (custom dark theme, Inter for UI, JetBrains Mono for code)
-- Git reads: gix (gitoxide): log, graph, status, diff, worktree list
+- Git reads: gix (gitoxide) for the history walk, which must be fast on big
+  repos. Everything else (status via porcelain v2, refs via for-each-ref,
+  worktree list, diffs, commit details) parses git.exe's machine-readable
+  output, so results always match git (fsmonitor, untracked cache, config).
 - Git writes: shell out to git.exe (commit, stage via apply, push/pull/fetch,
   merge, rebase, stash, worktree add/remove). Keeps hooks, config and
   Git Credential Manager working.

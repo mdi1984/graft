@@ -22,6 +22,31 @@ pub fn elided(ui: &Ui, text: &str, font: FontId, color: Color32, max_width: f32)
     ui.painter().layout_job(job)
 }
 
+/// Like [`elided`], but for paths: drops leading folders first, so the end
+/// of the path (the part that tells folders apart) stays readable.
+pub fn elided_path(
+    ui: &Ui,
+    path: &str,
+    font: FontId,
+    color: Color32,
+    max_width: f32,
+) -> Arc<Galley> {
+    let painter = ui.painter();
+    let full = painter.layout_no_wrap(path.to_owned(), font.clone(), color);
+    if full.size().x <= max_width {
+        return full;
+    }
+    let parts: Vec<&str> = path.split(['\\', '/']).collect();
+    for skip in 1..parts.len() {
+        let candidate = format!("…\\{}", parts[skip..].join("\\"));
+        let galley = painter.layout_no_wrap(candidate, font.clone(), color);
+        if galley.size().x <= max_width {
+            return galley;
+        }
+    }
+    elided(ui, path, font, color, max_width)
+}
+
 /// Paint `galley` vertically centered on `y`, starting at `x`.
 pub fn paint_galley_left(painter: &Painter, x: f32, y: f32, galley: Arc<Galley>, color: Color32) {
     let pos = pos2(x, y - galley.size().y / 2.0);
@@ -274,4 +299,188 @@ pub fn empty_state(ui: &mut Ui, title: &str, detail: &str) {
         theme::body(),
         color::TEXT_WEAK,
     );
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ButtonKind {
+    /// Accent-filled: the one main action of a form.
+    Primary,
+    Secondary,
+}
+
+/// A plain text button in Graft's style.
+pub fn button(ui: &mut Ui, label: &str, kind: ButtonKind, enabled: bool) -> Response {
+    const PAD_X: f32 = 14.0;
+    const HEIGHT: f32 = 30.0;
+    let font = match kind {
+        ButtonKind::Primary => theme::semibold(theme::BODY_SIZE),
+        ButtonKind::Secondary => theme::body(),
+    };
+    let text = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font, color::TEXT);
+    let size = vec2(text.size().x + 2.0 * PAD_X, HEIGHT);
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(size, sense);
+    let hovered = enabled && response.hovered();
+    let (fill, border, fg) = match kind {
+        ButtonKind::Primary if !enabled => {
+            (color::CONTROL_BG, color::CONTROL_BORDER, color::TEXT_FAINT)
+        }
+        ButtonKind::Primary => (
+            if hovered {
+                color::ACCENT_HOVER
+            } else {
+                color::ACCENT
+            },
+            Color32::TRANSPARENT,
+            color::ON_ACCENT,
+        ),
+        ButtonKind::Secondary => (
+            if hovered {
+                color::CONTROL_HOVER_BG
+            } else {
+                color::CONTROL_BG
+            },
+            color::CONTROL_BORDER,
+            if enabled {
+                color::TEXT
+            } else {
+                color::TEXT_FAINT
+            },
+        ),
+    };
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        RADIUS,
+        fill,
+        Stroke::new(1.0, border),
+        StrokeKind::Inside,
+    );
+    painter.galley(rect.center() - text.size() / 2.0, text, fg);
+    response
+}
+
+/// A borderless square button with just an icon, e.g. a close "×".
+pub fn icon_button(ui: &mut Ui, icon: Icon, size: f32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+    paint_icon_button(ui, rect, &response, icon);
+    response
+}
+
+/// Paint an icon button into a rect that was already interacted with.
+pub fn paint_icon_button(ui: &Ui, rect: Rect, response: &Response, icon: Icon) {
+    let painter = ui.painter();
+    if response.hovered() {
+        painter.rect_filled(rect, 4, color::CONTROL_HOVER_BG);
+    }
+    let fg = if response.hovered() {
+        color::TEXT
+    } else {
+        color::TEXT_WEAK
+    };
+    let icon_size = (rect.width() * 0.6).min(ICON_SIZE);
+    let icon_rect = Rect::from_center_size(rect.center(), vec2(icon_size, icon_size));
+    icons::paint(painter, icon_rect, icon, fg);
+}
+
+/// A single-line text input with Graft's frame. Returns the text edit's response.
+pub fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Response {
+    let id = ui.next_auto_id();
+    let focused = ui.memory(|m| m.has_focus(id));
+    let border = if focused {
+        color::ACCENT
+    } else {
+        color::CONTROL_BORDER
+    };
+    egui::Frame::new()
+        .fill(color::APP_BG)
+        .stroke(Stroke::new(1.0, border))
+        .corner_radius(RADIUS)
+        .inner_margin(egui::Margin::symmetric(8, 0))
+        .show(ui, |ui| {
+            ui.set_width(width - 16.0);
+            ui.add(
+                egui::TextEdit::singleline(text)
+                    .id(id)
+                    .frame(egui::Frame::NONE)
+                    .margin(egui::Margin::ZERO)
+                    .min_size(vec2(0.0, 30.0))
+                    .align(Align2::LEFT_CENTER)
+                    .hint_text(egui::RichText::new(hint).color(color::TEXT_FAINT))
+                    .desired_width(f32::INFINITY),
+            )
+        })
+        .inner
+}
+
+/// A rounded label like a ref name on a commit. Returns its width.
+pub fn chip(
+    painter: &Painter,
+    x: f32,
+    y: f32,
+    galley: Arc<Galley>,
+    fg: Color32,
+    max_width: f32,
+) -> f32 {
+    const PAD_X: f32 = 5.0;
+    const HEIGHT: f32 = 17.0;
+    let width = (galley.size().x + 2.0 * PAD_X).min(max_width);
+    let rect = Rect::from_min_size(pos2(x, y - HEIGHT / 2.0), vec2(width, HEIGHT));
+    painter.rect(
+        rect,
+        4,
+        fg.gamma_multiply(0.14),
+        Stroke::new(1.0, fg.gamma_multiply(0.35)),
+        StrokeKind::Inside,
+    );
+    let clip = rect.shrink2(vec2(PAD_X - 1.0, 0.0));
+    painter.with_clip_rect(clip).galley(
+        pos2(rect.left() + PAD_X, y - galley.size().y / 2.0),
+        galley,
+        fg,
+    );
+    width
+}
+
+/// A rotating arc, for work in progress. Keeps the UI repainting while shown.
+pub fn spinner(ui: &Ui, center: Pos2, radius: f32, color: Color32) {
+    let t = ui.input(|i| i.time) as f32;
+    let start = t * 5.0;
+    let points: Vec<Pos2> = (0..=20)
+        .map(|i| start + i as f32 / 20.0 * 4.2)
+        .map(|a| center + radius * vec2(a.cos(), a.sin()))
+        .collect();
+    ui.painter()
+        .add(egui::Shape::line(points, Stroke::new(1.6, color)));
+    ui.ctx().request_repaint();
+}
+
+/// A thin progress bar; without a fraction it shows a moving segment.
+pub fn progress_bar(ui: &mut Ui, fraction: Option<f32>, width: f32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 4.0), Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 2, color::CONTROL_BG);
+    let fill = match fraction {
+        Some(f) => Rect::from_min_size(
+            rect.min,
+            vec2(rect.width() * f.clamp(0.0, 1.0), rect.height()),
+        ),
+        None => {
+            let t = (ui.input(|i| i.time) as f32 * 0.6).fract();
+            let seg = rect.width() * 0.3;
+            let x = rect.left() - seg + t * (rect.width() + seg);
+            Rect::from_min_max(
+                pos2(x.max(rect.left()), rect.top()),
+                pos2((x + seg).min(rect.right()), rect.bottom()),
+            )
+        }
+    };
+    painter.rect_filled(fill, 2, color::ACCENT);
+    ui.ctx().request_repaint();
 }

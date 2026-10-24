@@ -15,6 +15,14 @@ pub enum Icon {
     FileStatus,
     History,
     Plus,
+    Close,
+    Download,
+    FolderPlus,
+    Copy,
+    Terminal,
+    Tag,
+    Cloud,
+    ChevronRight,
 }
 
 pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
@@ -93,5 +101,65 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             line(&[(12.0, 5.0), (12.0, 19.0)]);
             line(&[(5.0, 12.0), (19.0, 12.0)]);
         }
+        Icon::Close => {
+            line(&[(6.0, 6.0), (18.0, 18.0)]);
+            line(&[(18.0, 6.0), (6.0, 18.0)]);
+        }
+        Icon::Download => {
+            line(&[(12.0, 3.0), (12.0, 15.0)]);
+            line(&[(7.0, 10.0), (12.0, 15.0), (17.0, 10.0)]);
+            line(&[(4.0, 16.0), (4.0, 20.0), (20.0, 20.0), (20.0, 16.0)]);
+        }
+        Icon::FolderPlus => {
+            line(&[
+                (3.0, 7.0),
+                (9.0, 7.0),
+                (11.0, 9.0),
+                (21.0, 9.0),
+                (21.0, 19.0),
+                (3.0, 19.0),
+                (3.0, 7.0),
+            ]);
+            line(&[(12.0, 11.5), (12.0, 16.5)]);
+            line(&[(9.5, 14.0), (14.5, 14.0)]);
+        }
+        Icon::Copy => {
+            painter.rect_stroke(
+                Rect::from_min_max(p(8.0, 8.0), p(20.0, 20.0)),
+                2.0 * scale,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+            line(&[(16.0, 4.0), (4.0, 4.0), (4.0, 16.0)]);
+        }
+        Icon::Terminal => {
+            line(&[(4.0, 7.0), (9.0, 12.0), (4.0, 17.0)]);
+            line(&[(12.0, 18.0), (20.0, 18.0)]);
+        }
+        Icon::Tag => {
+            line(&[
+                (3.0, 3.0),
+                (11.0, 3.0),
+                (21.0, 13.0),
+                (13.0, 21.0),
+                (3.0, 11.0),
+                (3.0, 3.0),
+            ]);
+            circle(7.5, 7.5, 1.2);
+        }
+        Icon::Cloud => {
+            let arc = |cx: f32, cy: f32, r: f32, from: f32, to: f32| -> Vec<Pos2> {
+                (0..=12)
+                    .map(|i| (from + (to - from) * i as f32 / 12.0).to_radians())
+                    .map(|a| p(cx + r * a.cos(), cy + r * a.sin()))
+                    .collect()
+            };
+            let mut pts = arc(7.0, 14.0, 4.0, 90.0, 270.0);
+            pts.extend(arc(12.0, 10.0, 5.5, 200.0, 340.0));
+            pts.extend(arc(17.0, 14.0, 4.0, 270.0, 450.0));
+            pts.push(pts[0]);
+            painter.add(Shape::line(pts, stroke));
+        }
+        Icon::ChevronRight => line(&[(9.0, 6.0), (15.0, 12.0), (9.0, 18.0)]),
     }
 }
