@@ -27,10 +27,13 @@ impl Project {
     }
 
     fn preview_in_main(&mut self, worktree: PathBuf) {
-        let done = format!("Main now shows {}", self.worktree_label(&worktree));
+        let done = format!(
+            "The main folder now shows {}",
+            self.worktree_label(&worktree)
+        );
         self.run_op_at(
             self.git.clone(),
-            "Preview in main",
+            "Preview in main folder",
             Then::Info(done),
             move |git| {
                 let source = git.at(&worktree);

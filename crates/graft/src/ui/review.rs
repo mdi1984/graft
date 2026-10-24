@@ -160,14 +160,14 @@ fn header(
             let label = if showing_this {
                 "Update preview"
             } else {
-                "Preview in main"
+                "Preview in main folder"
             };
             if button(ui, label, ButtonKind::Secondary, can_preview)
                 .on_hover_text(if previewing.is_some() && !showing_this {
-                    "Main already shows another preview. Restore main first."
+                    "The main folder already shows another preview. Restore it first."
                 } else {
                     "Check out this worktree's state (uncommitted changes included) in the \
-                     main worktree, e.g. to run it from there"
+                     main folder, e.g. to run it from there"
                 })
                 .clicked()
             {

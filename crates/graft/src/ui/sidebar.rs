@@ -238,7 +238,7 @@ fn worktree_row(ui: &mut Ui, wt: &Worktree, selected: bool) -> Response {
     let branch = elided(ui, &wt.label(), theme::mono(), fg, badges_x - 6.0 - text_x);
     paint_galley_left(painter, text_x, top_y, branch, fg);
     let path = if wt.is_main {
-        format!("{}  · main worktree", wt.path.display())
+        format!("{}  · main folder", wt.path.display())
     } else {
         wt.path.display().to_string()
     };

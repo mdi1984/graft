@@ -82,3 +82,42 @@ fn branch_changes_since_fork_including_uncommitted() {
 
     assert!(review::load(&git, "nope").is_err());
 }
+
+#[test]
+fn default_branch_follows_the_remote() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    sh(dir, &["init", "-q", "-b", "main"]);
+    sh(dir, &["config", "user.name", "Ada"]);
+    sh(dir, &["config", "user.email", "ada@example.com"]);
+    sh(dir, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    sh(dir, &["branch", "development"]);
+    sh(dir, &["switch", "-q", "-c", "feature"]);
+    // As after cloning a repository whose default branch is development.
+    sh(
+        dir,
+        &["update-ref", "refs/remotes/origin/development", "HEAD"],
+    );
+    sh(
+        dir,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/development",
+        ],
+    );
+
+    let git = Git::new(dir, Console::default());
+    let snap = graft_core::snapshot::load(&git).unwrap();
+    assert_eq!(snap.remote_default.as_deref(), Some("development"));
+    assert_eq!(snap.default_branch(), Some("development"));
+    let branches = vec![
+        "development".to_owned(),
+        "feature".to_owned(),
+        "main".to_owned(),
+    ];
+    assert_eq!(
+        review::default_base(&git, &branches, Some("feature")).as_deref(),
+        Some("development")
+    );
+}

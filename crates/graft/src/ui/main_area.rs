@@ -75,21 +75,21 @@ fn preview_banner(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new("Preview in main")
+                    egui::RichText::new("Preview in main folder")
                         .font(theme::semibold(theme::BODY_SIZE))
                         .color(color::ahead_fg()),
                 );
                 ui.label(
                     egui::RichText::new(format!(
-                        "The main worktree shows {name} at {}, with its uncommitted changes.",
+                        "The main folder shows {name} at {}, with its uncommitted changes.",
                         graft_core::short(&preview.head)
                     ))
                     .color(color::text_mid()),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if button(ui, "Restore main", ButtonKind::Primary, !busy)
+                    if button(ui, "Restore main folder", ButtonKind::Primary, !busy)
                         .on_hover_text(format!(
-                            "Go back to {back}. Changes made in main during the preview are discarded."
+                            "Go back to {back}. Changes made in the main folder during the preview are discarded."
                         ))
                         .clicked()
                     {
