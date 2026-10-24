@@ -140,3 +140,61 @@ fn scan_execute_and_restore() {
         done.target
     );
 }
+
+/// Ignored build output (node_modules, target…) nested deeper than Windows'
+/// old 260-character limit.
+fn deep_ignored_files(worktree: &Path) {
+    let mut dir = worktree.join("node_modules");
+    while dir.as_os_str().len() < 320 {
+        dir = dir.join("a-rather-long-package-name");
+    }
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("index.js"), "module.exports = 1;\n").unwrap();
+}
+
+fn repo_with_merged_branch(tmp: &Path) -> (Git, std::path::PathBuf) {
+    let main = tmp.join("app");
+    std::fs::create_dir(&main).unwrap();
+    sh(&main, &["init", "-q", "-b", "main"]);
+    sh(&main, &["config", "user.name", "Ada"]);
+    sh(&main, &["config", "user.email", "ada@example.com"]);
+    commit(&main, ".gitignore", "node_modules/\n");
+    sh(&main, &["branch", "merged-deep"]);
+    let git = Git::new(&main, Console::default());
+    let wt = tmp.join("wt-deep");
+    worktree::add(&git, &wt, &Start::Existing("merged-deep".into())).unwrap();
+    deep_ignored_files(&wt);
+    (git, wt)
+}
+
+#[test]
+fn worktrees_with_very_long_paths_are_slashed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (git, wt) = repo_with_merged_branch(tmp.path());
+
+    let snap = snapshot::load(&git).unwrap();
+    let plan = slash::plan(&git, &snap, PROTECTED).unwrap();
+    let chosen: Vec<_> = plan
+        .candidates
+        .into_iter()
+        .filter(|c| c.branch.as_deref() == Some("merged-deep"))
+        .collect();
+    assert_eq!(chosen.len(), 1);
+    assert!(chosen[0].worktree.is_some());
+
+    let outcome = slash::execute(&git, &chosen);
+    assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+    assert_eq!(outcome.worktrees_removed, 1);
+    assert_eq!(outcome.slashed.len(), 1);
+    assert!(!wt.exists());
+}
+
+#[test]
+fn a_dirty_worktree_with_long_paths_is_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (git, wt) = repo_with_merged_branch(tmp.path());
+    std::fs::write(wt.join("notes.txt"), "not committed\n").unwrap();
+
+    assert!(worktree::remove(&git, &wt, false).is_err());
+    assert!(wt.join("notes.txt").exists());
+}

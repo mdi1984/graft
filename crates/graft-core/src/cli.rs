@@ -274,6 +274,9 @@ pub(crate) fn command(cwd: &Path) -> Command {
         // Paths are file names, never patterns: `x[ab].txt` must not also
         // match `xa.txt` when discarding or staging.
         .env("GIT_LITERAL_PATHSPECS", "1")
+        .envs(extra_config(
+            std::env::var("GIT_CONFIG_COUNT").ok().as_deref(),
+        ))
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE");
@@ -284,6 +287,32 @@ pub(crate) fn command(cwd: &Path) -> Command {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     cmd
+}
+
+/// Settings every git command Graft runs gets, added after any the user
+/// passes in the environment (`GIT_CONFIG_COUNT`), without touching their
+/// config files.
+const CONFIG: [(&str, &str); 1] = [
+    // Paths past Windows' old 260-character limit (deep node_modules or
+    // target folders), e.g. when removing a worktree. Off by default in Git
+    // for Windows.
+    ("core.longpaths", "true"),
+];
+
+fn extra_config(existing: Option<&str>) -> Vec<(String, String)> {
+    let start: usize = existing.and_then(|n| n.trim().parse().ok()).unwrap_or(0);
+    let mut env = vec![(
+        "GIT_CONFIG_COUNT".to_owned(),
+        (start + CONFIG.len()).to_string(),
+    )];
+    for (i, (key, value)) in CONFIG.iter().enumerate() {
+        env.push((format!("GIT_CONFIG_KEY_{}", start + i), (*key).to_owned()));
+        env.push((
+            format!("GIT_CONFIG_VALUE_{}", start + i),
+            (*value).to_owned(),
+        ));
+    }
+    env
 }
 
 fn read_all(mut r: impl Read) -> Vec<u8> {
@@ -351,5 +380,25 @@ impl CancelToken {
 
     pub fn flag(&self) -> &AtomicBool {
         &self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_from_the_environment_is_kept() {
+        let env = extra_config(None);
+        assert_eq!(env[0], ("GIT_CONFIG_COUNT".to_owned(), "1".to_owned()));
+        assert_eq!(env[1].0, "GIT_CONFIG_KEY_0");
+        // The user already passes two settings: ours come after them.
+        let env = extra_config(Some("2"));
+        assert_eq!(env[0].1, "3");
+        assert_eq!(
+            env[1],
+            ("GIT_CONFIG_KEY_2".to_owned(), "core.longpaths".to_owned())
+        );
+        assert_eq!(env[2], ("GIT_CONFIG_VALUE_2".to_owned(), "true".to_owned()));
     }
 }
