@@ -25,6 +25,7 @@ pub mod slash;
 pub mod snapshot;
 pub mod stash;
 pub mod status;
+pub mod syntax;
 pub mod watch;
 pub mod worktree;
 

@@ -5,13 +5,14 @@
 
 use std::sync::Arc;
 
-use egui::text::CCursor;
+use egui::text::{CCursor, LayoutJob, TextFormat};
 use egui::{
-    Align2, Frame, Galley, Key, Margin, Panel, Rect, RichText, ScrollArea, Sense, Stroke,
-    StrokeKind, Ui, pos2, vec2,
+    Align2, Color32, Frame, Galley, Key, Margin, Painter, Panel, Rect, RichText, ScrollArea, Sense,
+    Stroke, StrokeKind, Ui, pos2, vec2,
 };
 use graft_core::diff::{FileDiff, Kind, Source};
 use graft_core::ops::LineOp;
+use graft_core::syntax::{Spans, Token};
 
 use super::history::paint_change_letter;
 use super::icons::Icon;
@@ -25,6 +26,47 @@ use crate::theme::{self, color};
 const ROW: f32 = 20.0;
 const GUTTER: f32 = 24.0;
 const NUM: f32 = 42.0;
+
+fn token_color(token: Token) -> Color32 {
+    match token {
+        Token::Keyword => color::syn_keyword(),
+        Token::String => color::syn_string(),
+        Token::Comment => color::syn_comment(),
+        Token::Number | Token::Constant => color::syn_number(),
+        Token::Function => color::syn_function(),
+        Token::Type => color::syn_type(),
+    }
+}
+
+/// A line of code with its syntax colors; text without a token is `plain`.
+fn code_galley(
+    painter: &Painter,
+    text: String,
+    spans: Option<&Spans>,
+    plain: Color32,
+) -> Arc<Galley> {
+    let Some(spans) = spans.filter(|s| !s.is_empty()) else {
+        return painter.layout_no_wrap(text, theme::mono(), plain);
+    };
+    let format = |c| TextFormat::simple(theme::mono(), c);
+    let mut job = LayoutJob::default();
+    let mut pos = 0;
+    for (range, token) in spans {
+        let (Some(before), Some(part)) = (text.get(pos..range.start), text.get(range.clone()))
+        else {
+            continue;
+        };
+        job.append(before, 0.0, format(plain));
+        job.append(part, 0.0, format(token_color(*token)));
+        pos = range.end;
+    }
+    job.append(text.get(pos..).unwrap_or_default(), 0.0, format(plain));
+    painter.layout_job(job)
+}
+
+fn spans_at(view: &DiffView, h: usize, l: usize) -> Option<&Spans> {
+    view.highlights.syntax.get(h).and_then(|s| s.get(l))
+}
 
 /// The Review tab's extras on a diff: lines picked to comment on, and
 /// comments shown under the line they end on.
@@ -430,9 +472,15 @@ fn half(
     } else {
         color::text_mid()
     };
-    let galley = painter.layout_no_wrap(text.clone(), theme::mono(), text_color);
+    let galley = code_galley(&painter, text.clone(), spans_at(view, h, l), text_color);
     let origin = pos2(rect.left() + NUM + 8.0, y - galley.size().y / 2.0);
-    let word = view.words.get(h).and_then(|w| w.get(l)).cloned().flatten();
+    let word = view
+        .highlights
+        .words
+        .get(h)
+        .and_then(|w| w.get(l))
+        .cloned()
+        .flatten();
     if let (Some(range), Some(tint)) = (word, tint)
         && !range.is_empty()
     {
@@ -685,8 +733,23 @@ fn lines(
                     Row::Line(h, l) if marks.is_some() => {
                         let marks = marks.expect("checked");
                         let line = &diff.hunks[h].lines[l];
-                        let word = view.words.get(h).and_then(|w| w.get(l)).cloned().flatten();
-                        paint_line(ui, rect, line, false, word, text_x, false);
+                        let word = view
+                            .highlights
+                            .words
+                            .get(h)
+                            .and_then(|w| w.get(l))
+                            .cloned()
+                            .flatten();
+                        paint_line(
+                            ui,
+                            rect,
+                            line,
+                            spans_at(view, h, l),
+                            false,
+                            word,
+                            text_x,
+                            false,
+                        );
                         if marks.pick.is_some_and(|p| p.contains((h, l), line.kind)) {
                             paint_picked(ui, rect);
                         }
@@ -702,9 +765,24 @@ fn lines(
                     Row::Line(h, l) => {
                         let line = &diff.hunks[h].lines[l];
                         let selected = view.selection.contains(&(h, l));
-                        let word = view.words.get(h).and_then(|w| w.get(l)).cloned().flatten();
+                        let word = view
+                            .highlights
+                            .words
+                            .get(h)
+                            .and_then(|w| w.get(l))
+                            .cloned()
+                            .flatten();
                         let editable = !view.read_only;
-                        paint_line(ui, rect, line, selected, word, text_x, editable);
+                        paint_line(
+                            ui,
+                            rect,
+                            line,
+                            spans_at(view, h, l),
+                            selected,
+                            word,
+                            text_x,
+                            editable,
+                        );
                         let hovered = ui.rect_contains_pointer(rect) && ui.is_rect_visible(rect);
                         let selectable = line.is_change() && editable;
                         if selectable && hovered {
@@ -815,10 +893,12 @@ fn hunk_row(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_line(
     ui: &Ui,
     rect: Rect,
     line: &graft_core::diff::Line,
+    spans: Option<&Spans>,
     selected: bool,
     word: Option<std::ops::Range<usize>>,
     text_x: f32,
@@ -899,7 +979,7 @@ fn paint_line(
     } else {
         color::text()
     };
-    let galley = painter.layout_no_wrap(text.clone(), theme::mono(), text_color);
+    let galley = code_galley(painter, text.clone(), spans, text_color);
     let origin = pos2(rect.left() + text_x, y - galley.size().y / 2.0);
     if let (Some(range), Some(tint)) = (word, tint)
         && !range.is_empty()
