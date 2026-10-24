@@ -685,7 +685,7 @@ impl GraftApp {
         if let Some(view) = &project.slash {
             let progress = project.op.as_ref().and_then(|op| {
                 let p = op.progress.lock().ok()?;
-                (!p.line.is_empty()).then(|| p.line.clone())
+                (!p.line.is_empty()).then(|| p.clone())
             });
             ui::slash::show(ui.ctx(), view, &project.slashed, progress, &mut actions);
         }

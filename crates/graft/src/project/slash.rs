@@ -104,13 +104,21 @@ impl Project {
         }
         view.running = true;
         let git = self.git.clone();
+        let progress = Arc::new(Mutex::new(Progress::default()));
+        let cancel = CancelToken::default();
         self.op = Some(Operation {
-            label: "Slashing…".to_owned(),
-            progress: Arc::default(),
-            cancel: None,
+            label: "Slashing".to_owned(),
+            progress: progress.clone(),
+            cancel: Some(cancel.clone()),
         });
-        self.pool.spawn(&self.tx, move || {
-            Event::SlashDone(slash::execute(&git, &chosen))
+        self.pool.spawn_long(&self.tx, move |waker| {
+            let report = |p: Progress| {
+                if let Ok(mut slot) = progress.lock() {
+                    *slot = p;
+                }
+                waker();
+            };
+            Event::SlashDone(slash::execute(&git, &chosen, &cancel, report))
         });
     }
 
@@ -144,7 +152,16 @@ impl Project {
             });
         }
         if !parts.is_empty() {
-            self.infos.push(format!("Slashed {}", parts.join(" and ")));
+            let stopped = if outcome.cancelled {
+                ", then stopped"
+            } else {
+                ""
+            };
+            self.infos
+                .push(format!("Slashed {}{stopped}", parts.join(" and ")));
+        } else if outcome.cancelled {
+            self.infos
+                .push("Slash stopped; nothing was deleted".to_owned());
         }
         for e in &outcome.errors {
             self.notices.push(e.clone());

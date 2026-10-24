@@ -66,6 +66,8 @@ pub struct Outcome {
     pub slashed: Vec<Slashed>,
     pub worktrees_removed: usize,
     pub errors: Vec<String>,
+    /// Stopped early; what was done before is in `slashed`.
+    pub cancelled: bool,
 }
 
 fn protected(name: &str, patterns: &str) -> bool {
@@ -193,27 +195,66 @@ pub fn plan(git: &Git, snap: &RepoSnapshot, patterns: &str) -> Result<Plan> {
 }
 
 /// Delete the chosen candidates: worktrees first, then branches. Keeps going
-/// after an error and reports everything.
-pub fn execute(git: &Git, chosen: &[Candidate]) -> Outcome {
+/// after an error and reports everything. Reports each step to
+/// `on_progress`; `cancel` stops before the next one.
+pub fn execute(
+    git: &Git,
+    chosen: &[Candidate],
+    cancel: &CancelToken,
+    mut on_progress: impl FnMut(Progress),
+) -> Outcome {
     let mut outcome = Outcome::default();
-    let mut failed_worktrees = Vec::new();
-    for c in chosen
+    let removals: Vec<&PathBuf> = chosen
         .iter()
         .filter(|c| c.reason != Reason::MissingWorktree)
-    {
-        if let Some(path) = &c.worktree {
-            match worktree::remove(git, path, false) {
-                Ok(()) => outcome.worktrees_removed += 1,
-                Err(e) => {
-                    outcome
-                        .errors
-                        .push(format!("Worktree {}: {e:#}", path.display()));
-                    failed_worktrees.push(path.clone());
-                }
+        .filter_map(|c| c.worktree.as_ref())
+        .collect();
+    let prune = chosen.iter().any(|c| c.reason == Reason::MissingWorktree);
+    let deletions = chosen
+        .iter()
+        .filter(|c| c.branch.is_some() && c.target.is_some())
+        .count();
+    let total = removals.len() + usize::from(prune) + deletions;
+    let mut done = 0;
+    let mut step = |what: String| {
+        if cancel.is_cancelled() {
+            return false;
+        }
+        done += 1;
+        let line = format!("{what} ({done} of {total})");
+        on_progress(Progress {
+            phase: line.clone(),
+            fraction: Some((done - 1) as f32 / total.max(1) as f32),
+            line,
+        });
+        true
+    };
+
+    let mut failed_worktrees = Vec::new();
+    for path in removals {
+        let name = path
+            .file_name()
+            .unwrap_or(path.as_os_str())
+            .to_string_lossy();
+        if !step(format!("Removing worktree {name}")) {
+            outcome.cancelled = true;
+            return outcome;
+        }
+        match worktree::remove(git, path, false) {
+            Ok(()) => outcome.worktrees_removed += 1,
+            Err(e) => {
+                outcome
+                    .errors
+                    .push(format!("Worktree {}: {e:#}", path.display()));
+                failed_worktrees.push(path.clone());
             }
         }
     }
-    if chosen.iter().any(|c| c.reason == Reason::MissingWorktree) {
+    if prune {
+        if !step("Forgetting missing worktrees".to_owned()) {
+            outcome.cancelled = true;
+            return outcome;
+        }
         match worktree::prune(git) {
             Ok(()) => {
                 outcome.worktrees_removed += chosen
@@ -228,6 +269,10 @@ pub fn execute(git: &Git, chosen: &[Candidate]) -> Outcome {
         let (Some(branch), Some(target)) = (&c.branch, c.target) else {
             continue;
         };
+        if !step(format!("Deleting branch {branch}")) {
+            outcome.cancelled = true;
+            return outcome;
+        }
         if c.worktree
             .as_ref()
             .is_some_and(|p| failed_worktrees.contains(p))
