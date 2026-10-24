@@ -2,6 +2,8 @@
 //! base branch, including uncommitted and untracked files. That is what a pull
 //! request would show, plus the work that is not committed yet.
 
+use std::io::Read;
+
 use anyhow::{Context, Result};
 
 use crate::cli::Git;
@@ -73,21 +75,42 @@ pub fn default_base(git: &Git, branches: &[String], current: Option<&str>) -> Op
     remote_head
 }
 
+/// Untracked files bigger than this are not read to count their lines.
+const MAX_COUNTED: u64 = 8 * 1024 * 1024;
+
 /// `git` points at the worktree under review.
 pub fn load(git: &Git, base: &str) -> Result<Review> {
     let merge_base = git
         .read(["merge-base", "--end-of-options", base, "HEAD"])
         .with_context(|| format!("{base} and this branch have no common history"))?;
     let merge_base = merge_base.trim().to_owned();
-    let commits = git
-        .read(["rev-list", "--count", &format!("{merge_base}..HEAD")])?
-        .trim()
-        .parse()
-        .unwrap_or(0);
-
+    // The rest runs side by side: each git start costs tens of milliseconds
+    // on Windows.
     let common = ["-c", "core.quotepath=false", "diff", "-z", "-M"];
-    let status = git.run(common.iter().copied().chain(["--name-status", &merge_base]))?;
-    let numstat = git.run(common.iter().copied().chain(["--numstat", &merge_base]))?;
+    let (commits, status, numstat, untracked) = std::thread::scope(|s| {
+        let range = format!("{merge_base}..HEAD");
+        let commits = s.spawn(move || git.read(["rev-list", "--count", &range]));
+        let numstat = s.spawn(|| git.run(common.iter().copied().chain(["--numstat", &merge_base])));
+        let untracked = s.spawn(|| {
+            git.run([
+                "-c",
+                "core.quotepath=false",
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ])
+        });
+        let status = git.run(common.iter().copied().chain(["--name-status", &merge_base]));
+        (
+            commits.join().expect("rev-list thread"),
+            status,
+            numstat.join().expect("numstat thread"),
+            untracked.join().expect("ls-files thread"),
+        )
+    });
+    let commits = commits?.trim().parse().unwrap_or(0);
+    let (status, numstat, untracked) = (status?, numstat?, untracked?);
     let mut changes = parse_name_status(&status.stdout);
     apply_numstat(&mut changes, &numstat.stdout);
     let mut files: Vec<ReviewFile> = changes
@@ -99,33 +122,31 @@ pub fn load(git: &Git, base: &str) -> Result<Review> {
         })
         .collect();
 
-    let untracked = git.run([
-        "-c",
-        "core.quotepath=false",
-        "ls-files",
-        "--others",
-        "--exclude-standard",
-        "-z",
-    ])?;
     for path in untracked
         .stdout
         .split(|b| *b == 0)
         .filter(|p| !p.is_empty())
     {
         let path = String::from_utf8_lossy(path).into_owned();
-        let bytes = std::fs::read(git.cwd().join(&path)).unwrap_or_default();
+        // Only the start of a huge file (a stray dump or build output): its
+        // line count is then left out.
+        let mut bytes = Vec::new();
+        let complete = std::fs::File::open(git.cwd().join(&path))
+            .and_then(|f| f.take(MAX_COUNTED + 1).read_to_end(&mut bytes))
+            .is_ok_and(|n| n as u64 <= MAX_COUNTED);
         let binary = bytes.iter().take(8000).any(|b| *b == 0);
         let lines = bytes
             .split(|b| *b == b'\n')
             .filter(|l| !l.is_empty())
             .count();
+        let counted = complete && !binary;
         files.push(ReviewFile {
             change: FileChange {
                 path,
                 orig_path: None,
                 change: Change::Added,
-                added: (!binary).then_some(lines),
-                removed: (!binary).then_some(0),
+                added: counted.then_some(lines),
+                removed: counted.then_some(0),
             },
             untracked: true,
             content: String::new(),

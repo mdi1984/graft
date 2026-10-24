@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use graft_core::diff::Source;
 use graft_core::review::{self, Review, ReviewFile};
@@ -39,7 +40,7 @@ impl ReviewState {
 
 pub struct ReviewView {
     pub worktree: PathBuf,
-    pub data: Option<Result<Review, String>>,
+    pub data: Option<Result<Arc<Review>, String>>,
     pub loading: bool,
     /// Path of the file whose diff is open.
     pub selected: Option<String>,
@@ -58,7 +59,7 @@ pub struct ReviewView {
 
 impl ReviewView {
     pub fn review(&self) -> Option<&Review> {
-        self.data.as_ref().and_then(|d| d.as_ref().ok())
+        self.data.as_ref().and_then(|d| d.as_deref().ok())
     }
 
     pub fn file(&self, path: &str) -> Option<&ReviewFile> {
@@ -148,7 +149,7 @@ impl Project {
         }
         view.loading = false;
         let old = view.selected.as_ref().and_then(|p| view.file(p)).cloned();
-        view.data = Some(result);
+        view.data = Some(result.map(Arc::new));
         let Some(files) = view.review().map(|r| r.files.clone()) else {
             self.commit_diff = None;
             return;

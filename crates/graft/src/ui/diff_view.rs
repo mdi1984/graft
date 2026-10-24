@@ -27,6 +27,22 @@ const ROW: f32 = 20.0;
 const GUTTER: f32 = 24.0;
 const NUM: f32 = 42.0;
 
+/// Lines longer than this (minified code) are cut on screen: laying out and
+/// drawing a 300k-character line takes longer than a frame.
+const MAX_SHOWN_CHARS: usize = 2_000;
+
+/// The text to draw for a line, and how many of its bytes that keeps.
+fn shown(mut text: String) -> (String, usize) {
+    let Some((cut, _)) = text.char_indices().nth(MAX_SHOWN_CHARS) else {
+        let len = text.len();
+        return (text, len);
+    };
+    let more = text[cut..].chars().count();
+    text.truncate(cut);
+    text.push_str(&format!("  … {more} more characters"));
+    (text, cut)
+}
+
 fn token_color(token: Token) -> Color32 {
     match token {
         Token::Keyword => color::syn_keyword(),
@@ -466,7 +482,7 @@ fn half(
             color::text_faint(),
         );
     }
-    let text = line.text();
+    let (text, kept) = shown(line.text());
     let text_color = if tint.is_some() {
         color::text()
     } else {
@@ -483,6 +499,7 @@ fn half(
         .flatten();
     if let (Some(range), Some(tint)) = (word, tint)
         && !range.is_empty()
+        && range.end <= kept
     {
         let start = text[..range.start].chars().count();
         let end = text[..range.end].chars().count();
@@ -973,7 +990,7 @@ fn paint_line(
         fg,
     );
 
-    let text = line.text();
+    let (text, kept) = shown(line.text());
     let text_color = if line.kind == Kind::Context {
         color::text_mid()
     } else {
@@ -983,6 +1000,7 @@ fn paint_line(
     let origin = pos2(rect.left() + text_x, y - galley.size().y / 2.0);
     if let (Some(range), Some(tint)) = (word, tint)
         && !range.is_empty()
+        && range.end <= kept
     {
         let start = text[..range.start].chars().count();
         let end = text[..range.end].chars().count();
@@ -1005,5 +1023,19 @@ fn paint_line(
             theme::small(),
             color::text_faint(),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_lines_are_cut_for_display() {
+        assert_eq!(shown("short".into()), ("short".to_owned(), 5));
+        let long = "é".repeat(MAX_SHOWN_CHARS + 5);
+        let (text, kept) = shown(long);
+        assert_eq!(kept, MAX_SHOWN_CHARS * 2);
+        assert!(text.ends_with("… 5 more characters"), "{text}");
     }
 }

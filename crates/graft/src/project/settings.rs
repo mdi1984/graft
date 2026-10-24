@@ -27,19 +27,20 @@ impl Project {
         }
         self.auto_fetching = true;
         let git = self.git.clone();
-        self.pool.spawn(&self.tx, move || {
+        // A fetch can take a while; it must not hold up the pool that loads
+        // diffs and status.
+        self.pool.spawn_long(&self.tx, move |_| {
             let result =
                 remote::fetch(&git, &CancelToken::default(), |_| {}).map_err(|e| format!("{e:#}"));
             Event::AutoFetched(result)
         });
     }
 
-    pub(super) fn on_auto_fetched(&mut self, result: Result<(), String>) {
+    /// No refresh here: if the fetch moved any remote branch, the file
+    /// watcher sees it in .git/refs and refreshes once.
+    pub(super) fn on_auto_fetched(&mut self, _result: Result<(), String>) {
         self.auto_fetching = false;
         self.last_fetch = Instant::now();
-        if result.is_ok() && !self.is_operating() {
-            self.refresh();
-        }
     }
 
     pub(super) fn apply_settings_action(&mut self, action: Action) {

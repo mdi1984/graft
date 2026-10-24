@@ -426,6 +426,9 @@ fn busy_panel(ui: &mut Ui, busy: &Busy, width: f32, action: &mut Option<StartAct
     });
     ui.horizontal(|ui| {
         progress_bar(ui, progress.fraction, width - 96.0);
+        // Progress arrives from git in the background; look again soon.
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(100));
         if busy.cancel.is_some() && button(ui, "Cancel", ButtonKind::Secondary, true).clicked() {
             *action = Some(StartAction::Cancel);
         }

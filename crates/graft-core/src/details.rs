@@ -95,8 +95,13 @@ fn load_files(git: &Git, from: &str, to: &str) -> Result<Vec<FileChange>> {
         "-M",
         "--no-commit-id",
     ];
-    let status = git.run(common.iter().copied().chain(["--name-status", from, to]))?;
-    let numstat = git.run(common.iter().copied().chain(["--numstat", from, to]))?;
+    // Side by side: each git start costs tens of milliseconds on Windows.
+    let (status, numstat) = std::thread::scope(|s| {
+        let numstat = s.spawn(|| git.run(common.iter().copied().chain(["--numstat", from, to])));
+        let status = git.run(common.iter().copied().chain(["--name-status", from, to]));
+        (status, numstat.join().expect("numstat thread"))
+    });
+    let (status, numstat) = (status?, numstat?);
     let mut files = parse_name_status(&status.stdout);
     apply_numstat(&mut files, &numstat.stdout);
     Ok(files)
@@ -140,6 +145,12 @@ pub(crate) fn parse_name_status(bytes: &[u8]) -> Vec<FileChange> {
 /// `--numstat -z`: "added\tremoved\tpath\0", or for renames
 /// "added\tremoved\t\0old\0new\0". Binary files show "-".
 pub(crate) fn apply_numstat(files: &mut [FileChange], bytes: &[u8]) {
+    // By path: a commit can touch tens of thousands of files.
+    let index: std::collections::HashMap<String, usize> = files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.path.clone(), i))
+        .collect();
     let mut fields = bytes
         .split(|&b| b == 0)
         .map(|f| String::from_utf8_lossy(f).into_owned());
@@ -155,9 +166,9 @@ pub(crate) fn apply_numstat(files: &mut [FileChange], bytes: &[u8]) {
             let _old = fields.next();
             path = fields.next().unwrap_or_default();
         }
-        if let Some(file) = files.iter_mut().find(|f| f.path == path) {
-            file.added = added;
-            file.removed = removed;
+        if let Some(&i) = index.get(&path) {
+            files[i].added = added;
+            files[i].removed = removed;
         }
     }
 }

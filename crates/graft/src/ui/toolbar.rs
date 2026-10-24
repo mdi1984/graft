@@ -37,7 +37,7 @@ fn no(hint: impl Into<String>) -> Can {
 const FINISH_FIRST: &str = "Finish or abort what is in progress first";
 
 pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>, search: &mut String) {
-    let snap = project.snapshot.as_ref();
+    let snap = project.snapshot.as_deref();
     let wt = project.worktree();
     let busy = project.is_operating() || snap.is_none();
     let ahead = wt.map_or(0, |wt| wt.ahead());
