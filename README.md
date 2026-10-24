@@ -148,3 +148,12 @@ cargo run --release
 `CLAUDE.md` has the design notes.
 
 </details>
+
+## Contributing
+
+Ideas and bug reports are very welcome as [issues](../../issues). Code contributions have a few
+unusual rules (short version: no hand-written code); see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+[MIT](LICENSE)
