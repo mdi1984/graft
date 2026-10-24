@@ -117,6 +117,13 @@ main once checks pass.
   `Graft-X.Y.Z-x64.zip` (exe, LICENSE, README), `Graft-X.Y.Z-x64-setup.exe`
   (per-user Inno Setup installer from `installer/graft.iss`, used by winget),
   `graft-x64.exe` (stable name for the in-app updater) and `SHA256SUMS.txt`.
+- In-app updater (`update.rs`): a Graft installed by the setup (its uninstall
+  record names Graft's folder, see `installed.rs`) downloads the new setup
+  and runs it with `/SILENT /WAITPID=<pid> /LAUNCH="<exe>"`; a zip copy swaps
+  its exe. On start Graft corrects a stale DisplayVersion in that record.
+  Never test the installer on the owner's machine with the real AppId: it
+  replaces (and an uninstall removes) the owner's install record. CI's
+  package job runs the real setup-to-setup update.
 - `.github/workflows/ci.yml` checks fmt, clippy (-D warnings) and tests on
   every PR and push to main, and builds the packages (artifact
   `graft-packages`).

@@ -1,14 +1,22 @@
-//! Updates from GitHub releases. Graft asks GitHub for the latest release,
-//! downloads `graft-x64.exe`, checks it against the release's
-//! `SHA256SUMS.txt`, puts it in place of the running program and restarts.
+//! Updates from GitHub releases. Graft asks GitHub for the latest release
+//! and checks every download against the release's `SHA256SUMS.txt`.
+//!
+//! - Installed by the setup program (or winget): the new setup runs once
+//!   Graft has closed, so "Installed apps" and winget see the new version,
+//!   and starts Graft again.
+//! - Anywhere else (the zip): `graft-x64.exe` takes the running program's
+//!   place and Graft restarts.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
+
+use crate::installed;
 
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 pub const REPO_URL: &str = "https://github.com/mdi1984/graft";
@@ -40,6 +48,8 @@ pub struct Release {
     pub page: String,
     exe: String,
     sums: String,
+    /// The setup program; releases before 1.0.0 had none.
+    setup: Option<String>,
 }
 
 impl Release {
@@ -120,7 +130,12 @@ fn parse_release(text: &str) -> Result<Release> {
         page: release.html_url.clone(),
         exe: asset(ASSET)?,
         sums: asset(SUMS)?,
+        setup: asset(&setup_name(version)).ok(),
     })
+}
+
+fn setup_name(version: &str) -> String {
+    format!("Graft-{version}-x64-setup.exe")
 }
 
 /// Downloads are only fetched over HTTPS (or from this machine, for tests).
@@ -130,15 +145,52 @@ fn allowed(url: &str) -> bool {
         || url.starts_with("http://localhost:")
 }
 
-/// Download `release`, check it and put it in place of the running Graft.
-/// Returns the program to start.
-pub fn install(release: &Release) -> Result<PathBuf> {
+/// What [`install`] left ready for [`restart`].
+#[derive(Debug)]
+pub enum Installed {
+    /// The new program is in place; start it.
+    Program(PathBuf),
+    /// Run this setup program for the Graft at `exe`.
+    Setup { setup: PathBuf, exe: PathBuf },
+}
+
+/// Download `release` and check it. A Graft installed by the setup program
+/// gets the new setup; any other has its program file replaced.
+pub fn install(release: &Release) -> Result<Installed> {
     let exe = std::env::current_exe().context("Could not find Graft's own program file")?;
+    if let Some(url) = &release.setup
+        && installed::by_setup(installed::KEY, &exe)
+    {
+        let dir = update_dir();
+        let setup = fetch_setup(release, url, &dir)?;
+        // Read on the next start, to tell whether the setup finished.
+        std::fs::write(dir.join(PENDING), &release.version)
+            .with_context(|| format!("Could not write to {}", dir.display()))?;
+        return Ok(Installed::Setup { setup, exe });
+    }
     install_to(release, &exe)?;
-    Ok(exe)
+    Ok(Installed::Program(exe))
 }
 
 fn install_to(release: &Release, exe: &Path) -> Result<()> {
+    let bytes = fetch(release, &release.exe, ASSET)?;
+    replace(exe, &bytes)
+}
+
+/// Save the setup program into `dir`, once it is checked.
+fn fetch_setup(release: &Release, url: &str, dir: &Path) -> Result<PathBuf> {
+    let name = setup_name(&release.version);
+    let bytes = fetch(release, url, &name)?;
+    let path = dir.join(&name);
+    std::fs::create_dir_all(dir)
+        .and_then(|()| std::fs::write(&path, bytes))
+        .with_context(|| format!("Could not save {}", path.display()))?;
+    Ok(path)
+}
+
+/// Download `url`, which must match the checksum the release lists for
+/// `name`.
+fn fetch(release: &Release, url: &str, name: &str) -> Result<Vec<u8>> {
     let agent = agent();
     let download = |url: &str| -> Result<Vec<u8>> {
         agent
@@ -149,32 +201,109 @@ fn install_to(release: &Release, exe: &Path) -> Result<()> {
     };
     let sums = String::from_utf8_lossy(&download(&release.sums)?).into_owned();
     let expected =
-        expected_hash(&sums, ASSET).with_context(|| format!("{SUMS} does not list {ASSET}"))?;
-    let bytes = download(&release.exe)?;
+        expected_hash(&sums, name).with_context(|| format!("{SUMS} does not list {name}"))?;
+    let bytes = download(url)?;
     if sha256(&bytes) != expected {
         bail!("The download is damaged (its checksum does not match). Nothing was changed.");
     }
-    replace(exe, &bytes)
+    Ok(bytes)
 }
 
-/// Start the new Graft; it waits until this one has closed.
-pub fn restart(exe: &Path) -> Result<()> {
-    std::process::Command::new(exe)
-        .arg(AFTER_UPDATE)
-        .arg(std::process::id().to_string())
-        .spawn()
-        .with_context(|| format!("Could not start {}", exe.display()))?;
+/// Start the new Graft, or the setup that installs it; either waits until
+/// this Graft has closed.
+pub fn restart(installed: &Installed) -> Result<()> {
+    let (mut command, program) = match installed {
+        Installed::Program(exe) => {
+            let mut command = Command::new(exe);
+            command
+                .arg(AFTER_UPDATE)
+                .arg(std::process::id().to_string());
+            (command, exe)
+        }
+        Installed::Setup { setup, exe } => (
+            setup_command(setup, exe, std::process::id(), &setup.with_file_name(LOG)),
+            setup,
+        ),
+    };
+    if let Err(e) = command.spawn() {
+        if let Installed::Setup { setup, .. } = installed {
+            let _ = std::fs::remove_file(setup.with_file_name(PENDING));
+        }
+        return Err(e).with_context(|| format!("Could not start {}", program.display()));
+    }
     Ok(())
 }
+
+/// The setup program, run without questions: it shows only its progress,
+/// waits for process `pid` to end, logs to `log` and starts `exe` again at
+/// the end (see installer/graft.iss).
+fn setup_command(setup: &Path, exe: &Path, pid: u32, log: &Path) -> Command {
+    let mut command = Command::new(setup);
+    for arg in setup_args(exe, pid, log) {
+        #[cfg(windows)]
+        std::os::windows::process::CommandExt::raw_arg(&mut command, arg);
+        #[cfg(not(windows))]
+        command.arg(arg);
+    }
+    command
+}
+
+/// Inno Setup reads `/NAME="value"`, with quotes around the value only.
+fn setup_args(exe: &Path, pid: u32, log: &Path) -> Vec<String> {
+    vec![
+        "/SILENT".to_owned(),
+        "/SUPPRESSMSGBOXES".to_owned(),
+        "/NORESTART".to_owned(),
+        format!("/WAITPID={pid}"),
+        format!("/LAUNCH=\"{}\"", exe.display()),
+        format!("/LOG=\"{}\"", log.display()),
+    ]
+}
+
+/// Where setup programs are saved before they run.
+fn update_dir() -> PathBuf {
+    std::env::temp_dir().join("Graft-update")
+}
+
+/// In [`update_dir`]: the version a setup is installing, and its log.
+const PENDING: &str = "pending";
+const LOG: &str = "setup.log";
 
 /// The argument a restarted Graft gets, followed by the old one's process id.
 pub const AFTER_UPDATE: &str = "--after-update";
 
-/// Remove what the last update left behind.
-pub fn clean_up() {
+/// Remove what the last update left behind, and correct the version in
+/// "Installed apps" if an update by file swap left the old one there. Only
+/// the Graft that keeps running calls this. Returns how the last update by
+/// setup went, if there was one: the message to show.
+pub fn clean_up() -> Option<Result<String, String>> {
     if let Ok(exe) = std::env::current_exe() {
         let _ = std::fs::remove_file(old_path(&exe));
+        installed::record_version(installed::KEY, &exe, CURRENT);
     }
+    last_setup(&update_dir(), CURRENT)
+}
+
+/// How the setup in `dir` went, now that Graft `current` runs. Removes
+/// everything there but the setup's log. A setup that is still finishing
+/// stays until the next start.
+fn last_setup(dir: &Path, current: &str) -> Option<Result<String, String>> {
+    let pending = std::fs::read_to_string(dir.join(PENDING)).ok();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten().filter(|e| e.file_name() != LOG) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    let version = pending?.trim().to_owned();
+    Some(if version == current {
+        Ok(format!("Updated to Graft {current}."))
+    } else {
+        Err(format!(
+            "The update to Graft {version} did not finish; this is still Graft {current}. \
+             The setup's log: {}",
+            dir.join(LOG).display()
+        ))
+    })
 }
 
 fn agent() -> ureq::Agent {
@@ -271,6 +400,7 @@ mod tests {
             "html_url": "https://github.com/mdi1984/graft/releases/tag/v1.2.3",
             "assets": [
                 {"name": "Graft-1.2.3-x64.zip", "browser_download_url": "https://example.com/z"},
+                {"name": "Graft-1.2.3-x64-setup.exe", "browser_download_url": "https://example.com/s"},
                 {"name": "graft-x64.exe", "browser_download_url": "https://example.com/exe"},
                 {"name": "SHA256SUMS.txt", "browser_download_url": "https://example.com/sums"}
             ]
@@ -279,6 +409,10 @@ mod tests {
         assert_eq!(release.version, "1.2.3");
         assert_eq!(release.exe, "https://example.com/exe");
         assert_eq!(release.sums, "https://example.com/sums");
+        assert_eq!(release.setup.as_deref(), Some("https://example.com/s"));
+        // Without a setup program, updates swap the program file.
+        let json = json.replace("Graft-1.2.3-x64-setup.exe", "other.exe");
+        assert_eq!(parse_release(&json).unwrap().setup, None);
     }
 
     #[test]
@@ -363,6 +497,8 @@ Connection: close
         format!(
             r#"{{"tag_name": "v{version}", "html_url": "{base}page", "assets": [
                 {{"name": "graft-x64.exe", "browser_download_url": "{base}graft-x64.exe"}},
+                {{"name": "Graft-{version}-x64-setup.exe",
+                  "browser_download_url": "{base}Graft-{version}-x64-setup.exe"}},
                 {{"name": "SHA256SUMS.txt", "browser_download_url": "{base}SHA256SUMS.txt"}}
             ]}}"#
         )
@@ -419,6 +555,136 @@ Connection: close
         assert!(format!("{error:#}").contains("checksum"), "{error:#}");
         assert_eq!(std::fs::read(&exe).unwrap(), b"the old graft");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn the_setup_program_is_downloaded_and_checked() {
+        let setup = b"the new setup".to_vec();
+        let sums = format!(
+            "{}  Graft-99.0.0-x64-setup.exe\n{}  graft-x64.exe\n",
+            sha256(&setup),
+            sha256(b"the new graft")
+        )
+        .into_bytes();
+        let files = serve(vec![
+            ("Graft-99.0.0-x64-setup.exe", setup.clone()),
+            ("SHA256SUMS.txt", sums),
+        ]);
+        let api = serve(vec![("latest", release_json(&files, "99.0.0"))]);
+        let release = check_at(&format!("{api}latest")).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let saved = fetch_setup(&release, release.setup.as_deref().unwrap(), dir.path()).unwrap();
+        assert_eq!(saved, dir.path().join("Graft-99.0.0-x64-setup.exe"));
+        assert_eq!(std::fs::read(&saved).unwrap(), setup);
+    }
+
+    #[test]
+    fn a_damaged_setup_program_is_not_saved() {
+        let sums = format!(
+            "{}  Graft-99.0.0-x64-setup.exe\n",
+            sha256(b"what was published")
+        )
+        .into_bytes();
+        let files = serve(vec![
+            ("Graft-99.0.0-x64-setup.exe", b"something else".to_vec()),
+            ("SHA256SUMS.txt", sums),
+        ]);
+        let api = serve(vec![("latest", release_json(&files, "99.0.0"))]);
+        let release = check_at(&format!("{api}latest")).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let error =
+            fetch_setup(&release, release.setup.as_deref().unwrap(), dir.path()).unwrap_err();
+        assert!(format!("{error:#}").contains("checksum"), "{error:#}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn the_setup_is_told_what_to_wait_for_and_start() {
+        let args = setup_args(
+            Path::new(r"C:\Users\A B\Programs\Graft\graft.exe"),
+            42,
+            Path::new(r"C:\Temp\Graft-update\setup.log"),
+        );
+        assert_eq!(
+            args,
+            [
+                "/SILENT",
+                "/SUPPRESSMSGBOXES",
+                "/NORESTART",
+                "/WAITPID=42",
+                r#"/LAUNCH="C:\Users\A B\Programs\Graft\graft.exe""#,
+                r#"/LOG="C:\Temp\Graft-update\setup.log""#,
+            ]
+        );
+    }
+
+    /// One real update through the setup program: Graft must be installed
+    /// by its setup, and `GRAFT_E2E_SETUP` names a newer setup whose
+    /// version is `GRAFT_E2E_VERSION`. It changes the installed Graft, so it
+    /// only runs when asked; CI's package job does (see ci.yml).
+    #[test]
+    #[ignore = "installs Graft; run by CI"]
+    fn a_setup_install_is_updated_by_its_setup() {
+        use std::time::{Duration, Instant};
+        let setup = PathBuf::from(std::env::var("GRAFT_E2E_SETUP").unwrap());
+        let version = std::env::var("GRAFT_E2E_VERSION").unwrap();
+        let location = installed::location(installed::KEY).expect("Graft is not installed");
+        let exe = Path::new(&location).join("graft.exe");
+        assert!(installed::by_setup(installed::KEY, &exe));
+        assert_ne!(installed::version(installed::KEY), Some(version.clone()));
+
+        // Stands in for the running Graft (about 10 seconds); the setup
+        // must not replace anything before it ends.
+        let mut running = Command::new("ping")
+            .args(["-n", "11", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("setup.log");
+        let started = Instant::now();
+        let status = setup_command(&setup, &exe, running.id(), &log)
+            .status()
+            .unwrap();
+        let log = String::from_utf8_lossy(&std::fs::read(&log).unwrap()).into_owned();
+        assert!(status.success(), "the setup failed: {status}\n{log}");
+        assert!(running.try_wait().unwrap().is_some(), "{log}");
+        assert!(started.elapsed() >= Duration::from_secs(9), "{log}");
+        assert_eq!(installed::version(installed::KEY), Some(version), "{log}");
+        assert!(log.contains("Started Graft again"), "{log}");
+        let _ = Command::new("taskkill")
+            .args(["/IM", "graft.exe", "/F"])
+            .status();
+    }
+
+    #[test]
+    fn the_next_start_tells_how_the_setup_went() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(last_setup(dir.path(), "1.0.2"), None);
+
+        let leftovers = |version: &str| {
+            std::fs::write(dir.path().join(PENDING), version).unwrap();
+            std::fs::write(dir.path().join("Graft-1.0.2-x64-setup.exe"), b"setup").unwrap();
+            std::fs::write(dir.path().join(LOG), b"log").unwrap();
+        };
+        leftovers("1.0.2");
+        assert_eq!(
+            last_setup(dir.path(), "1.0.2"),
+            Some(Ok("Updated to Graft 1.0.2.".to_owned()))
+        );
+        leftovers("1.0.2");
+        let failed = last_setup(dir.path(), "1.0.1").unwrap().unwrap_err();
+        assert!(failed.contains("did not finish"), "{failed}");
+        assert!(failed.contains(&dir.path().join(LOG).display().to_string()));
+        // Only the log stays, for that message; next time there is nothing to say.
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, [LOG]);
+        assert_eq!(last_setup(dir.path(), "1.0.1"), None);
     }
 
     #[test]

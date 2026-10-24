@@ -60,7 +60,7 @@ enum AppEvent {
         manual: bool,
     },
     /// The new program, ready to start.
-    UpdateInstalled(Result<PathBuf, String>),
+    UpdateInstalled(Result<update::Installed, String>),
 }
 
 pub struct GraftApp {
@@ -100,6 +100,7 @@ impl GraftApp {
         cc: &eframe::CreationContext<'_>,
         folders: Vec<PathBuf>,
         forwarded: Receiver<Vec<PathBuf>>,
+        last_update: Option<Result<String, String>>,
     ) -> Self {
         fonts::install(&cc.egui_ctx);
 
@@ -173,6 +174,11 @@ impl GraftApp {
             closing: false,
             forwarded,
         };
+        match last_update {
+            Some(Ok(done)) => app.toasts.info(done),
+            Some(Err(failed)) => app.toasts.error(failed),
+            None => {}
+        }
         if app.settings.check_updates && update::check_on_start() {
             app.check_update(false);
         }
@@ -218,8 +224,9 @@ impl GraftApp {
                     };
                 }
                 AppEvent::UpdateInstalled(result) => {
-                    match result.and_then(|exe| update::restart(&exe).map_err(|e| format!("{e:#}")))
-                    {
+                    match result.and_then(|installed| {
+                        update::restart(&installed).map_err(|e| format!("{e:#}"))
+                    }) {
                         Ok(()) => self.closing = true,
                         Err(error) => self.update = update::Status::Failed(error),
                     }

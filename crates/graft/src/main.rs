@@ -3,6 +3,7 @@
 
 mod app;
 mod fonts;
+mod installed;
 mod keys;
 mod launch;
 mod native;
@@ -38,13 +39,13 @@ fn main() -> eframe::Result {
         }
         folders.clear();
     }
-    update::clean_up();
     // Graft runs once: a second start hands its folders to the first. After
     // an update the old Graft may still be closing; never hand over to it.
     let _instance = match single::claim(&folders, !after_update) {
         single::Start::First(instance) => instance,
         single::Start::Forwarded => return Ok(()),
     };
+    let last_update = update::clean_up();
     // Listen before the window exists: creating it can take seconds, and a
     // second start only waits about three.
     let (forward_tx, forwarded) = crossbeam_channel::unbounded();
@@ -74,7 +75,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             let _ = repaint.set(cc.egui_ctx.clone());
-            let app = app::GraftApp::new(cc, folders, forwarded);
+            let app = app::GraftApp::new(cc, folders, forwarded, last_update);
             // After the app picked the theme, for the border color.
             native::style_window(cc);
             Ok(Box::new(app))
