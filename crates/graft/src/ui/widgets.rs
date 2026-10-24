@@ -169,18 +169,22 @@ pub enum Tone {
 }
 
 /// A bordered toolbar button: optional icon, label, optional count badge.
+/// A disabled button is drawn faint and never reports a click, but still
+/// shows its hover text (the reason it is disabled).
 pub fn tool_button(
     ui: &mut Ui,
     icon: Option<Icon>,
     label: &str,
     badge: Option<String>,
     tone: Tone,
+    enabled: bool,
 ) -> Response {
     const PAD_X: f32 = 10.0;
     const GAP: f32 = 6.0;
     const HEIGHT: f32 = 30.0;
 
     let fg = match tone {
+        _ if !enabled => color::text_faint(),
         Tone::Normal => color::text(),
         Tone::Danger => color::slash_fg(),
     };
@@ -199,13 +203,19 @@ pub fn tool_button(
         width += GAP + badge.width();
     }
 
-    let (rect, response) = ui.allocate_exact_size(vec2(width, HEIGHT), Sense::click());
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(width, HEIGHT), sense);
     if !ui.is_rect_visible(rect) {
         return response;
     }
 
     let pressed = response.is_pointer_button_down_on();
-    let (fill, border) = match (tone, response.hovered(), pressed) {
+    let (fill, border) = match (tone, enabled && response.hovered(), pressed) {
+        _ if !enabled => (color::bar_bg(), color::border()),
         (Tone::Normal, _, true) => (color::control_active_bg(), color::control_border()),
         (Tone::Normal, true, false) => (color::control_hover_bg(), color::control_border()),
         (Tone::Normal, false, false) => (color::control_bg(), color::control_border()),

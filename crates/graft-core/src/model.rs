@@ -15,6 +15,8 @@ pub struct RepoSnapshot {
     pub remote_branches: Vec<RemoteBranch>,
     pub tags: Vec<Tag>,
     pub remotes: Vec<Remote>,
+    /// The branch origin/HEAD points at: the remote's default branch.
+    pub remote_default: Option<String>,
     pub stash_count: usize,
     /// Another worktree shown in the main worktree ("Preview in main").
     pub preview: Option<crate::preview::Preview>,
@@ -36,11 +38,22 @@ impl RepoSnapshot {
             .find(|wt| wt.branch.as_deref() == Some(branch))
     }
 
-    /// The default branch: origin/HEAD's target if known, else main/master.
+    /// The default branch: origin/HEAD's target if it exists locally, else
+    /// the first of main, master, trunk, develop.
     pub fn default_branch(&self) -> Option<&str> {
-        ["main", "master", "trunk", "develop"]
+        let remote = self.remote_default.as_deref();
+        remote
             .into_iter()
+            .chain(["main", "master", "trunk", "develop"])
             .find(|name| self.branch(name).is_some())
+    }
+
+    /// The remote branch that `branch` tracks, if it still exists.
+    pub fn upstream_of(&self, branch: &str) -> Option<&str> {
+        match &self.branch(branch)?.upstream {
+            Upstream::Tracking { name, .. } => Some(name),
+            Upstream::None | Upstream::Gone { .. } => None,
+        }
     }
 
     /// True if any worktree has uncommitted changes.

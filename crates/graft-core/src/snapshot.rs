@@ -33,6 +33,7 @@ pub fn load(git: &Git) -> Result<RepoSnapshot> {
         branches: refs.branches,
         remote_branches: refs.remote_branches,
         tags: refs.tags,
+        remote_default: refs.remote_default,
         remotes: load_remotes(git)?,
         stash_count: load_stash_count(git)?,
         preview: crate::preview::active(git.cwd()),
@@ -44,6 +45,7 @@ struct Refs {
     branches: Vec<Branch>,
     remote_branches: Vec<RemoteBranch>,
     tags: Vec<Tag>,
+    remote_default: Option<String>,
 }
 
 fn load_refs(git: &Git) -> Result<Refs> {
@@ -65,7 +67,13 @@ fn parse_refs(text: &str) -> Refs {
             continue;
         };
         if !symref.is_empty() {
-            continue; // refs/remotes/origin/HEAD
+            // refs/remotes/origin/HEAD -> refs/remotes/origin/<default branch>
+            if name == "refs/remotes/origin/HEAD" {
+                refs.remote_default = symref
+                    .strip_prefix("refs/remotes/origin/")
+                    .map(str::to_owned);
+            }
+            continue;
         }
         let Ok(oid) = Oid::from_hex(oid.as_bytes()) else {
             continue;
@@ -249,6 +257,7 @@ mod tests {
         assert_eq!(refs.branches[2].upstream, Upstream::None);
         assert_eq!(refs.remote_branches.len(), 1);
         assert_eq!(refs.remote_branches[0].branch_name(), "feature/x");
+        assert_eq!(refs.remote_default.as_deref(), Some("main"));
         assert!(refs.tags[0].annotated);
         assert_eq!(refs.tags[0].target.to_string(), peeled);
     }

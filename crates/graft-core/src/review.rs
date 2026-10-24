@@ -45,23 +45,32 @@ impl Review {
 }
 
 /// The branch to review against when the user has not picked one: the local
-/// default branch, else what origin/HEAD points at.
+/// copy of the remote's default branch (origin/HEAD), else main, master,
+/// trunk or develop, else origin/HEAD itself.
 pub fn default_base(git: &Git, branches: &[String], current: Option<&str>) -> Option<String> {
-    for name in ["main", "master", "trunk", "develop"] {
-        if branches.iter().any(|b| b == name) && current != Some(name) {
-            return Some(name.to_owned());
-        }
-    }
     // Exit code 1 just means there is no origin/HEAD.
-    let out = git
+    let remote_head = git
         .run_expecting(
             ["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
             None,
             |o| o.status <= 1,
         )
-        .ok()?;
-    let remote_head = out.stdout_str().trim().to_owned();
-    (out.success() && !remote_head.is_empty()).then_some(remote_head)
+        .ok()
+        .filter(|out| out.success())
+        .map(|out| out.stdout_str().trim().to_owned())
+        .filter(|head| !head.is_empty());
+    let remote_default = remote_head
+        .as_deref()
+        .and_then(|h| h.strip_prefix("origin/"));
+    for name in remote_default
+        .into_iter()
+        .chain(["main", "master", "trunk", "develop"])
+    {
+        if branches.iter().any(|b| b == name) && current != Some(name) {
+            return Some(name.to_owned());
+        }
+    }
+    remote_head
 }
 
 /// `git` points at the worktree under review.
