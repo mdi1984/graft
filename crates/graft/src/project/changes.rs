@@ -42,13 +42,41 @@ impl FileKey {
     }
 }
 
-pub type Highlights = Vec<Vec<Option<Range<usize>>>>;
+/// Worked out with the diff, off the UI thread: the changed words and the
+/// syntax colors of each (hunk, line).
+#[derive(Default)]
+pub struct Highlights {
+    pub words: Vec<Vec<Option<Range<usize>>>>,
+    pub syntax: graft_core::syntax::Syntax,
+}
+
+/// Diffs up to this many lines get their syntax colors with the diff; bigger
+/// ones show at once and get colored by a second job (~20 µs a line).
+const INLINE_SYNTAX_LINES: usize = 1_500;
+
+fn line_count(diff: &FileDiff) -> usize {
+    diff.hunks.iter().map(|h| h.lines.len()).sum()
+}
+
+impl Highlights {
+    pub fn of(diff: &FileDiff) -> Self {
+        let small = line_count(diff) <= INLINE_SYNTAX_LINES;
+        Self {
+            words: diff::word_highlights(diff),
+            syntax: if small {
+                graft_core::syntax::highlight(diff)
+            } else {
+                Vec::new()
+            },
+        }
+    }
+}
 
 /// The diff shown next to the file lists.
 pub struct DiffView {
     pub key: FileKey,
     pub diff: Option<FileDiff>,
-    pub words: Highlights,
+    pub highlights: Highlights,
     pub error: Option<String>,
     pub loading: bool,
     /// Selected changed lines as (hunk, line).
@@ -170,7 +198,7 @@ impl Project {
         self.diff_view = Some(DiffView {
             key,
             diff: None,
-            words: Vec::new(),
+            highlights: Highlights::default(),
             error: None,
             loading: true,
             selection: BTreeSet::new(),
@@ -192,7 +220,7 @@ impl Project {
         self.commit_diff = Some(DiffView {
             key: key.clone(),
             diff: None,
-            words: Vec::new(),
+            highlights: Highlights::default(),
             error: None,
             loading: true,
             selection: BTreeSet::new(),
@@ -208,8 +236,8 @@ impl Project {
         self.pool.spawn(&self.tx, move || {
             let result = diff::load(&git, &key.source, &key.path)
                 .map(|d| {
-                    let words = diff::word_highlights(&d);
-                    (d, words)
+                    let highlights = Highlights::of(&d);
+                    (d, highlights)
                 })
                 .map_err(|e| format!("{e:#}"));
             Event::CommitDiff { generation, result }
@@ -231,9 +259,43 @@ impl Project {
         match result {
             Ok((diff, words)) => {
                 view.diff = Some(diff);
-                view.words = words;
+                view.highlights = words;
             }
             Err(e) => view.error = Some(e),
+        }
+        self.color_later(generation, true);
+    }
+
+    /// Syntax colors for a diff too big to color with the diff itself.
+    fn color_later(&self, generation: u64, commit: bool) {
+        let view = if commit {
+            self.commit_diff.as_ref()
+        } else {
+            self.diff_view.as_ref()
+        };
+        let Some(diff) = view.and_then(|v| v.diff.as_ref()) else {
+            return;
+        };
+        let colored = view.is_some_and(|v| !v.highlights.syntax.is_empty());
+        if colored || line_count(diff) <= INLINE_SYNTAX_LINES {
+            return;
+        }
+        let diff = diff.clone();
+        self.pool.spawn(&self.tx, move || Event::Syntax {
+            generation,
+            syntax: graft_core::syntax::highlight(&diff),
+        });
+    }
+
+    pub(super) fn on_syntax(&mut self, generation: u64, syntax: graft_core::syntax::Syntax) {
+        for view in [&mut self.diff_view, &mut self.commit_diff]
+            .into_iter()
+            .flatten()
+        {
+            if view.generation == generation {
+                view.highlights.syntax = syntax;
+                return;
+            }
         }
     }
 
@@ -252,8 +314,8 @@ impl Project {
         self.pool.spawn(&self.tx, move || {
             let result = diff::load(&git, &key.source, &key.path)
                 .map(|d| {
-                    let words = diff::word_highlights(&d);
-                    (d, words)
+                    let highlights = Highlights::of(&d);
+                    (d, highlights)
                 })
                 .map_err(|e| format!("{e:#}"));
             Event::Diff { generation, result }
@@ -273,13 +335,18 @@ impl Project {
         }
         view.loading = false;
         match result {
-            Ok((diff, words)) => {
-                if view.diff.as_ref() != Some(&diff) {
+            Ok((diff, highlights)) => {
+                let same = view.diff.as_ref() == Some(&diff);
+                if !same {
                     view.selection.clear();
                     view.anchor = None;
                 }
+                // A big diff's colors come later; keep the old ones meanwhile.
+                let old = std::mem::replace(&mut view.highlights, highlights);
+                if same && view.highlights.syntax.is_empty() {
+                    view.highlights.syntax = old.syntax;
+                }
                 view.diff = Some(diff);
-                view.words = words;
                 view.error = None;
             }
             Err(e) => {
@@ -287,6 +354,7 @@ impl Project {
                 view.error = Some(e);
             }
         }
+        self.color_later(generation, false);
     }
 
     /// After a status refresh: keep the selected file if it is still in its

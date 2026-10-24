@@ -106,6 +106,14 @@ pub mod color {
         removed: 0xff9a8f / 0xc8232f,
         added: 0x7ee08f / 0x1a7f37,
         tag: 0xf5d76e / 0x8a6200,
+
+        // Syntax colors in diffs.
+        syn_keyword: 0xd6a3ff / 0x8250df,
+        syn_string: 0xe5b07a / 0x0a3069,
+        syn_comment: 0x7d8590 / 0x6e7781,
+        syn_number: 0x7fd8d0 / 0x0550ae,
+        syn_function: 0x8cc2ff / 0x0b62c9,
+        syn_type: 0xf5d76e / 0x953800,
     }
 
     const DARK_LANES: [Color32; 8] = [

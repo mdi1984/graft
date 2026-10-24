@@ -325,6 +325,11 @@ enum Event {
         generation: u64,
         result: Result<(FileDiff, Highlights), String>,
     },
+    /// Syntax colors for a big diff, after the diff itself.
+    Syntax {
+        generation: u64,
+        syntax: graft_core::syntax::Syntax,
+    },
     Stashes(Result<Vec<Stash>, String>),
     StashFiles(Oid, Result<Vec<StashFile>, String>),
     Conflict {
@@ -540,6 +545,7 @@ impl Project {
                 Event::LastMessage(message) => self.on_last_message(message),
                 Event::OpDone { then, result } => self.on_op_done(then, result),
                 Event::CommitDiff { generation, result } => self.on_commit_diff(generation, result),
+                Event::Syntax { generation, syntax } => self.on_syntax(generation, syntax),
                 Event::Stashes(result) => self.on_stashes(result),
                 Event::Conflict { generation, result } => self.on_conflict(generation, result),
                 Event::Review { generation, result } => self.on_review(generation, result),
