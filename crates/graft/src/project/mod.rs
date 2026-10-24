@@ -157,6 +157,12 @@ pub enum Action {
     SubmitDialog,
     /// Switch the selected worktree to a local branch.
     Checkout(String),
+    /// Stash the selected worktree's changes, then switch to the branch.
+    StashAndCheckout {
+        branch: String,
+        /// Also stash untracked files (they were in the way).
+        untracked: bool,
+    },
     /// Create `local` tracking `remote` (e.g. origin/x) and switch to it.
     CheckoutRemote {
         local: String,
@@ -261,8 +267,27 @@ pub enum RefKind {
 pub struct RefLabel {
     pub name: String,
     pub kind: RefKind,
-    /// Checked out in another worktree.
-    pub in_worktree: bool,
+    pub checked_out: CheckedOut,
+}
+
+/// Where a branch is checked out; the sidebar and the graph color it alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckedOut {
+    Nowhere,
+    /// In the main folder (the repository's own working tree).
+    Main,
+    /// In a linked worktree.
+    Worktree,
+}
+
+impl CheckedOut {
+    fn of(wt: Option<&graft_core::Worktree>) -> Self {
+        match wt {
+            None => Self::Nowhere,
+            Some(wt) if wt.is_main => Self::Main,
+            Some(_) => Self::Worktree,
+        }
+    }
 }
 
 enum Event {
@@ -796,6 +821,7 @@ impl Project {
             | Action::CloseDialog
             | Action::SubmitDialog
             | Action::Checkout(_)
+            | Action::StashAndCheckout { .. }
             | Action::CheckoutRemote { .. }
             | Action::CheckoutDetached(_)
             | Action::DeleteBranch { .. }
@@ -870,7 +896,7 @@ fn build_labels(snap: &RepoSnapshot, selected: &Path) -> HashMap<Oid, Vec<RefLab
         labels.entry(branch.target).or_default().push(RefLabel {
             name: branch.name.clone(),
             kind: if head { RefKind::Head } else { RefKind::Local },
-            in_worktree: !head && snap.worktree_for_branch(&branch.name).is_some(),
+            checked_out: CheckedOut::of(snap.worktree_for_branch(&branch.name)),
         });
     }
     if let Some(wt) = current.filter(|wt| wt.branch.is_none())
@@ -879,21 +905,21 @@ fn build_labels(snap: &RepoSnapshot, selected: &Path) -> HashMap<Oid, Vec<RefLab
         labels.entry(head).or_default().push(RefLabel {
             name: "HEAD".to_owned(),
             kind: RefKind::Head,
-            in_worktree: false,
+            checked_out: CheckedOut::of(Some(wt)),
         });
     }
     for remote in &snap.remote_branches {
         labels.entry(remote.target).or_default().push(RefLabel {
             name: remote.name.clone(),
             kind: RefKind::Remote,
-            in_worktree: false,
+            checked_out: CheckedOut::Nowhere,
         });
     }
     for tag in &snap.tags {
         labels.entry(tag.target).or_default().push(RefLabel {
             name: tag.name.clone(),
             kind: RefKind::Tag,
-            in_worktree: false,
+            checked_out: CheckedOut::Nowhere,
         });
     }
     for list in labels.values_mut() {

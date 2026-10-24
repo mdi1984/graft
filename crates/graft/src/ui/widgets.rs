@@ -181,9 +181,11 @@ pub fn tool_button(
         .layout_no_wrap(label.to_owned(), theme::body(), fg);
     let badge = badge.map(|b| Badge::new(ui, b, NEUTRAL));
 
+    // An empty label makes an icon-only button (compact toolbar).
+    let icon_gap = if label.is_empty() { 0.0 } else { GAP };
     let mut width = 2.0 * PAD_X + text.size().x;
     if icon.is_some() {
-        width += ICON_SIZE + GAP;
+        width += ICON_SIZE + icon_gap;
     }
     if let Some(badge) = &badge {
         width += GAP + badge.width();
@@ -221,7 +223,7 @@ pub fn tool_button(
     let mut x = rect.left() + PAD_X;
     if let Some(icon) = icon {
         paint_icon(painter, pos2(x, y), icon, fg);
-        x += ICON_SIZE + GAP;
+        x += ICON_SIZE + icon_gap;
     }
     let text_width = text.size().x;
     paint_galley_left(painter, x, y, text, fg);

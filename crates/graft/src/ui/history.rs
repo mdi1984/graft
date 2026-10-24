@@ -18,7 +18,7 @@ use super::icons::Icon;
 use super::widgets::{
     ButtonKind, button, chip, elided, empty_state, icon_button, paint_galley_left, spinner,
 };
-use crate::project::{Action, DialogKind, FileKey, Project, RefKind, RefLabel};
+use crate::project::{Action, CheckedOut, DialogKind, FileKey, Project, RefKind, RefLabel};
 use crate::theme::{self, color};
 use crate::time;
 
@@ -29,12 +29,13 @@ const MIN_GRAPH_WIDTH: f32 = 40.0;
 const COMMIT_COL: f32 = 76.0;
 const DATE_COL: f32 = 116.0;
 const AUTHOR_COL: f32 = 150.0;
+const MIN_DESCRIPTION: f32 = 180.0;
 
 pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
     Panel::right("commit-details")
         .resizable(true)
         .default_size(400.0)
-        .size_range(300.0..=760.0)
+        .size_range(260.0..=760.0)
         .frame(
             Frame::new()
                 .fill(color::SIDEBAR_BG)
@@ -82,9 +83,41 @@ fn loading(ui: &mut Ui, text: &str) {
     );
 }
 
+/// Column widths; 0 hides a column.
 struct Columns {
     graph: f32,
     author: f32,
+    date: f32,
+    commit: f32,
+}
+
+impl Columns {
+    /// Fit the columns into `width`. The description keeps at least
+    /// `MIN_DESCRIPTION`; columns give way in order: author, commit id, date.
+    fn fit(width: f32, graph: f32) -> Self {
+        let mut cols = Columns {
+            graph,
+            author: AUTHOR_COL,
+            date: DATE_COL,
+            commit: COMMIT_COL,
+        };
+        let description = |c: &Columns| width - c.graph - c.author - c.date - c.commit;
+        if description(&cols) < MIN_DESCRIPTION {
+            cols.author = 0.0;
+        }
+        if description(&cols) < MIN_DESCRIPTION {
+            cols.commit = 0.0;
+        }
+        if description(&cols) < MIN_DESCRIPTION {
+            cols.date = 0.0;
+        }
+        // Still too narrow: the graph shrinks too.
+        let room = description(&cols);
+        if room < MIN_DESCRIPTION {
+            cols.graph = (cols.graph - (MIN_DESCRIPTION - room)).max(MIN_GRAPH_WIDTH);
+        }
+        cols
+    }
 }
 
 fn commit_list(ui: &mut Ui, project: &Project, history: &History, actions: &mut Vec<Action>) {
@@ -100,10 +133,7 @@ fn commit_list(ui: &mut Ui, project: &Project, history: &History, actions: &mut 
         .min(needed)
         .min(width * 0.6)
         .max(MIN_GRAPH_WIDTH);
-    let mut cols = Columns {
-        graph,
-        author: if width > 700.0 { AUTHOR_COL } else { 0.0 },
-    };
+    let mut cols = Columns::fit(width, graph);
     header_row(ui, &mut cols, width_id);
 
     let selected = project
@@ -272,12 +302,18 @@ fn header_row(ui: &mut Ui, cols: &mut Columns, width_id: Id) {
         let x = rect.left() + cols.graph;
         painter.vline(x, rect.y_range(), Stroke::new(1.0, color::TEXT_FAINT));
     }
-    label(rect.left() + 10.0, "Graph");
+    if cols.graph >= 50.0 {
+        label(rect.left() + 10.0, "Graph");
+    }
     label(rect.left() + cols.graph + 6.0, "Description");
-    let mut x = rect.right() - COMMIT_COL;
-    label(x, "Commit");
-    x -= DATE_COL;
-    label(x, "Date");
+    let mut x = rect.right() - cols.commit;
+    if cols.commit > 0.0 {
+        label(x, "Commit");
+    }
+    x -= cols.date;
+    if cols.date > 0.0 {
+        label(x, "Date");
+    }
     if cols.author > 0.0 {
         label(x - cols.author, "Author");
     }
@@ -313,15 +349,15 @@ fn paint_row(
     paint_graph(ui, graph_rect, row, commit, is_head, bg);
 
     let y = rect.center().y;
-    let mut right = rect.right() - COMMIT_COL;
-    if !commit.is_worktree() {
+    let mut right = rect.right() - cols.commit;
+    if cols.commit > 0.0 && !commit.is_worktree() {
         let sha = painter.layout_no_wrap(short(&commit.id), theme::mono(), color::TEXT_FAINT);
         paint_galley_left(painter, right, y, sha, color::TEXT_FAINT);
     }
-    right -= DATE_COL;
-    if !commit.is_worktree() {
+    right -= cols.date;
+    if cols.date > 0.0 && !commit.is_worktree() {
         let date = time::relative(commit.time, now);
-        let date = elided(ui, &date, theme::body(), color::TEXT_WEAK, DATE_COL - 8.0);
+        let date = elided(ui, &date, theme::body(), color::TEXT_WEAK, cols.date - 8.0);
         paint_galley_left(painter, right, y, date, color::TEXT_WEAK);
     }
     if cols.author > 0.0 {
@@ -340,7 +376,7 @@ fn paint_row(
 
     let mut x = rect.left() + cols.graph + 6.0;
     let desc_right = right - 10.0;
-    let chips_max = ((desc_right - x) * 0.5).max(60.0);
+    let chips_max = ((desc_right - x) * 0.5).max(0.0);
     let chips_end = x + chips_max;
     for (n, label) in labels.iter().enumerate() {
         let room = chips_end - x;
@@ -385,11 +421,17 @@ fn paint_row(
     }
 }
 
+/// Like the sidebar: green is checked out in the main folder, orange in a
+/// linked worktree; the viewed worktree's HEAD is bold.
 pub fn label_style(label: &RefLabel) -> (Color32, egui::FontId) {
+    let branch_color = match label.checked_out {
+        CheckedOut::Main => color::ACCENT,
+        CheckedOut::Worktree => color::BRANCH_DOT_AGENT,
+        CheckedOut::Nowhere => color::AHEAD_FG,
+    };
     match label.kind {
-        RefKind::Head => (color::ACCENT, theme::semibold(theme::SMALL_SIZE + 0.5)),
-        RefKind::Local if label.in_worktree => (color::BRANCH_DOT_AGENT, theme::small()),
-        RefKind::Local => (color::AHEAD_FG, theme::small()),
+        RefKind::Head => (branch_color, theme::semibold(theme::SMALL_SIZE + 0.5)),
+        RefKind::Local => (branch_color, theme::small()),
         RefKind::Remote => (color::TEXT_WEAK, theme::small()),
         RefKind::Tag => (color::TAG, theme::small()),
     }

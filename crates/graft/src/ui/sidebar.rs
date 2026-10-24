@@ -71,7 +71,9 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
                 let head = current.and_then(|wt| wt.branch.as_deref());
                 for branch in &repo.branches {
                     let response = branch_row(ui, repo, branch, head);
-                    if response.clicked() {
+                    if response.double_clicked() {
+                        actions.extend(open_branch(project, repo, &branch.name));
+                    } else if response.clicked() {
                         actions.push(Action::Reveal(branch.target));
                     }
                     response.context_menu(|ui| branch_menu(ui, project, branch, head, actions));
@@ -190,12 +192,14 @@ fn worktree_row(ui: &mut Ui, wt: &Worktree, selected: bool) -> Response {
 
     let top_y = rect.top() + 14.0;
     let bottom_y = rect.top() + 29.0;
+    // Green is always the main folder, orange a linked worktree (like the
+    // branch dots below); the row background shows which one is selected.
     let icon_color = if wt.prunable {
         color::TEXT_FAINT
-    } else if selected {
+    } else if wt.is_main {
         color::ACCENT
     } else {
-        color::TEXT_WEAK
+        color::BRANCH_DOT_AGENT
     };
     paint_icon(
         painter,
@@ -358,7 +362,11 @@ fn branch_menu(
     match elsewhere {
         Some(wt) => menu_item(
             ui,
-            "Open its worktree",
+            if wt.is_main {
+                "Go to the main folder"
+            } else {
+                "Open its worktree"
+            },
             true,
             actions,
             Action::OpenWorktree(wt.path.clone()),
@@ -598,21 +606,25 @@ fn tag_menu(ui: &mut Ui, repo: &RepoSnapshot, tag: &str, busy: bool, actions: &m
     }
 }
 
+/// A local branch. Green: checked out in the main folder. Orange: checked out
+/// in a linked worktree. Highlighted: the selected worktree's branch.
 fn branch_row(ui: &mut Ui, repo: &RepoSnapshot, branch: &Branch, head: Option<&str>) -> Response {
     let (rect, response) = row(ui, 26.0);
     let painter = ui.painter();
-    paint_row_bg(painter, rect, &response, false);
+    let is_head = head == Some(branch.name.as_str());
+    paint_row_bg(painter, rect, &response, is_head);
     let y = rect.center().y;
 
-    let is_head = head == Some(branch.name.as_str());
-    let elsewhere = !is_head && repo.worktree_for_branch(&branch.name).is_some();
+    let checked_out = repo.worktree_for_branch(&branch.name);
+    let in_main = checked_out.is_some_and(|wt| wt.is_main);
+    let in_worktree = checked_out.is_some_and(|wt| !wt.is_main);
     let gone = matches!(branch.upstream, Upstream::Gone { .. });
-    let dot = if is_head {
+    let dot = if in_main {
         color::ACCENT
+    } else if in_worktree {
+        color::BRANCH_DOT_AGENT
     } else if gone {
         color::TEXT_FAINT
-    } else if elsewhere {
-        color::BRANCH_DOT_AGENT
     } else {
         color::AHEAD_FG
     };
@@ -635,7 +647,7 @@ fn branch_row(ui: &mut Ui, repo: &RepoSnapshot, branch: &Branch, head: Option<&s
     paint_galley_left(painter, meta_x, y, meta, color::TEXT_WEAK);
 
     let text_x = rect.left() + PAD_X + 14.0;
-    let fg = if is_head { color::ACCENT } else { color::TEXT };
+    let fg = if in_main { color::ACCENT } else { color::TEXT };
     let name = elided(ui, &branch.name, theme::mono(), fg, meta_x - 6.0 - text_x);
     paint_galley_left(painter, text_x, y, name, fg);
 
@@ -648,13 +660,23 @@ fn branch_row(ui: &mut Ui, repo: &RepoSnapshot, branch: &Branch, head: Option<&s
             behind,
         } => format!("Tracks {name} · {ahead} ahead, {behind} behind"),
     };
-    let tip = if elsewhere {
-        let wt = repo.worktree_for_branch(&branch.name).expect("checked");
-        format!("{tip}\nChecked out in {}", wt.path.display())
-    } else {
-        tip
+    let tip = match checked_out {
+        Some(wt) if wt.is_main => format!("{tip}\nChecked out in your main folder"),
+        Some(wt) => format!("{tip}\nChecked out in the worktree {}", wt.path.display()),
+        None => format!("{tip}\nDouble-click to check it out"),
     };
     response.on_hover_text(tip)
+}
+
+/// Double-click on a branch: go to the worktree that has it checked out, or
+/// check it out in the selected worktree.
+fn open_branch(project: &Project, repo: &RepoSnapshot, name: &str) -> Option<Action> {
+    match repo.worktree_for_branch(name) {
+        Some(wt) if same_path(&wt.path, &project.nav.worktree) => None,
+        Some(wt) => Some(Action::OpenWorktree(wt.path.clone())),
+        None if project.is_operating() => None,
+        None => Some(Action::Checkout(name.to_owned())),
+    }
 }
 
 fn remotes(
@@ -726,7 +748,17 @@ fn remotes(
                 color::TEXT_WEAK,
                 26.0,
             );
-            if response.clicked() {
+            if response.double_clicked() {
+                let local = branch.branch_name();
+                if repo.branch(local).is_some() {
+                    actions.extend(open_branch(project, repo, local));
+                } else if !busy {
+                    actions.push(Action::CheckoutRemote {
+                        local: local.to_owned(),
+                        remote: branch.name.clone(),
+                    });
+                }
+            } else if response.clicked() {
                 actions.push(Action::Reveal(branch.target));
             }
             response
