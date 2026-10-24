@@ -105,6 +105,19 @@ lands: `cargo fmt`, `cargo clippy --workspace --all-targets` with no warnings,
 gets tests against throwaway repos. One branch + PR per step, merged into
 main once checks pass.
 
+## Releases
+- Semantic versions, one for the whole workspace (`[workspace.package] version`
+  in Cargo.toml). Tags are `vX.Y.Z`; 1.0.0 is the first public release.
+- To release: bump the version (plus `cargo update -w`) in a PR and merge it,
+  then tag the merge commit and push the tag by hand:
+  `git tag v1.2.3 <sha>` and `git push origin v1.2.3`.
+- `.github/workflows/release.yml` runs on the tag: it fails unless the tag
+  matches Cargo.toml, runs the tests, builds, and publishes a GitHub release
+  with `Graft-X.Y.Z-x64.zip` (exe, LICENSE, README), `graft-x64.exe` (stable
+  name for the in-app updater) and `SHA256SUMS.txt`, with generated notes.
+- `.github/workflows/ci.yml` checks fmt, clippy (-D warnings) and tests on
+  every PR and push to main.
+
 ## MVP order
 1. Cargo workspace + egui shell + theme
 2. Open/clone/init repo, project tabs, commit graph (virtualized list)
