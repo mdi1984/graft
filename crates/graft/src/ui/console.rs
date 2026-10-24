@@ -46,12 +46,16 @@ impl ConsoleView {
 }
 
 /// The bottom status bar: current activity on the left, console toggle right.
+/// The bottom status bar. Returns true when the user clicked "Cancel" on a
+/// cancellable `activity`.
 pub fn status_bar(
     ui: &mut Ui,
     activity: Option<&str>,
+    cancellable: bool,
     view: &ConsoleView,
     console_open: &mut bool,
-) {
+) -> bool {
+    let mut cancel = false;
     let (rect, _) =
         ui.allocate_exact_size(vec2(ui.available_width(), STATUS_HEIGHT), Sense::hover());
     let y = rect.center().y;
@@ -67,7 +71,24 @@ pub fn status_bar(
             color::TEXT_WEAK,
             rect.width() / 2.0,
         );
+        let width = text.size().x;
         paint_galley_left(painter, x, y, text, color::TEXT_WEAK);
+        if cancellable {
+            let galley =
+                painter.layout_no_wrap("Cancel".to_owned(), theme::small(), color::AHEAD_FG);
+            let r = egui::Rect::from_min_size(
+                pos2(x + width + 10.0, rect.top() + 4.0),
+                vec2(galley.size().x + 8.0, rect.height() - 8.0),
+            );
+            let response = ui.interact(r, ui.scope_id().with("cancel-activity"), Sense::click());
+            let fg = if response.hovered() {
+                color::TEXT
+            } else {
+                color::AHEAD_FG
+            };
+            paint_galley_left(painter, r.left() + 4.0, y, galley, fg);
+            cancel = response.clicked();
+        }
     } else if let Some(last) = view.entries.last() {
         let text = format!("Last: {}", last.command);
         let text = elided(
@@ -109,6 +130,7 @@ pub fn status_bar(
     if response.clicked() {
         *console_open = !*console_open;
     }
+    cancel
 }
 
 /// The console panel's content.

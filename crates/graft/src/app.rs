@@ -158,6 +158,9 @@ impl GraftApp {
             for notice in project.notices.drain(..) {
                 self.toasts.error(notice);
             }
+            for info in project.infos.drain(..) {
+                self.toasts.info(info);
+            }
         }
         self.console_view.sync(&self.console);
     }
@@ -457,15 +460,28 @@ impl GraftApp {
         }
     }
 
-    fn activity(&self) -> Option<String> {
+    /// What the status bar shows as running, and whether it can be cancelled.
+    fn activity(&self) -> Option<(String, bool)> {
         if let Some(busy) = &self.start.busy {
-            return Some(busy.label.clone());
+            return Some((busy.label.clone(), false));
         }
         let project = &self.projects[self.active?];
+        if let Some(op) = &project.op {
+            let progress = op.progress.lock().map(|p| p.clone()).unwrap_or_default();
+            let mut label = op.label.clone();
+            if !progress.phase.is_empty() {
+                label.push_str(" · ");
+                label.push_str(&progress.phase);
+            }
+            if let Some(fraction) = progress.fraction {
+                label.push_str(&format!(" {:.0}%", fraction * 100.0));
+            }
+            return Some((label, op.cancel.is_some()));
+        }
         if project.loading {
-            Some(format!("Refreshing {}…", project.name))
+            Some((format!("Refreshing {}…", project.name), false))
         } else if project.history_loading {
-            Some("Loading history…".to_owned())
+            Some(("Loading history…".to_owned(), false))
         } else {
             None
         }
@@ -474,6 +490,9 @@ impl GraftApp {
     fn project_ui(&mut self, ui: &mut egui::Ui, index: usize) {
         let mut actions = Vec::new();
         let project = &self.projects[index];
+        if let Some(confirm) = &project.confirm {
+            ui::confirm::show(ui.ctx(), confirm, &mut actions);
+        }
         let bar = |margin| Frame::new().fill(color::BAR_BG).inner_margin(margin);
 
         Panel::top("toolbar")
@@ -496,6 +515,7 @@ impl GraftApp {
                 )
                 .show(ui, |ui| ui::sidebar::show(ui, project, &mut actions));
         }
+        let project = &mut self.projects[index];
         CentralPanel::no_frame()
             .frame(Frame::new().fill(color::APP_BG))
             .show(ui, |ui| ui::main_area::show(ui, project, &mut actions));
@@ -541,7 +561,8 @@ impl eframe::App for GraftApp {
         }
 
         let activity = self.activity();
-        Panel::bottom("status-bar")
+        let cancellable = activity.as_ref().is_some_and(|(_, c)| *c);
+        let cancel = Panel::bottom("status-bar")
             .frame(
                 Frame::new()
                     .fill(color::TABSTRIP_BG)
@@ -551,11 +572,16 @@ impl eframe::App for GraftApp {
             .show(ui, |ui| {
                 console_ui::status_bar(
                     ui,
-                    activity.as_deref(),
+                    activity.as_ref().map(|(label, _)| label.as_str()),
+                    cancellable,
                     &self.console_view,
                     &mut self.console_open,
                 )
-            });
+            })
+            .inner;
+        if cancel && let Some(index) = self.active {
+            self.projects[index].apply(Action::CancelOperation);
+        }
         if self.console_open {
             Panel::bottom("console")
                 .resizable(true)

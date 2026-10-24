@@ -8,9 +8,12 @@
 pub mod cli;
 pub mod console;
 pub mod details;
+pub mod diff;
 pub mod history;
 pub mod jobs;
 pub mod model;
+pub mod ops;
+pub mod remote;
 pub mod repo;
 pub mod snapshot;
 pub mod status;

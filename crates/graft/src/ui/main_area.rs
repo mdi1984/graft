@@ -4,26 +4,23 @@
 use egui::{Align2, Frame, Margin, Panel, Rect, Sense, Ui, vec2};
 use graft_core::Worktree;
 
-use super::history;
 use super::widgets::{ButtonKind, button, elided_path, empty_state, paint_galley_left, spinner};
+use super::{file_status, history};
 use crate::project::{Action, Project, Tab, WorkspaceView};
 use crate::theme::{self, color};
 
-pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
+pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
     if project.snapshot.is_none() {
         not_loaded(ui, project, actions);
         return;
     }
-    let worktree = project.worktree();
+    let worktree = project.worktree().cloned();
+    let worktree = worktree.as_ref();
     match project.nav.tab {
         Tab::Workspace => match project.nav.view {
             WorkspaceView::FileStatus => {
                 header(ui, "File status", worktree);
-                empty_state(
-                    ui,
-                    "File status",
-                    "Staging files, hunks and lines comes in the next step.",
-                );
+                file_status::show(ui, project, actions);
             }
             WorkspaceView::History => {
                 header(ui, "History", worktree);

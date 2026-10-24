@@ -5,7 +5,7 @@ use egui::{Align, Frame, Id, Key, Layout, Margin, Modifiers, Sense, Stroke, Text
 
 use super::icons::{self, Icon};
 use super::widgets::{Tone, tool_button, toolbar_divider};
-use crate::project::{Action, Project, Tab};
+use crate::project::{Action, Project, RemoteOp, Tab};
 use crate::theme::{RADIUS, color};
 
 const LATER: &str = "Coming in a later step";
@@ -19,10 +19,31 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>, search: &
         if tool_button(ui, Some(Icon::Commit), "Commit", None, Tone::Normal).clicked() {
             actions.push(Action::ShowFileStatus);
         }
-        tool_button(ui, Some(Icon::Pull), "Pull", None, Tone::Normal).on_hover_text(LATER);
+        let busy = project.is_operating() || project.snapshot.is_none();
+        let behind = project.worktree().map_or(0, |wt| wt.behind());
+        let pull_badge = (behind > 0).then(|| behind.to_string());
+        if tool_button(ui, Some(Icon::Pull), "Pull", pull_badge, Tone::Normal)
+            .on_hover_text("Pull the current branch from its upstream")
+            .clicked()
+            && !busy
+        {
+            actions.push(Action::Remote(RemoteOp::Pull));
+        }
         let push_badge = (ahead > 0).then(|| ahead.to_string());
-        tool_button(ui, Some(Icon::Push), "Push", push_badge, Tone::Normal).on_hover_text(LATER);
-        tool_button(ui, Some(Icon::Fetch), "Fetch", None, Tone::Normal).on_hover_text(LATER);
+        if tool_button(ui, Some(Icon::Push), "Push", push_badge, Tone::Normal)
+            .on_hover_text("Push the current branch (sets the upstream the first time)")
+            .clicked()
+            && !busy
+        {
+            actions.push(Action::Remote(RemoteOp::Push));
+        }
+        if tool_button(ui, Some(Icon::Fetch), "Fetch", None, Tone::Normal)
+            .on_hover_text("Fetch all remotes")
+            .clicked()
+            && !busy
+        {
+            actions.push(Action::Remote(RemoteOp::Fetch));
+        }
         toolbar_divider(ui);
 
         tool_button(ui, None, "Branch", None, Tone::Normal).on_hover_text(LATER);
