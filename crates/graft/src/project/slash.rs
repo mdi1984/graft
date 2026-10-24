@@ -5,7 +5,7 @@
 use std::sync::{Arc, Mutex};
 
 use graft_core::repo::Progress;
-use graft_core::slash::{self, Candidate, Outcome, PROTECTED, Plan, Slashed};
+use graft_core::slash::{self, Candidate, Outcome, Plan, Slashed};
 use graft_core::{CancelToken, Oid};
 use serde::{Deserialize, Serialize};
 
@@ -68,6 +68,7 @@ impl Project {
             cancel: Some(cancel.clone()),
         });
         let git = self.git.clone();
+        let protected = self.settings.protected.clone();
         self.pool.spawn_long(&self.tx, move |waker| {
             let report = |p: Progress| {
                 if let Ok(mut slot) = progress.lock() {
@@ -76,7 +77,7 @@ impl Project {
                 waker();
             };
             let result =
-                slash::scan(&git, PROTECTED, &cancel, report).map_err(|e| format!("{e:#}"));
+                slash::scan(&git, &protected, &cancel, report).map_err(|e| format!("{e:#}"));
             Event::SlashPlan(result)
         });
     }

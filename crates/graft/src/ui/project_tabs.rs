@@ -33,6 +33,7 @@ pub enum TabAction {
     NewTab,
     /// Close the start page tab.
     CloseStart,
+    OpenSettings,
 }
 
 /// `active` is `None` while the start page is showing; it then gets a tab too.
@@ -47,7 +48,7 @@ pub fn show(ui: &mut Ui, tabs: &[TabInfo], active: Option<usize>) -> Option<TabA
     );
 
     let count = tabs.len() + usize::from(active.is_none());
-    let room = full.width() - 16.0 - 40.0;
+    let room = full.width() - 16.0 - 40.0 - 40.0;
     let width = (room / count.max(1) as f32).clamp(MIN_WIDTH, MAX_WIDTH);
 
     let mut x = full.left() + 8.0;
@@ -157,6 +158,18 @@ pub fn show(ui: &mut Ui, tabs: &[TabInfo], active: Option<usize>) -> Option<TabA
     paint_icon_button(ui, plus, &response, Icon::Plus);
     if response.clicked() {
         action = Some(TabAction::NewTab);
+    }
+
+    let gear = Rect::from_center_size(
+        pos2(full.right() - 20.0, top + TAB_HEIGHT / 2.0),
+        vec2(26.0, 26.0),
+    );
+    let response = ui
+        .interact(gear, ui.scope_id().with("settings"), Sense::click())
+        .on_hover_text("Settings  (Ctrl+,)");
+    paint_icon_button(ui, gear, &response, Icon::Settings);
+    if response.clicked() {
+        action = Some(TabAction::OpenSettings);
     }
     action
 }

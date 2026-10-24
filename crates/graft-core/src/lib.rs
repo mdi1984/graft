@@ -11,6 +11,7 @@ pub mod console;
 pub mod details;
 pub mod diff;
 pub mod history;
+pub mod identity;
 pub mod jobs;
 pub mod model;
 pub mod ops;
