@@ -11,7 +11,10 @@ use graft_core::diff::{FileDiff, Kind, Source};
 use graft_core::ops::LineOp;
 
 use super::history::paint_change_letter;
-use super::widgets::{ButtonKind, button, elided_path, empty_state, paint_galley_left, spinner};
+use super::icons::Icon;
+use super::widgets::{
+    ButtonKind, button, elided_path, empty_state, icon_button, paint_galley_left, spinner,
+};
 use crate::project::{Action, Confirm, DiffView, Project};
 use crate::theme::{self, color};
 
@@ -28,7 +31,15 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
         );
         return;
     };
-    let busy = project.is_operating();
+    show_view(ui, view, project.is_operating(), actions);
+}
+
+/// Any file diff: File status (with staging) or a commit or stash (read-only,
+/// with a close button).
+pub fn show_view(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Action>) {
+    if matches!(view.key.source, Source::Commit(_)) && ui.input(|i| i.key_pressed(Key::Escape)) {
+        actions.push(Action::CloseCommitFile);
+    }
     header(ui, view, busy, actions);
     if !view.selection.is_empty() {
         selection_bar(ui, view, busy, actions);
@@ -140,7 +151,14 @@ fn header(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Action>) {
                                 actions.push(discard_file(&view.key.source, path));
                             }
                         }
-                        Source::Commit(_) => {}
+                        Source::Commit(_) => {
+                            if icon_button(ui, Icon::Close, 26.0)
+                                .on_hover_text("Close the diff (Esc)")
+                                .clicked()
+                            {
+                                actions.push(Action::CloseCommitFile);
+                            }
+                        }
                     }
                 });
             });
@@ -271,10 +289,10 @@ fn lines(ui: &mut Ui, view: &DiffView, diff: &FileDiff, busy: bool, actions: &mu
                         let line = &diff.hunks[h].lines[l];
                         let selected = view.selection.contains(&(h, l));
                         let word = view.words.get(h).and_then(|w| w.get(l)).cloned().flatten();
-                        paint_line(ui, rect, line, selected, word, text_x);
+                        let editable = !matches!(view.key.source, Source::Commit(_));
+                        paint_line(ui, rect, line, selected, word, text_x, editable);
                         let hovered = ui.rect_contains_pointer(rect) && ui.is_rect_visible(rect);
-                        let selectable =
-                            line.is_change() && !matches!(view.key.source, Source::Commit(_));
+                        let selectable = line.is_change() && editable;
                         if selectable && hovered {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                             if pressed {
@@ -387,6 +405,7 @@ fn paint_line(
     selected: bool,
     word: Option<std::ops::Range<usize>>,
     text_x: f32,
+    selectable: bool,
 ) {
     let painter = ui.painter();
     let tint = match line.kind {
@@ -401,7 +420,7 @@ fn paint_line(
     let y = rect.center().y;
 
     // Selection box in the gutter.
-    if line.is_change() {
+    if line.is_change() && selectable {
         let b = Rect::from_center_size(pos2(rect.left() + GUTTER / 2.0, y), vec2(12.0, 12.0));
         if selected {
             painter.rect_filled(b, 3, color::ACCENT);

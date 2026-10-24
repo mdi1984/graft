@@ -1,8 +1,10 @@
 //! Branches, tags and commit actions: the small dialogs that ask for a name,
 //! and what happens when git says no (unmerged branch, rejected push).
 
+use graft_core::Oid;
 use graft_core::refs::{self, NOT_MERGED, ResetMode};
 use graft_core::remote::is_rejected_push;
+use graft_core::stash;
 
 use super::changes::Then;
 use super::{Action, Confirm, Project, RemoteOp};
@@ -33,6 +35,17 @@ pub enum DialogKind {
         target_label: String,
         branch: String,
         mode: ResetMode,
+    },
+    Stash {
+        message: String,
+        include_untracked: bool,
+        keep_index: bool,
+        staged_only: bool,
+    },
+    StashBranch {
+        id: Oid,
+        label: String,
+        name: String,
     },
 }
 
@@ -67,7 +80,9 @@ impl Project {
         let kind = dialog.kind.clone();
         // Problems git would only report after a round trip.
         let problem = match &kind {
-            DialogKind::NewBranch { name, .. } | DialogKind::RenameBranch { name, .. } => {
+            DialogKind::NewBranch { name, .. }
+            | DialogKind::RenameBranch { name, .. }
+            | DialogKind::StashBranch { name, .. } => {
                 let name = name.trim();
                 if name.is_empty() {
                     Some("Give the branch a name.".to_owned())
@@ -95,7 +110,7 @@ impl Project {
                     None
                 }
             }
-            DialogKind::Reset { .. } => None,
+            DialogKind::Reset { .. } | DialogKind::Stash { .. } => None,
         };
         if let Some(problem) = problem {
             dialog.error = Some(problem);
@@ -137,6 +152,29 @@ impl Project {
                 let done = format!("Created tag {name}");
                 self.run_op("Creating tag", Then::Dialog(done), move |git| {
                     refs::create_tag(&git, &name, &target, Some(&message))
+                });
+            }
+            DialogKind::Stash {
+                message,
+                include_untracked,
+                keep_index,
+                staged_only,
+            } => {
+                let options = stash::Options {
+                    message,
+                    include_untracked,
+                    keep_index,
+                    staged_only,
+                };
+                self.run_op("Stashing", Then::Dialog("Stashed".to_owned()), move |git| {
+                    stash::push(&git, &options)
+                });
+            }
+            DialogKind::StashBranch { id, name, .. } => {
+                let name = name.trim().to_owned();
+                let done = format!("Created {name} from the stash and switched to it");
+                self.run_op("Creating branch", Then::Dialog(done), move |git| {
+                    stash::branch(&git, &name, id)
                 });
             }
             DialogKind::Reset {

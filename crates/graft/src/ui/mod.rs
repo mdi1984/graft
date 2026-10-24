@@ -10,6 +10,7 @@ pub mod new_worktree;
 pub mod project_tabs;
 pub mod sidebar;
 pub mod start;
+pub mod stashes;
 pub mod tabs;
 pub mod toasts;
 pub mod toolbar;

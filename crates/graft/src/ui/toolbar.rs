@@ -65,8 +65,26 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>, search: &
             }));
         }
         tool_button(ui, None, "Merge", None, Tone::Normal).on_hover_text(LATER);
-        if tool_button(ui, None, "Stash", None, Tone::Normal).clicked() {
-            actions.push(Action::SetTab(Tab::Stashes));
+        let dirty = project.worktree().is_some_and(|wt| wt.dirty() > 0);
+        if tool_button(ui, None, "Stash", None, Tone::Normal)
+            .on_hover_text(if dirty {
+                "Put this worktree's changes aside"
+            } else {
+                "Nothing to stash: the worktree is clean"
+            })
+            .clicked()
+            && !busy
+        {
+            if dirty {
+                actions.push(Action::OpenDialog(DialogKind::Stash {
+                    message: String::new(),
+                    include_untracked: true,
+                    keep_index: false,
+                    staged_only: false,
+                }));
+            } else {
+                actions.push(Action::SetTab(Tab::Stashes));
+            }
         }
         if tool_button(ui, None, "New worktree", None, Tone::Normal)
             .on_hover_text("Check out a branch in a second folder")

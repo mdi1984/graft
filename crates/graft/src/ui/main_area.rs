@@ -5,7 +5,7 @@ use egui::{Align2, Frame, Margin, Panel, Rect, Sense, Ui, vec2};
 use graft_core::Worktree;
 
 use super::widgets::{ButtonKind, button, elided_path, empty_state, paint_galley_left, spinner};
-use super::{file_status, history};
+use super::{file_status, history, stashes};
 use crate::project::{Action, Project, Tab, WorkspaceView};
 use crate::theme::{self, color};
 
@@ -36,12 +36,8 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
             );
         }
         Tab::Stashes => {
-            header(ui, "Stashes", None);
-            empty_state(
-                ui,
-                "Stashes",
-                "Creating and applying stashes comes after the core steps.",
-            );
+            header(ui, "Stashes", worktree);
+            stashes::show(ui, project, actions);
         }
     }
 }

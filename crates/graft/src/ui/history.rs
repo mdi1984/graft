@@ -3,20 +3,22 @@
 
 use egui::epaint::CubicBezierShape;
 use egui::{
-    Align2, Color32, Frame, Id, Key, Margin, Panel, Pos2, Rect, RichText, ScrollArea, Sense,
-    Stroke, Ui, pos2, vec2,
+    Align2, Color32, Frame, Id, Key, Margin, Panel, Pos2, Rect, Response, RichText, ScrollArea,
+    Sense, Stroke, Ui, pos2, vec2,
 };
 use graft_core::details::{CommitDetails, FileChange};
+use graft_core::diff::Source;
 use graft_core::history::{Commit, GraphRow, History, LineKind};
 use graft_core::refs::ResetMode;
 use graft_core::short;
 use graft_core::status::Change;
 
+use super::diff_view;
 use super::icons::Icon;
 use super::widgets::{
     ButtonKind, button, chip, elided, empty_state, icon_button, paint_galley_left, spinner,
 };
-use crate::project::{Action, DialogKind, Project, RefKind, RefLabel};
+use crate::project::{Action, DialogKind, FileKey, Project, RefKind, RefLabel};
 use crate::theme::{self, color};
 use crate::time;
 
@@ -54,6 +56,15 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
             "Make the first commit from File status.",
         );
         return;
+    }
+    if let Some(view) = &project.commit_diff {
+        let height = ui.available_height();
+        Panel::bottom("history-diff")
+            .exact_size((height * 0.55).max(160.0))
+            .frame(Frame::new().fill(color::APP_BG))
+            .show(ui, |ui| {
+                diff_view::show_view(ui, view, project.is_operating(), actions)
+            });
     }
     commit_list(ui, project, history, actions);
 }
@@ -662,8 +673,15 @@ fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &m
                 .size(theme::SMALL_SIZE),
         );
     }
+    let open = project.commit_diff.as_ref().map(|v| &v.key);
     for file in &d.files {
-        file_row(ui, file);
+        let key = FileKey {
+            source: Source::Commit(d.id),
+            path: file.path.clone(),
+        };
+        if file_row(ui, file, open == Some(&key), None).clicked() {
+            actions.push(Action::SelectCommitFile(key));
+        }
     }
 }
 
@@ -724,16 +742,20 @@ pub fn paint_change_letter(ui: &Ui, x: f32, y: f32, change: Change) {
     );
 }
 
-fn file_row(ui: &mut Ui, file: &FileChange) {
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
-    if response.hovered() {
+/// A changed file of a commit or stash; `note` replaces the line counts.
+pub fn file_row(ui: &mut Ui, file: &FileChange, selected: bool, note: Option<&str>) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
+    if selected {
+        ui.painter().rect_filled(rect, 4, color::SELECTED_ROW_BG);
+    } else if response.hovered() {
         ui.painter().rect_filled(rect, 4, color::HOVER_ROW_BG);
     }
     let y = rect.center().y;
     paint_change_letter(ui, rect.left() + 4.0, y, file.change);
 
-    let stats = match (file.added, file.removed) {
-        (Some(a), Some(r)) => format!("+{a} −{r}"),
+    let stats = match (note, file.added, file.removed) {
+        (Some(note), _, _) => note.to_owned(),
+        (None, Some(a), Some(r)) => format!("+{a} −{r}"),
         _ => "binary".to_owned(),
     };
     let stats = ui
@@ -748,7 +770,7 @@ fn file_row(ui: &mut Ui, file: &FileChange) {
         Some(orig) => format!("{orig} → {}", file.path),
         None => file.path.clone(),
     };
-    response.on_hover_text(tip);
+    response.on_hover_text(tip)
 }
 
 fn uncommitted(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
