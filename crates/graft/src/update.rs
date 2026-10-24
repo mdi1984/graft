@@ -161,7 +161,11 @@ pub fn install(release: &Release) -> Result<Installed> {
     if let Some(url) = &release.setup
         && installed::by_setup(installed::KEY, &exe)
     {
-        let setup = fetch_setup(release, url, &update_dir())?;
+        let dir = update_dir();
+        let setup = fetch_setup(release, url, &dir)?;
+        // Read on the next start, to tell whether the setup finished.
+        std::fs::write(dir.join(PENDING), &release.version)
+            .with_context(|| format!("Could not write to {}", dir.display()))?;
         return Ok(Installed::Setup { setup, exe });
     }
     install_to(release, &exe)?;
@@ -217,13 +221,16 @@ pub fn restart(installed: &Installed) -> Result<()> {
             (command, exe)
         }
         Installed::Setup { setup, exe } => (
-            setup_command(setup, exe, std::process::id(), &setup.with_extension("log")),
+            setup_command(setup, exe, std::process::id(), &setup.with_file_name(LOG)),
             setup,
         ),
     };
-    command
-        .spawn()
-        .with_context(|| format!("Could not start {}", program.display()))?;
+    if let Err(e) = command.spawn() {
+        if let Installed::Setup { setup, .. } = installed {
+            let _ = std::fs::remove_file(setup.with_file_name(PENDING));
+        }
+        return Err(e).with_context(|| format!("Could not start {}", program.display()));
+    }
     Ok(())
 }
 
@@ -258,22 +265,45 @@ fn update_dir() -> PathBuf {
     std::env::temp_dir().join("Graft-update")
 }
 
+/// In [`update_dir`]: the version a setup is installing, and its log.
+const PENDING: &str = "pending";
+const LOG: &str = "setup.log";
+
 /// The argument a restarted Graft gets, followed by the old one's process id.
 pub const AFTER_UPDATE: &str = "--after-update";
 
 /// Remove what the last update left behind, and correct the version in
-/// "Installed apps" if an update by file swap left the old one there.
-pub fn clean_up() {
+/// "Installed apps" if an update by file swap left the old one there. Only
+/// the Graft that keeps running calls this. Returns how the last update by
+/// setup went, if there was one: the message to show.
+pub fn clean_up() -> Option<Result<String, String>> {
     if let Ok(exe) = std::env::current_exe() {
         let _ = std::fs::remove_file(old_path(&exe));
         installed::record_version(installed::KEY, &exe, CURRENT);
     }
-    // A setup that is still finishing stays until the next start.
-    if let Ok(entries) = std::fs::read_dir(update_dir()) {
-        for entry in entries.flatten() {
+    last_setup(&update_dir(), CURRENT)
+}
+
+/// How the setup in `dir` went, now that Graft `current` runs. Removes
+/// everything there but the setup's log. A setup that is still finishing
+/// stays until the next start.
+fn last_setup(dir: &Path, current: &str) -> Option<Result<String, String>> {
+    let pending = std::fs::read_to_string(dir.join(PENDING)).ok();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten().filter(|e| e.file_name() != LOG) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
+    let version = pending?.trim().to_owned();
+    Some(if version == current {
+        Ok(format!("Updated to Graft {current}."))
+    } else {
+        Err(format!(
+            "The update to Graft {version} did not finish; this is still Graft {current}. \
+             The setup's log: {}",
+            dir.join(LOG).display()
+        ))
+    })
 }
 
 fn agent() -> ureq::Agent {
@@ -627,6 +657,34 @@ Connection: close
         let _ = Command::new("taskkill")
             .args(["/IM", "graft.exe", "/F"])
             .status();
+    }
+
+    #[test]
+    fn the_next_start_tells_how_the_setup_went() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(last_setup(dir.path(), "1.0.2"), None);
+
+        let leftovers = |version: &str| {
+            std::fs::write(dir.path().join(PENDING), version).unwrap();
+            std::fs::write(dir.path().join("Graft-1.0.2-x64-setup.exe"), b"setup").unwrap();
+            std::fs::write(dir.path().join(LOG), b"log").unwrap();
+        };
+        leftovers("1.0.2");
+        assert_eq!(
+            last_setup(dir.path(), "1.0.2"),
+            Some(Ok("Updated to Graft 1.0.2.".to_owned()))
+        );
+        leftovers("1.0.2");
+        let failed = last_setup(dir.path(), "1.0.1").unwrap().unwrap_err();
+        assert!(failed.contains("did not finish"), "{failed}");
+        assert!(failed.contains(&dir.path().join(LOG).display().to_string()));
+        // Only the log stays, for that message; next time there is nothing to say.
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, [LOG]);
+        assert_eq!(last_setup(dir.path(), "1.0.1"), None);
     }
 
     #[test]

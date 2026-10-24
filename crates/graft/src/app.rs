@@ -100,6 +100,7 @@ impl GraftApp {
         cc: &eframe::CreationContext<'_>,
         folders: Vec<PathBuf>,
         forwarded: Receiver<Vec<PathBuf>>,
+        last_update: Option<Result<String, String>>,
     ) -> Self {
         fonts::install(&cc.egui_ctx);
 
@@ -173,6 +174,11 @@ impl GraftApp {
             closing: false,
             forwarded,
         };
+        match last_update {
+            Some(Ok(done)) => app.toasts.info(done),
+            Some(Err(failed)) => app.toasts.error(failed),
+            None => {}
+        }
         if app.settings.check_updates && update::check_on_start() {
             app.check_update(false);
         }
