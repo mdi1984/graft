@@ -53,6 +53,22 @@ jobs:
           $meta = cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json
           $version = ($meta.packages | Where-Object name -eq 'graft').version
           ./tools/package.ps1 -Version $version
+      # Install the setup just built, then update it the way Graft's updater
+      # does, with a setup that says 99.0.0 (see update.rs).
+      - name: Update a setup install
+        shell: pwsh
+        run: |
+          $meta = cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json
+          $version = ($meta.packages | Where-Object name -eq 'graft').version
+          $old = Start-Process "dist\Graft-$version-x64-setup.exe" -Wait -PassThru `
+            -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+          if ($old.ExitCode -ne 0) { throw "Installing $version failed" }
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          & $iscc /Q /DVersion=99.0.0 "/DSource=$PWD\target\release" "/DOutput=$PWD\e2e" installer\graft.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Building the 99.0.0 setup failed' }
+          $env:GRAFT_E2E_SETUP = "$PWD\e2e\Graft-99.0.0-x64-setup.exe"
+          $env:GRAFT_E2E_VERSION = '99.0.0'
+          cargo test --release --locked -p graft -- --ignored --exact update::tests::a_setup_install_is_updated_by_its_setup
       - uses: actions/upload-artifact@v4
         with:
           name: graft-packages

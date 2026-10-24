@@ -96,10 +96,12 @@ fetch · file history and blame · undo last commit · search everything with **
 
 You need [Git for Windows](https://git-scm.com/download/win).
 
-Download `Graft-<version>-x64.zip` from [Releases](https://github.com/mdi1984/graft/releases), unpack it
-anywhere you like and start `graft.exe`. Graft checks for a new version when it starts and updates
-itself: click **Update** in the title bar, or open **About** (click the Graft icon). You can turn the
-check off in Settings.
+From [Releases](https://github.com/mdi1984/graft/releases), either run `Graft-<version>-x64-setup.exe`
+(installs for your user only, no admin rights) or unpack `Graft-<version>-x64.zip` anywhere you like
+and start `graft.exe`. Graft checks for a new version when it starts and updates itself: click
+**Update** in the title bar, or open **About** (click the Graft icon). An installed Graft updates
+through the new setup, so Installed apps and winget show the right version. You can turn the check
+off in Settings.
 
 ### Build from source
 

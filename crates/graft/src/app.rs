@@ -60,7 +60,7 @@ enum AppEvent {
         manual: bool,
     },
     /// The new program, ready to start.
-    UpdateInstalled(Result<PathBuf, String>),
+    UpdateInstalled(Result<update::Installed, String>),
 }
 
 pub struct GraftApp {
@@ -218,8 +218,9 @@ impl GraftApp {
                     };
                 }
                 AppEvent::UpdateInstalled(result) => {
-                    match result.and_then(|exe| update::restart(&exe).map_err(|e| format!("{e:#}")))
-                    {
+                    match result.and_then(|installed| {
+                        update::restart(&installed).map_err(|e| format!("{e:#}"))
+                    }) {
                         Ok(()) => self.closing = true,
                         Err(error) => self.update = update::Status::Failed(error),
                     }

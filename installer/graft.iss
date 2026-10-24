@@ -61,3 +61,51 @@ Filename: "{app}\graft.exe"; Description: "Start Graft"; Flags: nowait postinsta
 ; Left behind by Graft's own updater.
 Type: files; Name: "{app}\graft.exe.old"
 Type: files; Name: "{app}\graft.exe.new"
+
+[Code]
+// Graft's updater runs this setup with /SILENT and:
+//   /WAITPID=<id>    wait until the Graft with that process id has closed;
+//   /LAUNCH="<exe>"  start Graft again at the end, updated or not.
+const
+  SYNCHRONIZE = $00100000;
+
+function OpenProcess(Access: DWORD; Inherit: BOOL; Pid: DWORD): THandle;
+  external 'OpenProcess@kernel32.dll stdcall';
+function WaitForSingleObject(Handle: THandle; Milliseconds: DWORD): DWORD;
+  external 'WaitForSingleObject@kernel32.dll stdcall';
+function CloseHandle(Handle: THandle): BOOL;
+  external 'CloseHandle@kernel32.dll stdcall';
+
+function InitializeSetup(): Boolean;
+var
+  Pid: Integer;
+  Process: THandle;
+begin
+  Pid := StrToIntDef(ExpandConstant('{param:WAITPID|0}'), 0);
+  if Pid > 0 then
+  begin
+    Process := OpenProcess(SYNCHRONIZE, False, Pid);
+    if Process <> 0 then
+    begin
+      Log(Format('Waiting for Graft (process %d) to close', [Pid]));
+      WaitForSingleObject(Process, 60000);
+      CloseHandle(Process);
+    end;
+  end;
+  Result := True;
+end;
+
+procedure DeinitializeSetup();
+var
+  Exe: String;
+  Code: Integer;
+begin
+  Exe := ExpandConstant('{param:LAUNCH|}');
+  if (Exe <> '') and FileExists(Exe) then
+  begin
+    if ExecAsOriginalUser(Exe, '', ExtractFileDir(Exe), SW_SHOWNORMAL, ewNoWait, Code) then
+      Log('Started Graft again: ' + Exe)
+    else
+      Log('Could not start Graft again: ' + SysErrorMessage(Code));
+  end;
+end;
