@@ -1,6 +1,7 @@
 //! The Review tab: the selected worktree against the merge-base of its base
 //! branch (uncommitted work included), "Viewed" marks keyed by content, and
-//! local notes. Marks, notes and the chosen base are remembered per worktree.
+//! local notes and line comments. Marks, notes, comments and the chosen base
+//! are remembered per worktree.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -11,6 +12,7 @@ use graft_core::{conflicts, same_path};
 use serde::{Deserialize, Serialize};
 
 use super::changes::Then;
+use super::comments::{self, LineComment, Pick};
 use super::{Action, Event, FileKey, Project};
 
 /// What Graft remembers about reviewing one worktree.
@@ -23,6 +25,16 @@ pub struct ReviewState {
     pub viewed: BTreeSet<String>,
     /// Notes per file path.
     pub notes: BTreeMap<String, String>,
+    /// Comments on lines of the diff.
+    pub comments: Vec<LineComment>,
+}
+
+impl ReviewState {
+    /// Line comments plus non-empty file notes.
+    pub fn comment_count(&self) -> usize {
+        let notes = self.notes.values().filter(|n| !n.trim().is_empty()).count();
+        notes + self.comments.len()
+    }
 }
 
 pub struct ReviewView {
@@ -33,6 +45,14 @@ pub struct ReviewView {
     pub selected: Option<String>,
     /// Show diffs side by side (else unified).
     pub split: bool,
+    /// Lines picked in the open file's diff, to comment on.
+    pub pick: Option<Pick>,
+    /// The comment being edited, if any.
+    pub editing: Option<u64>,
+    /// Text of the comment being written or edited.
+    pub draft: String,
+    /// Focus the comment box on the next frame.
+    pub focus_draft: bool,
     generation: u64,
 }
 
@@ -85,6 +105,10 @@ impl Project {
                 loading: false,
                 selected: None,
                 split,
+                pick: None,
+                editing: None,
+                draft: String::new(),
+                focus_draft: false,
                 generation: 0,
             });
             self.commit_diff = None;
@@ -165,6 +189,13 @@ impl Project {
         } else {
             Source::Base(review.merge_base)
         };
+        if view.selected.as_ref() != Some(&path) {
+            // Picked lines belong to the old file's diff.
+            view.pick = None;
+            if view.editing.take().is_some() {
+                view.draft.clear();
+            }
+        }
         view.selected = Some(path.clone());
         let key = FileKey { source, path };
         if reload || self.commit_diff.as_ref().is_some_and(|d| d.key != key) {
@@ -205,6 +236,56 @@ impl Project {
         }
     }
 
+    /// Save the draft: as a new comment on the picked lines, or into the
+    /// comment being edited.
+    fn save_comment(&mut self) {
+        let Some(view) = &self.review else { return };
+        let text = view.draft.trim().to_owned();
+        if text.is_empty() {
+            return;
+        }
+        if let Some(id) = view.editing {
+            if let Some(c) = self
+                .review_state_mut()
+                .comments
+                .iter_mut()
+                .find(|c| c.id == id)
+            {
+                c.text = text;
+            }
+        } else {
+            let (Some(pick), Some(path), Some(diff)) = (
+                view.pick,
+                view.selected.clone(),
+                self.commit_diff.as_ref().and_then(|d| d.diff.as_ref()),
+            ) else {
+                return;
+            };
+            let Some((side, start, end)) = comments::range(diff, &pick) else {
+                return;
+            };
+            let Some(excerpt) = comments::excerpt(diff, side, start, end) else {
+                return;
+            };
+            let state = self.review_state_mut();
+            let id = state.comments.iter().map(|c| c.id).max().unwrap_or(0) + 1;
+            state.comments.push(LineComment {
+                id,
+                path,
+                side,
+                start,
+                end,
+                excerpt,
+                text,
+            });
+        }
+        if let Some(view) = &mut self.review {
+            view.pick = None;
+            view.editing = None;
+            view.draft.clear();
+        }
+    }
+
     pub(super) fn apply_review_action(&mut self, action: Action) {
         match action {
             Action::SelectReviewFile(path) => self.open_review_file(path, false),
@@ -216,6 +297,65 @@ impl Project {
             Action::ToggleReviewSplit => {
                 if let Some(view) = &mut self.review {
                     view.split = !view.split;
+                }
+            }
+            Action::PickLine { at, side, extend } => {
+                let Some(view) = &mut self.review else { return };
+                match &mut view.pick {
+                    Some(pick) if extend && pick.side == side => pick.cursor = at,
+                    _ => {
+                        if view.editing.take().is_some() {
+                            view.draft.clear();
+                        }
+                        view.pick = Some(Pick {
+                            anchor: at,
+                            cursor: at,
+                            side,
+                        });
+                        view.focus_draft = true;
+                    }
+                }
+            }
+            Action::SaveComment => self.save_comment(),
+            Action::CancelComment => {
+                if let Some(view) = &mut self.review {
+                    view.pick = None;
+                    view.editing = None;
+                    view.draft.clear();
+                }
+            }
+            Action::EditComment(id) => {
+                let Some(text) = self
+                    .review_state()
+                    .and_then(|s| s.comments.iter().find(|c| c.id == id))
+                    .map(|c| c.text.clone())
+                else {
+                    return;
+                };
+                if let Some(view) = &mut self.review {
+                    view.pick = None;
+                    view.editing = Some(id);
+                    view.draft = text;
+                    view.focus_draft = true;
+                }
+            }
+            Action::DeleteComment(id) => {
+                self.review_state_mut().comments.retain(|c| c.id != id);
+                if let Some(view) = &mut self.review
+                    && view.editing == Some(id)
+                {
+                    view.editing = None;
+                    view.draft.clear();
+                }
+            }
+            Action::ClearReviewComments => {
+                let state = self.review_state_mut();
+                state.comments.clear();
+                state.notes.clear();
+                if let Some(view) = &mut self.review {
+                    view.pick = None;
+                    view.editing = None;
+                    view.draft.clear();
                 }
             }
             Action::MergeReviewed {

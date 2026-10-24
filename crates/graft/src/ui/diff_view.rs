@@ -1,11 +1,14 @@
 //! The diff of the selected file in File status: hunks with Stage / Unstage /
 //! Discard buttons, line numbers, word highlights, and per-line selection
-//! ("N lines selected → Stage lines").
+//! ("N lines selected → Stage lines"). In Review, lines are picked to comment
+//! on and comments show under the lines they are about.
+
+use std::sync::Arc;
 
 use egui::text::CCursor;
 use egui::{
-    Align2, Frame, Key, Margin, Panel, Rect, RichText, ScrollArea, Sense, Stroke, StrokeKind, Ui,
-    pos2, vec2,
+    Align2, Frame, Galley, Key, Margin, Panel, Rect, RichText, ScrollArea, Sense, Stroke,
+    StrokeKind, Ui, pos2, vec2,
 };
 use graft_core::diff::{FileDiff, Kind, Source};
 use graft_core::ops::LineOp;
@@ -15,12 +18,175 @@ use super::icons::Icon;
 use super::widgets::{
     ButtonKind, button, elided_path, empty_state, icon_button, paint_galley_left, spinner,
 };
+use crate::project::comments::{LineComment, Pick, Placed, Side};
 use crate::project::{Action, Confirm, DiffView, Project};
 use crate::theme::{self, color};
 
 const ROW: f32 = 20.0;
 const GUTTER: f32 = 24.0;
 const NUM: f32 = 42.0;
+
+/// The Review tab's extras on a diff: lines picked to comment on, and
+/// comments shown under the line they end on.
+pub struct Marks<'a> {
+    pub pick: Option<Pick>,
+    pub placed: Vec<Placed<'a>>,
+}
+
+/// A comment laid out to sit under its line, `rows` rows tall.
+struct Block<'a> {
+    at: (usize, usize),
+    comment: &'a LineComment,
+    galley: Arc<Galley>,
+    rows: usize,
+}
+
+const COMMENT_PAD: f32 = 8.0;
+const COMMENT_HEADER: f32 = 18.0;
+/// Room right of a comment block (scroll bar).
+const COMMENT_RIGHT: f32 = 16.0;
+
+fn blocks<'a>(ui: &Ui, marks: Option<&Marks<'a>>, width: f32) -> Vec<Block<'a>> {
+    let Some(marks) = marks else {
+        return Vec::new();
+    };
+    let wrap = (width - GUTTER - COMMENT_RIGHT - 2.0 * COMMENT_PAD - 3.0).max(120.0);
+    marks
+        .placed
+        .iter()
+        .map(|&(at, comment)| {
+            let galley =
+                ui.painter()
+                    .layout(comment.text.clone(), theme::body(), color::text(), wrap);
+            let height = COMMENT_HEADER + galley.size().y + 2.0 * COMMENT_PAD + 6.0;
+            Block {
+                at,
+                comment,
+                galley,
+                rows: (height / ROW).ceil() as usize,
+            }
+        })
+        .collect()
+}
+
+/// Row `part` of a comment block. Every row paints the whole block, clipped
+/// to itself, so the block scrolls in and out smoothly.
+fn comment_row(ui: &Ui, rect: Rect, block: &Block, part: usize, actions: &mut Vec<Action>) {
+    let clip = ui.clip_rect();
+    let left = clip.left().max(rect.left()) + GUTTER;
+    let right = clip.right().min(rect.right()) - COMMENT_RIGHT;
+    let top = rect.top() - part as f32 * ROW + 3.0;
+    let bottom = top + block.rows as f32 * ROW - 6.0;
+    let block_rect = Rect::from_min_max(pos2(left, top), pos2(right, bottom));
+    let hovered = ui.rect_contains_pointer(block_rect.intersect(clip));
+    let painter = ui.painter().with_clip_rect(rect.intersect(clip));
+    painter.rect(
+        block_rect,
+        6,
+        if hovered {
+            color::control_hover_bg()
+        } else {
+            color::sidebar_bg()
+        },
+        Stroke::new(1.0, color::border()),
+        StrokeKind::Inside,
+    );
+    painter.rect_filled(
+        Rect::from_min_size(block_rect.min, vec2(3.0, block_rect.height())),
+        egui::CornerRadius {
+            nw: 6,
+            sw: 6,
+            ..Default::default()
+        },
+        color::accent(),
+    );
+    let x = left + 3.0 + COMMENT_PAD;
+    painter.text(
+        pos2(x, top + COMMENT_PAD),
+        Align2::LEFT_TOP,
+        block.comment.lines_label(),
+        theme::small(),
+        color::text_faint(),
+    );
+    if hovered {
+        painter.text(
+            pos2(right - COMMENT_PAD, top + COMMENT_PAD),
+            Align2::RIGHT_TOP,
+            "Click to edit or delete",
+            theme::small(),
+            color::text_faint(),
+        );
+    }
+    painter.galley(
+        pos2(x, top + COMMENT_PAD + COMMENT_HEADER),
+        block.galley.clone(),
+        color::text(),
+    );
+    let response = ui.interact(
+        rect.intersect(block_rect),
+        ui.scope_id().with(("comment", block.comment.id, part)),
+        Sense::click(),
+    );
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if response.clicked() {
+        actions.push(Action::EditComment(block.comment.id));
+    }
+}
+
+/// Picked lines: a light accent wash and a bar at the left edge.
+fn paint_picked(ui: &Ui, rect: Rect) {
+    let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+    painter.rect_filled(rect, 0, color::accent().gamma_multiply(0.14));
+    painter.rect_filled(
+        Rect::from_min_size(rect.min, vec2(3.0, rect.height())),
+        0,
+        color::accent(),
+    );
+}
+
+/// Mouse state for picking lines: pressed this frame, held, shift.
+#[derive(Clone, Copy)]
+struct Pointer {
+    pressed: bool,
+    down: bool,
+    shift: bool,
+}
+
+fn pointer(ui: &Ui) -> Pointer {
+    ui.input(|i| Pointer {
+        pressed: i.pointer.primary_pressed(),
+        down: i.pointer.primary_down(),
+        shift: i.modifiers.shift,
+    })
+}
+
+/// Click picks a line, Shift-click or dragging extends the pick.
+fn pick_on_hover(
+    ui: &Ui,
+    marks: &Marks,
+    at: (usize, usize),
+    side: Option<Side>,
+    p: Pointer,
+    actions: &mut Vec<Action>,
+) {
+    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    let same_side = marks.pick.is_some_and(|pick| pick.side == side);
+    if p.pressed {
+        actions.push(Action::PickLine {
+            at,
+            side,
+            extend: p.shift && same_side,
+        });
+    } else if p.down && same_side && marks.pick.is_some_and(|pick| pick.cursor != at) {
+        actions.push(Action::PickLine {
+            at,
+            side,
+            extend: true,
+        });
+    }
+}
 
 pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
     let Some(view) = &project.diff_view else {
@@ -44,11 +210,19 @@ pub fn show_view(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Act
     if !view.selection.is_empty() {
         selection_bar(ui, view, busy, actions);
     }
-    body(ui, view, busy, false, actions);
+    body(ui, view, busy, false, None, actions);
 }
 
 /// The diff without its header: unified, or side by side with `split`.
-pub fn body(ui: &mut Ui, view: &DiffView, busy: bool, split: bool, actions: &mut Vec<Action>) {
+/// With `marks` (Review), clicking lines picks them to comment on.
+pub fn body(
+    ui: &mut Ui,
+    view: &DiffView,
+    busy: bool,
+    split: bool,
+    marks: Option<&Marks>,
+    actions: &mut Vec<Action>,
+) {
     let Some(diff) = &view.diff else {
         if let Some(error) = &view.error {
             empty_state(ui, "Could not load the diff", error);
@@ -80,9 +254,9 @@ pub fn body(ui: &mut Ui, view: &DiffView, busy: bool, split: bool, actions: &mut
         actions.push(Action::ClearLines);
     }
     if split {
-        side_by_side(ui, view, diff);
+        side_by_side(ui, view, diff, marks, actions);
     } else {
-        lines(ui, view, diff, busy, actions);
+        lines(ui, view, diff, busy, marks, actions);
     }
 }
 
@@ -91,16 +265,29 @@ pub fn body(ui: &mut Ui, view: &DiffView, busy: bool, split: bool, actions: &mut
 enum Pair {
     Hunk(usize),
     Lines(Option<(usize, usize)>, Option<(usize, usize)>),
+    /// Row `.1` of comment block `.0`.
+    Comment(usize, usize),
 }
 
-fn pair_rows(diff: &FileDiff) -> Vec<Pair> {
+fn pair_rows(diff: &FileDiff, blocks: &[Block]) -> Vec<Pair> {
     let mut rows = Vec::new();
+    let push = |rows: &mut Vec<Pair>, pair: Pair| {
+        rows.push(pair);
+        let Pair::Lines(left, right) = pair else {
+            return;
+        };
+        for (b, block) in blocks.iter().enumerate() {
+            if left == Some(block.at) || right == Some(block.at) {
+                rows.extend((0..block.rows).map(|part| Pair::Comment(b, part)));
+            }
+        }
+    };
     for (h, hunk) in diff.hunks.iter().enumerate() {
         rows.push(Pair::Hunk(h));
         let mut l = 0;
         while l < hunk.lines.len() {
             if hunk.lines[l].kind == Kind::Context {
-                rows.push(Pair::Lines(Some((h, l)), Some((h, l))));
+                push(&mut rows, Pair::Lines(Some((h, l)), Some((h, l))));
                 l += 1;
                 continue;
             }
@@ -115,15 +302,26 @@ fn pair_rows(diff: &FileDiff) -> Vec<Pair> {
                 l += 1;
             }
             for i in 0..removed.len().max(added.len()) {
-                rows.push(Pair::Lines(removed.get(i).copied(), added.get(i).copied()));
+                push(
+                    &mut rows,
+                    Pair::Lines(removed.get(i).copied(), added.get(i).copied()),
+                );
             }
         }
     }
     rows
 }
 
-fn side_by_side(ui: &mut Ui, view: &DiffView, diff: &FileDiff) {
-    let rows = pair_rows(diff);
+fn side_by_side(
+    ui: &mut Ui,
+    view: &DiffView,
+    diff: &FileDiff,
+    marks: Option<&Marks>,
+    actions: &mut Vec<Action>,
+) {
+    let blocks = blocks(ui, marks, ui.available_width());
+    let rows = pair_rows(diff, &blocks);
+    let p = pointer(ui);
     ui.spacing_mut().item_spacing.y = 0.0;
     ScrollArea::vertical()
         .id_salt(("diff-split-scroll", &view.key.path))
@@ -159,13 +357,30 @@ fn side_by_side(ui: &mut Ui, view: &DiffView, diff: &FileDiff) {
                         let mid = rect.center().x;
                         let left_rect = Rect::from_min_max(rect.min, pos2(mid - 1.0, rect.max.y));
                         let right_rect = Rect::from_min_max(pos2(mid + 1.0, rect.min.y), rect.max);
-                        half(ui, left_rect, view, diff, left, true);
-                        half(ui, right_rect, view, diff, right, false);
+                        for (r, at, old) in [(left_rect, left, true), (right_rect, right, false)] {
+                            half(ui, r, view, diff, at, old);
+                            let (Some(marks), Some(at)) = (marks, at) else {
+                                continue;
+                            };
+                            let side = Some(if old { Side::Old } else { Side::New });
+                            let kind = diff.hunks[at.0].lines[at.1].kind;
+                            let picked = marks
+                                .pick
+                                .is_some_and(|p| p.side.is_none_or(|s| Some(s) == side))
+                                && marks.pick.is_some_and(|p| p.contains(at, kind));
+                            if picked {
+                                paint_picked(ui, r);
+                            }
+                            if ui.rect_contains_pointer(r) {
+                                pick_on_hover(ui, marks, at, side, p, actions);
+                            }
+                        }
                         ui.painter().line_segment(
                             [pos2(mid, rect.top()), pos2(mid, rect.bottom())],
                             Stroke::new(1.0, color::border()),
                         );
                     }
+                    Pair::Comment(b, part) => comment_row(ui, rect, &blocks[b], part, actions),
                 }
             }
         });
@@ -410,17 +625,31 @@ fn selection_bar(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Act
 enum Row {
     Hunk(usize),
     Line(usize, usize),
+    /// Row `.1` of comment block `.0`.
+    Comment(usize, usize),
 }
 
-fn lines(ui: &mut Ui, view: &DiffView, diff: &FileDiff, busy: bool, actions: &mut Vec<Action>) {
-    let rows: Vec<Row> = diff
-        .hunks
-        .iter()
-        .enumerate()
-        .flat_map(|(h, hunk)| {
-            std::iter::once(Row::Hunk(h)).chain((0..hunk.lines.len()).map(move |l| Row::Line(h, l)))
-        })
-        .collect();
+fn lines(
+    ui: &mut Ui,
+    view: &DiffView,
+    diff: &FileDiff,
+    busy: bool,
+    marks: Option<&Marks>,
+    actions: &mut Vec<Action>,
+) {
+    let blocks = blocks(ui, marks, ui.available_width());
+    let mut rows = Vec::new();
+    for (h, hunk) in diff.hunks.iter().enumerate() {
+        rows.push(Row::Hunk(h));
+        for l in 0..hunk.lines.len() {
+            rows.push(Row::Line(h, l));
+            for (b, block) in blocks.iter().enumerate() {
+                if block.at == (h, l) {
+                    rows.extend((0..block.rows).map(|part| Row::Comment(b, part)));
+                }
+            }
+        }
+    }
     let char_width = ui
         .painter()
         .layout_no_wrap("M".to_owned(), theme::mono(), color::text())
@@ -452,6 +681,24 @@ fn lines(ui: &mut Ui, view: &DiffView, diff: &FileDiff, busy: bool, actions: &mu
                 let (rect, _) = ui.allocate_exact_size(vec2(content_width, ROW), Sense::hover());
                 match *row {
                     Row::Hunk(h) => hunk_row(ui, rect, view, diff, h, busy, actions),
+                    Row::Comment(b, part) => comment_row(ui, rect, &blocks[b], part, actions),
+                    Row::Line(h, l) if marks.is_some() => {
+                        let marks = marks.expect("checked");
+                        let line = &diff.hunks[h].lines[l];
+                        let word = view.words.get(h).and_then(|w| w.get(l)).cloned().flatten();
+                        paint_line(ui, rect, line, false, word, text_x, false);
+                        if marks.pick.is_some_and(|p| p.contains((h, l), line.kind)) {
+                            paint_picked(ui, rect);
+                        }
+                        if ui.rect_contains_pointer(rect) && ui.is_rect_visible(rect) {
+                            let p = Pointer {
+                                pressed,
+                                down,
+                                shift,
+                            };
+                            pick_on_hover(ui, marks, (h, l), None, p, actions);
+                        }
+                    }
                     Row::Line(h, l) => {
                         let line = &diff.hunks[h].lines[l];
                         let selected = view.selection.contains(&(h, l));

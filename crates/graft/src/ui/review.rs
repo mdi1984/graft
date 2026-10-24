@@ -1,19 +1,20 @@
 //! The Review tab: what the selected worktree's branch changes against its
 //! base branch (uncommitted work included), with "Viewed" checkboxes and a
-//! progress bar, a side-by-side diff, local notes per file, Open in IDE and
-//! Merge.
+//! progress bar, a side-by-side diff, local comments on lines and files (copied
+//! for a coding agent in one go), Open in IDE and Merge.
 
 use egui::{
-    Align, Frame, Key, Layout, Margin, Panel, Rect, RichText, ScrollArea, Sense, Stroke,
+    Align, Frame, Key, Layout, Margin, Modifiers, Panel, Rect, RichText, ScrollArea, Sense, Stroke,
     StrokeKind, TextEdit, Ui, pos2, vec2,
 };
 use graft_core::review::{Review, ReviewFile};
 use graft_core::status::Change;
 use graft_core::{RepoSnapshot, Worktree, same_path};
 
-use super::diff_view;
+use super::diff_view::{self, Marks};
 use super::history::{paint_change_letter, paint_path};
-use super::widgets::{ButtonKind, button, empty_state, progress_bar, spinner};
+use super::widgets::{Badge, ButtonKind, ahead, button, empty_state, progress_bar, spinner};
+use crate::project::comments::{self, LineComment};
 use crate::project::{Action, Confirm, Project};
 use crate::theme::{self, color};
 
@@ -88,6 +89,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
                 .inner_margin(Margin::symmetric(8, 8)),
         )
         .show(ui, |ui| {
+            comments_bar(ui, project, &wt, &review, actions);
             file_list(ui, project, &review, &uncommitted, actions)
         });
 
@@ -98,12 +100,42 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
     };
     let file = file.clone();
     file_header(ui, project, &wt, &file, actions);
-    notes(ui, project, &file.change.path);
+    let path = file.change.path.as_str();
+    let diff = project.commit_diff.as_ref().and_then(|d| d.diff.as_ref());
+    let (placed, outdated) = match (diff, project.review_state()) {
+        (Some(diff), Some(state)) => {
+            let (placed, outdated) =
+                comments::place(diff, state.comments.iter().filter(|c| c.path == path));
+            let placed: Vec<_> = placed.into_iter().map(|(at, c)| (at, c.id)).collect();
+            let outdated: Vec<LineComment> = outdated.into_iter().cloned().collect();
+            (placed, outdated)
+        }
+        _ => (Vec::new(), Vec::new()),
+    };
+    comment_panel(ui, project, path, &outdated, actions);
     // Side by side only helps when there is an old and a new version.
     let both_sides = !matches!(file.change.change, Change::Added | Change::Deleted);
     let split = both_sides && project.review.as_ref().is_none_or(|v| v.split);
+    let state_comments = project
+        .review_state()
+        .map(|s| s.comments.as_slice())
+        .unwrap_or_default();
+    let marks = Marks {
+        pick: project.review.as_ref().and_then(|v| v.pick),
+        placed: placed
+            .iter()
+            .filter_map(|&(at, id)| Some((at, state_comments.iter().find(|c| c.id == id)?)))
+            .collect(),
+    };
     match &project.commit_diff {
-        Some(diff) => diff_view::body(ui, diff, project.is_operating(), split, actions),
+        Some(diff) => diff_view::body(
+            ui,
+            diff,
+            project.is_operating(),
+            split,
+            Some(&marks),
+            actions,
+        ),
         None => spinner(
             ui,
             ui.available_rect_before_wrap().center(),
@@ -405,8 +437,19 @@ fn file_list(
                     },
                 );
                 let stats_x = rect.right() - 6.0 - stats_galley.size().x;
+                // Comments on this file: a badge left of the stats.
+                let count = project.review_state().map_or(0, |s| {
+                    let note = s.notes.get(path).is_some_and(|n| !n.trim().is_empty());
+                    s.comments.iter().filter(|c| &c.path == path).count() + usize::from(note)
+                });
+                let mut path_right = stats_x - 8.0;
+                if count > 0 {
+                    let badge = Badge::new(ui, count.to_string(), ahead());
+                    path_right -= badge.width() + 6.0;
+                    badge.paint(ui.painter(), path_right + 6.0, y);
+                }
                 let path_x = rect.left() + 48.0;
-                paint_path(ui, path_x, y, path, stats_x - path_x - 8.0);
+                paint_path(ui, path_x, y, path, path_right - path_x);
                 ui.painter().galley(
                     pos2(stats_x, y - stats_galley.size().y / 2.0),
                     stats_galley,
@@ -516,14 +559,202 @@ fn file_header(
                 });
             });
         });
-    // V marks the open file as viewed (unless typing in the notes).
+    // V marks the open file as viewed (unless typing a comment).
     if !ui.ctx().egui_wants_keyboard_input() && ui.input(|i| i.key_pressed(Key::V)) {
         actions.push(Action::ToggleViewed(path));
     }
 }
 
-/// A local note for the open file (never committed or pushed).
-fn notes(ui: &mut Ui, project: &mut Project, path: &str) {
+/// "5 comments  [Copy for agent] [Clear…]" above the file list.
+fn comments_bar(
+    ui: &mut Ui,
+    project: &mut Project,
+    wt: &Worktree,
+    review: &Review,
+    actions: &mut Vec<Action>,
+) {
+    let Some(state) = project.review_state() else {
+        return;
+    };
+    let count = state.comment_count();
+    let mut copied = false;
+    Panel::bottom("review-comments-bar")
+        .frame(Frame::new().inner_margin(Margin {
+            left: 0,
+            right: 0,
+            top: 8,
+            bottom: 0,
+        }))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let label = match count {
+                    0 => "No comments yet".to_owned(),
+                    1 => "1 comment".to_owned(),
+                    n => format!("{n} comments"),
+                };
+                ui.label(
+                    RichText::new(label)
+                        .color(color::text_weak())
+                        .size(theme::SMALL_SIZE),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if button(ui, "Clear…", ButtonKind::Secondary, count > 0)
+                        .on_hover_text("Remove all comments of this review")
+                        .clicked()
+                    {
+                        actions.push(Action::Ask(Box::new(Confirm {
+                            title: "Clear all comments?".to_owned(),
+                            body: format!(
+                                "Removes the {count} comments on {}, e.g. once your agent has \
+                                 addressed them.",
+                                wt.label()
+                            ),
+                            confirm_label: "Clear".to_owned(),
+                            action: Action::ClearReviewComments,
+                        })));
+                    }
+                    if button(ui, "Copy for agent", ButtonKind::Primary, count > 0)
+                        .on_hover_text(
+                            "Copy all comments with file, lines and code as Markdown, to paste \
+                             into your coding agent",
+                        )
+                        .clicked()
+                    {
+                        let title = format!("{} against {}", wt.label(), review.base);
+                        let text = comments::export(&title, &state.notes, &state.comments);
+                        ui.ctx().copy_text(text);
+                        copied = true;
+                    }
+                });
+            });
+        });
+    if copied {
+        project.infos.push(match count {
+            1 => "Copied 1 comment for your agent".to_owned(),
+            n => format!("Copied {n} comments for your agent"),
+        });
+    }
+}
+
+/// Below the diff: the box for a comment on the picked lines (or the one
+/// being edited); else the note on the whole file and outdated comments.
+fn comment_panel(
+    ui: &mut Ui,
+    project: &mut Project,
+    path: &str,
+    outdated: &[LineComment],
+    actions: &mut Vec<Action>,
+) {
+    let Some(view) = &project.review else { return };
+    let diff = project.commit_diff.as_ref().and_then(|d| d.diff.as_ref());
+    let target = match (view.editing, view.pick, diff) {
+        (Some(id), _, _) => project
+            .review_state()
+            .and_then(|s| s.comments.iter().find(|c| c.id == id))
+            .map(|c| format!("Edit comment on {}", c.lines_label().to_lowercase())),
+        (None, Some(pick), Some(diff)) => comments::range(diff, &pick).map(|(side, a, b)| {
+            format!(
+                "Comment on {}",
+                comments::lines_label(side, a, b).to_lowercase()
+            )
+        }),
+        _ => None,
+    };
+    // Esc drops the pick; a typed comment is kept for the next pick.
+    if target.is_some()
+        && !ui.ctx().egui_wants_keyboard_input()
+        && ui.input(|i| i.key_pressed(Key::Escape))
+        && view.draft.trim().is_empty()
+    {
+        actions.push(Action::CancelComment);
+    }
+    match target {
+        Some(title) => comment_editor(ui, project, &title, actions),
+        None => file_note(ui, project, path, outdated, actions),
+    }
+}
+
+fn comment_editor(ui: &mut Ui, project: &mut Project, title: &str, actions: &mut Vec<Action>) {
+    let Some(view) = &mut project.review else {
+        return;
+    };
+    let editing = view.editing;
+    Panel::bottom("review-notes")
+        .frame(
+            Frame::new()
+                .fill(color::sidebar_bg())
+                .inner_margin(Margin::symmetric(12, 8)),
+        )
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(title)
+                        .font(theme::semibold(theme::SMALL_SIZE + 1.0))
+                        .color(color::text()),
+                );
+                ui.label(
+                    RichText::new(
+                        "Shift-click or drag to pick more lines · Ctrl+Enter saves · \
+                         only on this computer",
+                    )
+                    .color(color::text_faint())
+                    .size(theme::SMALL_SIZE),
+                );
+            });
+            // Ctrl+Enter saves; taken before the text box turns it into a newline.
+            let id = ui.make_persistent_id("review-comment-draft");
+            let save_keys = ui.memory(|m| m.has_focus(id))
+                && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter));
+            let response = ui.add(
+                TextEdit::multiline(&mut view.draft)
+                    .id(id)
+                    .hint_text("What should change here, or what is unclear?")
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY),
+            );
+            // Focus once the click that picked the lines is over; else that
+            // click's release takes the focus away again.
+            let pointer_idle = ui.input(|i| !i.pointer.any_down() && !i.pointer.any_released());
+            if view.focus_draft && pointer_idle {
+                view.focus_draft = false;
+                response.request_focus();
+            }
+            let has_text = !view.draft.trim().is_empty();
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                let save = if editing.is_some() {
+                    "Save"
+                } else {
+                    "Add comment"
+                };
+                if button(ui, save, ButtonKind::Primary, has_text).clicked()
+                    || (save_keys && has_text)
+                {
+                    actions.push(Action::SaveComment);
+                }
+                if button(ui, "Cancel", ButtonKind::Secondary, true).clicked() {
+                    actions.push(Action::CancelComment);
+                }
+                if let Some(id) = editing {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if button(ui, "Delete comment", ButtonKind::Secondary, true).clicked() {
+                            actions.push(Action::DeleteComment(id));
+                        }
+                    });
+                }
+            });
+        });
+}
+
+/// A local note on the whole open file, and comments whose lines changed
+/// since (never committed or pushed).
+fn file_note(
+    ui: &mut Ui,
+    project: &mut Project,
+    path: &str,
+    outdated: &[LineComment],
+    actions: &mut Vec<Action>,
+) {
     let has_note = project
         .review_state()
         .and_then(|s| s.notes.get(path))
@@ -537,11 +768,33 @@ fn notes(ui: &mut Ui, project: &mut Project, path: &str) {
                 .inner_margin(Margin::symmetric(12, 6)),
         )
         .show(ui, |ui| {
+            for c in outdated {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("{} · outdated", c.lines_label()))
+                            .color(color::dirty_fg())
+                            .size(theme::SMALL_SIZE),
+                    )
+                    .on_hover_text("These lines changed since the comment. It is still copied.");
+                    let text = c.text.lines().next().unwrap_or_default();
+                    if ui
+                        .add(
+                            egui::Label::new(RichText::new(text).color(color::text_mid()))
+                                .truncate()
+                                .sense(Sense::click()),
+                        )
+                        .on_hover_text("Edit or delete")
+                        .clicked()
+                    {
+                        actions.push(Action::EditComment(c.id));
+                    }
+                });
+            }
             ui.horizontal(|ui| {
                 let title = match (open, has_note) {
-                    (true, _) => "Hide note",
-                    (false, true) => "Show note",
-                    (false, false) => "+ Add a note",
+                    (true, _) => "Hide file comment",
+                    (false, true) => "Show file comment",
+                    (false, false) => "+ Comment on the whole file",
                 };
                 if ui
                     .add(
@@ -557,7 +810,7 @@ fn notes(ui: &mut Ui, project: &mut Project, path: &str) {
                     open = !open;
                 }
                 ui.label(
-                    RichText::new("Only on this computer; never committed.")
+                    RichText::new("Click a line in the diff to comment on it, drag for several.")
                         .color(color::text_faint())
                         .size(theme::SMALL_SIZE),
                 );
