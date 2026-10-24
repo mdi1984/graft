@@ -1,7 +1,7 @@
 //! Left sidebar: WORKSPACE, WORKTREES, BRANCHES, then collapsible REMOTES and
 //! TAGS, and STASHES.
 
-use egui::{Id, Rect, Response, ScrollArea, Sense, Ui, pos2, vec2};
+use egui::{Id, Rect, Response, ScrollArea, Sense, Stroke, Ui, pos2, vec2};
 use graft_core::{Branch, RemoteBranch, RepoSnapshot, Upstream, Worktree, same_path};
 
 use super::icons::Icon;
@@ -16,6 +16,8 @@ use crate::theme::{self, color};
 
 const SECTION_GAP: f32 = 14.0;
 const PAD_X: f32 = 8.0;
+/// How far each folder level indents its rows.
+const NEST: f32 = 14.0;
 
 pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
     let Some(repo) = &project.snapshot else {
@@ -69,15 +71,25 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
 
             if collapsible(ui, "BRANCHES", repo.branches.len(), true) {
                 let head = current.and_then(|wt| wt.branch.as_deref());
-                for branch in &repo.branches {
-                    let response = branch_row(ui, repo, branch, head);
-                    if response.double_clicked() {
-                        actions.extend(open_branch(project, repo, &branch.name));
-                    } else if response.clicked() {
-                        actions.push(Action::Reveal(branch.target));
-                    }
-                    response.context_menu(|ui| branch_menu(ui, project, branch, head, actions));
-                }
+                let branches: Vec<&Branch> = repo.branches.iter().collect();
+                let is_head = |b: &Branch| head == Some(b.name.as_str());
+                grouped(
+                    ui,
+                    Id::unique("branch-folders"),
+                    &branches,
+                    &|b| b.name.as_str(),
+                    &is_head,
+                    Level::top(PAD_X - 4.0),
+                    &mut |ui, branch, label, indent| {
+                        let response = branch_row(ui, repo, branch, label, indent, head);
+                        if response.double_clicked() {
+                            actions.extend(open_branch(project, repo, &branch.name));
+                        } else if response.clicked() {
+                            actions.push(Action::Reveal(branch.target));
+                        }
+                        response.context_menu(|ui| branch_menu(ui, project, branch, head, actions));
+                    },
+                );
                 if repo.branches.is_empty() {
                     faint_row(ui, "No branches yet");
                 }
@@ -109,6 +121,106 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
                 actions.push(Action::SetTab(Tab::Stashes));
             }
         });
+}
+
+/// Where [`grouped`] is in the folder tree.
+#[derive(Clone, Copy)]
+struct Level {
+    /// Bytes of the name the folders above already show (`feature/`).
+    skip: usize,
+    /// Left edge of this level's rows.
+    indent: f32,
+}
+
+impl Level {
+    fn top(indent: f32) -> Self {
+        Self { skip: 0, indent }
+    }
+}
+
+/// Rows nested by the `/` prefixes of their names: `feature/foo` and
+/// `feature/bar` sit in a foldable `feature` folder as `foo` and `bar`.
+/// `items` must be sorted by name, as git lists refs, so that each folder's
+/// items are next to each other. Plain names come first, then the folders.
+/// `marked` items light up a folded folder (the current branch).
+#[allow(clippy::too_many_arguments)]
+fn grouped<'a, T>(
+    ui: &mut Ui,
+    id: Id,
+    items: &[&'a T],
+    name: &dyn Fn(&T) -> &str,
+    marked: &dyn Fn(&T) -> bool,
+    level: Level,
+    leaf: &mut dyn FnMut(&mut Ui, &'a T, &str, f32),
+) {
+    for &item in items {
+        let rest = &name(item)[level.skip..];
+        if !rest.contains('/') {
+            leaf(ui, item, rest, level.indent);
+        }
+    }
+    let mut i = 0;
+    while i < items.len() {
+        let full = name(items[i]);
+        let Some((folder, _)) = full[level.skip..].split_once('/') else {
+            i += 1;
+            continue;
+        };
+        let prefix = &full[..level.skip + folder.len() + 1];
+        let n = items[i..]
+            .iter()
+            .take_while(|item| name(item).starts_with(prefix))
+            .count();
+        let run = &items[i..i + n];
+        let has_mark = run.iter().any(|item| marked(item));
+        if folder_row(ui, id.with(prefix), folder, n, level.indent, has_mark) {
+            let inner = Level {
+                skip: prefix.len(),
+                indent: level.indent + NEST,
+            };
+            grouped(ui, id, run, name, marked, inner, leaf);
+        }
+        i += n;
+    }
+}
+
+/// A branch folder that folds its branches; open until folded, and it stays
+/// the way it was left. Highlighted while folded over the current branch.
+fn folder_row(ui: &mut Ui, id: Id, name: &str, count: usize, indent: f32, marked: bool) -> bool {
+    let mut open = ui.data_mut(|d| *d.get_persisted_mut_or(id, true));
+    let (rect, response) = row(ui, 24.0);
+    let painter = ui.painter();
+    paint_row_bg(painter, rect, &response, marked && !open);
+    let y = rect.center().y;
+    let chevron = if open {
+        Icon::ChevronDown
+    } else {
+        Icon::ChevronRight
+    };
+    let chevron_rect =
+        Rect::from_center_size(pos2(rect.left() + indent + 7.0, y), vec2(10.0, 10.0));
+    super::icons::paint(painter, chevron_rect, chevron, color::text_faint());
+    let folder_rect =
+        Rect::from_center_size(pos2(rect.left() + indent + 21.0, y), vec2(12.0, 12.0));
+    super::icons::paint(painter, folder_rect, Icon::Folder, color::text_weak());
+
+    let count = painter.layout_no_wrap(count.to_string(), theme::small(), color::text_faint());
+    let count_x = rect.right() - PAD_X - count.size().x;
+    paint_galley_left(painter, count_x, y, count, color::text_faint());
+    let x = rect.left() + indent + 32.0;
+    let label = elided(
+        ui,
+        name,
+        theme::mono(),
+        color::text_mid(),
+        count_x - 6.0 - x,
+    );
+    paint_galley_left(ui.painter(), x, y, label, color::text_mid());
+    if response.clicked() {
+        open = !open;
+        ui.data_mut(|d| d.insert_persisted(id, open));
+    }
+    open
 }
 
 fn row(ui: &mut Ui, height: f32) -> (Rect, Response) {
@@ -606,9 +718,17 @@ fn tag_menu(ui: &mut Ui, repo: &RepoSnapshot, tag: &str, busy: bool, actions: &m
     }
 }
 
-/// A local branch. Green: checked out in the main folder. Orange: checked out
-/// in a linked worktree. Highlighted: the selected worktree's branch.
-fn branch_row(ui: &mut Ui, repo: &RepoSnapshot, branch: &Branch, head: Option<&str>) -> Response {
+/// A local branch, shown as `label` (its name without the folders above).
+/// Green: checked out in the main folder. Orange: checked out in a linked
+/// worktree. Highlighted: the selected worktree's branch.
+fn branch_row(
+    ui: &mut Ui,
+    repo: &RepoSnapshot,
+    branch: &Branch,
+    label: &str,
+    indent: f32,
+    head: Option<&str>,
+) -> Response {
     let (rect, response) = row(ui, 26.0);
     let painter = ui.painter();
     let is_head = head == Some(branch.name.as_str());
@@ -628,7 +748,7 @@ fn branch_row(ui: &mut Ui, repo: &RepoSnapshot, branch: &Branch, head: Option<&s
     } else {
         color::ahead_fg()
     };
-    painter.circle_filled(pos2(rect.left() + PAD_X + 3.0, y), 3.0, dot);
+    painter.circle_filled(pos2(rect.left() + indent + 7.0, y), 3.0, dot);
 
     let meta = match &branch.upstream {
         Upstream::None => "local".to_owned(),
@@ -646,13 +766,13 @@ fn branch_row(ui: &mut Ui, repo: &RepoSnapshot, branch: &Branch, head: Option<&s
     let meta_x = rect.right() - PAD_X - meta.size().x;
     paint_galley_left(painter, meta_x, y, meta, color::text_weak());
 
-    let text_x = rect.left() + PAD_X + 14.0;
+    let text_x = rect.left() + indent + 18.0;
     let fg = if in_main {
         color::accent()
     } else {
         color::text()
     };
-    let name = elided(ui, &branch.name, theme::mono(), fg, meta_x - 6.0 - text_x);
+    let name = elided(ui, label, theme::mono(), fg, meta_x - 6.0 - text_x);
     paint_galley_left(painter, text_x, y, name, fg);
 
     let tip = match &branch.upstream {
@@ -663,6 +783,11 @@ fn branch_row(ui: &mut Ui, repo: &RepoSnapshot, branch: &Branch, head: Option<&s
             ahead,
             behind,
         } => format!("Tracks {name} · {ahead} ahead, {behind} behind"),
+    };
+    let tip = if label.len() < branch.name.len() {
+        format!("{}\n{tip}", branch.name)
+    } else {
+        tip
     };
     let tip = match checked_out {
         Some(wt) if wt.is_main => format!("{tip}\nChecked out in your main folder"),
@@ -740,39 +865,74 @@ fn remotes(
                 ui.separator();
                 menu_item(ui, "Add remote…", !busy, actions, add.clone());
             });
-        for branch in repo
+        let branches: Vec<&RemoteBranch> = repo
             .remote_branches
             .iter()
             .filter(|b| b.remote == remote.name)
-        {
-            let response = simple_row(
-                ui,
-                Icon::ChevronRight,
-                branch.branch_name(),
-                color::text_weak(),
-                26.0,
-            );
-            if response.double_clicked() {
-                let local = branch.branch_name();
-                if repo.branch(local).is_some() {
-                    actions.extend(open_branch(project, repo, local));
-                } else if !busy {
-                    actions.push(Action::CheckoutRemote {
-                        local: local.to_owned(),
-                        remote: branch.name.clone(),
-                    });
-                }
-            } else if response.clicked() {
-                actions.push(Action::Reveal(branch.target));
-            }
-            response
-                .context_menu(|ui| remote_branch_menu(ui, project, repo, branch, busy, actions));
-        }
+            .collect();
+        grouped(
+            ui,
+            Id::unique(("remote-folders", &remote.name)),
+            &branches,
+            &|b| b.branch_name(),
+            &|_| false,
+            Level::top(22.0),
+            &mut |ui, branch, label, indent| {
+                remote_branch_row(ui, project, repo, branch, label, indent, busy, actions)
+            },
+        );
     }
     let response = simple_row(ui, Icon::Plus, "Add remote…", color::text_weak(), 8.0);
     if response.clicked() && !busy {
         actions.push(add);
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn remote_branch_row(
+    ui: &mut Ui,
+    project: &Project,
+    repo: &RepoSnapshot,
+    branch: &RemoteBranch,
+    label: &str,
+    indent: f32,
+    busy: bool,
+    actions: &mut Vec<Action>,
+) {
+    let (rect, response) = row(ui, 24.0);
+    paint_row_bg(ui.painter(), rect, &response, false);
+    let y = rect.center().y;
+    let dot = pos2(rect.left() + indent + 7.0, y);
+    ui.painter()
+        .circle_stroke(dot, 2.5, Stroke::new(1.0, color::text_weak()));
+    let x = rect.left() + indent + 18.0;
+    let name = elided(
+        ui,
+        label,
+        theme::mono(),
+        color::text(),
+        rect.right() - PAD_X - x,
+    );
+    paint_galley_left(ui.painter(), x, y, name, color::text());
+    let response = if label.len() < branch.branch_name().len() {
+        response.on_hover_text(&branch.name)
+    } else {
+        response
+    };
+    if response.double_clicked() {
+        let local = branch.branch_name();
+        if repo.branch(local).is_some() {
+            actions.extend(open_branch(project, repo, local));
+        } else if !busy {
+            actions.push(Action::CheckoutRemote {
+                local: local.to_owned(),
+                remote: branch.name.clone(),
+            });
+        }
+    } else if response.clicked() {
+        actions.push(Action::Reveal(branch.target));
+    }
+    response.context_menu(|ui| remote_branch_menu(ui, project, repo, branch, busy, actions));
 }
 
 /// An icon and a name, indented by `indent`.
