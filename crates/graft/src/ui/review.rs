@@ -129,6 +129,9 @@ fn header(
     actions: &mut Vec<Action>,
 ) {
     let busy = project.is_operating();
+    // Not enough room for everything on one line: the numbers and the
+    // progress bar move to a second line instead of running under the buttons.
+    let one_line = ui.available_width() > ONE_LINE_WIDTH;
     ui.horizontal(|ui| {
         let base = project.review_state().and_then(|s| s.base.clone());
         base_picker(
@@ -138,29 +141,9 @@ fn header(
             base.as_deref().or(Some(&review.base)),
             actions,
         );
-        let commits = match review.commits {
-            1 => "1 commit".to_owned(),
-            n => format!("{n} commits"),
-        };
-        let files = match review.files.len() {
-            1 => "1 file".to_owned(),
-            n => format!("{n} files"),
-        };
-        ui.label(
-            RichText::new(format!("{commits} · {files}"))
-                .color(color::TEXT_WEAK)
-                .size(theme::SMALL_SIZE),
-        );
-        ui.label(
-            RichText::new(format!("+{}", review.added()))
-                .color(color::ADDED)
-                .size(theme::SMALL_SIZE),
-        );
-        ui.label(
-            RichText::new(format!("−{}", review.removed()))
-                .color(color::REMOVED)
-                .size(theme::SMALL_SIZE),
-        );
+        if one_line {
+            stats(ui, review);
+        }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             merge_button(ui, snap, wt, review, busy, actions);
@@ -194,22 +177,67 @@ fn header(
                     Action::PreviewInMain(wt.path.clone())
                 });
             }
-            let total = review.files.len();
-            ui.label(
-                RichText::new(format!("{viewed} of {total} viewed"))
-                    .color(if viewed == total {
-                        color::ADDED
-                    } else {
-                        color::TEXT_WEAK
-                    })
-                    .size(theme::SMALL_SIZE),
-            );
-            ui.add_space(4.0);
-            ui.vertical(|ui| {
-                ui.add_space(13.0);
-                progress_bar(ui, Some(viewed as f32 / total.max(1) as f32), 140.0);
+            if one_line {
+                progress(ui, review, viewed);
+            }
+        });
+    });
+    if !one_line {
+        ui.horizontal(|ui| {
+            stats(ui, review);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                progress(ui, review, viewed);
             });
         });
+    }
+}
+
+/// Header width below which it takes two lines.
+const ONE_LINE_WIDTH: f32 = 1240.0;
+
+/// "12 commits · 30 files  +120 −45".
+fn stats(ui: &mut Ui, review: &Review) {
+    let commits = match review.commits {
+        1 => "1 commit".to_owned(),
+        n => format!("{n} commits"),
+    };
+    let files = match review.files.len() {
+        1 => "1 file".to_owned(),
+        n => format!("{n} files"),
+    };
+    ui.label(
+        RichText::new(format!("{commits} · {files}"))
+            .color(color::TEXT_WEAK)
+            .size(theme::SMALL_SIZE),
+    );
+    ui.label(
+        RichText::new(format!("+{}", review.added()))
+            .color(color::ADDED)
+            .size(theme::SMALL_SIZE),
+    );
+    ui.label(
+        RichText::new(format!("−{}", review.removed()))
+            .color(color::REMOVED)
+            .size(theme::SMALL_SIZE),
+    );
+}
+
+/// "3 of 30 viewed" and a progress bar, laid out right to left.
+fn progress(ui: &mut Ui, review: &Review, viewed: usize) {
+    let total = review.files.len();
+    ui.label(
+        RichText::new(format!("{viewed} of {total} viewed"))
+            .color(if viewed == total {
+                color::ADDED
+            } else {
+                color::TEXT_WEAK
+            })
+            .size(theme::SMALL_SIZE),
+    );
+    ui.add_space(4.0);
+    ui.vertical(|ui| {
+        ui.add_space(13.0);
+        progress_bar(ui, Some(viewed as f32 / total.max(1) as f32), 140.0);
     });
 }
 

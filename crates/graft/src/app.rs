@@ -705,6 +705,7 @@ impl eframe::App for GraftApp {
         }
 
         self.toasts.show(&ctx);
+        ui::window_frame::resize_edges(&ctx);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
