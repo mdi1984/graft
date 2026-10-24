@@ -3,6 +3,7 @@
 //! [`Action`]s; nothing here blocks on git.
 
 mod changes;
+mod worktrees;
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -15,11 +16,13 @@ use graft_core::diff::FileDiff;
 use graft_core::history::{self, Commits, History};
 use graft_core::jobs::JobPool;
 use graft_core::ops::LineOp;
+use graft_core::watch::Watcher;
 use graft_core::{
     CancelToken, Console, Git, Oid, RepoSnapshot, Worktree, null_oid, same_path, snapshot,
 };
 
 pub use changes::{CommitForm, Confirm, DiffView, FileKey, Highlights, Operation, RemoteOp};
+pub use worktrees::{BranchMode, NewWorktreeForm, checkout_choices, open_terminal};
 
 /// Commits loaded into the graph. Enough for years of history in big repos.
 const HISTORY_LIMIT: usize = 100_000;
@@ -97,6 +100,24 @@ pub enum Action {
     OpenPath(String),
     /// Show a file of the selected worktree in Explorer.
     RevealPath(String),
+
+    // Worktrees
+    /// Open the New worktree dialog, optionally to check out this branch.
+    NewWorktree(Option<String>),
+    CloseNewWorktree,
+    BrowseWorktreeFolder,
+    CreateWorktree,
+    RemoveWorktree {
+        path: PathBuf,
+        force: bool,
+    },
+    LockWorktree {
+        path: PathBuf,
+        locked: bool,
+    },
+    PruneWorktrees,
+    OpenTerminal(PathBuf),
+    OpenFolder(PathBuf),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -131,8 +152,11 @@ enum Event {
     LastMessage(Option<String>),
     OpDone {
         then: changes::Then,
-        result: Result<(), String>,
+        result: Result<Option<String>, String>,
     },
+    /// The file watcher saw a change that matters.
+    Changed,
+    PickedFolder(Option<PathBuf>),
 }
 
 pub struct Project {
@@ -179,6 +203,13 @@ pub struct Project {
     pub notices: Vec<String>,
     /// Confirmations for the app to show as toasts.
     pub infos: Vec<String>,
+
+    pub new_worktree: Option<NewWorktreeForm>,
+    /// Select this worktree once a snapshot has it (just created).
+    pending_open: Option<PathBuf>,
+    watcher: Option<Watcher>,
+    /// The folders `watcher` was asked to watch.
+    watched: Vec<PathBuf>,
 }
 
 impl Project {
@@ -225,6 +256,10 @@ impl Project {
             confirm: None,
             notices: Vec::new(),
             infos: Vec::new(),
+            new_worktree: None,
+            pending_open: None,
+            watcher: None,
+            watched: Vec::new(),
         };
         project.refresh();
         project
@@ -264,6 +299,12 @@ impl Project {
                 Event::Diff { generation, result } => self.on_diff(generation, result),
                 Event::LastMessage(message) => self.on_last_message(message),
                 Event::OpDone { then, result } => self.on_op_done(then, result),
+                Event::Changed => {
+                    if !self.is_operating() {
+                        self.refresh();
+                    }
+                }
+                Event::PickedFolder(folder) => self.on_picked_folder(folder),
                 Event::Details(id, result) => {
                     if self.selected == Some(id) {
                         match result {
@@ -308,6 +349,18 @@ impl Project {
                     self.load_history(false);
                 }
                 self.sync_file_selection();
+                self.sync_watcher();
+                if let Some(path) = self.pending_open.take() {
+                    if self
+                        .snapshot
+                        .as_ref()
+                        .is_some_and(|s| s.worktrees.iter().any(|wt| same_path(&wt.path, &path)))
+                    {
+                        self.open_worktree(path);
+                    } else {
+                        self.pending_open = Some(path);
+                    }
+                }
             }
             Err(e) => {
                 if self.snapshot.is_none() {
@@ -415,28 +468,49 @@ impl Project {
         });
     }
 
+    /// Select a worktree: a dirty one opens File status, a clean one History.
+    fn open_worktree(&mut self, path: PathBuf) {
+        self.nav.worktree = path;
+        self.nav.tab = Tab::Workspace;
+        let dirty = self.worktree().is_some_and(|wt| wt.dirty() > 0);
+        self.nav.view = if dirty {
+            WorkspaceView::FileStatus
+        } else {
+            WorkspaceView::History
+        };
+        if let Some(snap) = &self.snapshot {
+            self.labels = build_labels(snap, &self.nav.worktree);
+        }
+        if self.history.is_some() && self.worktree_parent() != self.history_parent {
+            self.load_history(false);
+        } else {
+            self.select_head();
+        }
+        self.diff_view = None;
+        self.commit_form = CommitForm::default();
+        self.sync_file_selection();
+    }
+
     pub fn apply(&mut self, action: Action) {
         match action {
-            Action::OpenWorktree(path) => {
-                self.nav.worktree = path;
-                self.nav.tab = Tab::Workspace;
-                let dirty = self.worktree().is_some_and(|wt| wt.dirty() > 0);
-                self.nav.view = if dirty {
-                    WorkspaceView::FileStatus
-                } else {
-                    WorkspaceView::History
-                };
-                if let Some(snap) = &self.snapshot {
-                    self.labels = build_labels(snap, &self.nav.worktree);
+            Action::OpenWorktree(path) => self.open_worktree(path),
+            Action::NewWorktree(branch) => self.open_worktree_form(branch),
+            Action::CloseNewWorktree => {
+                if !self.new_worktree.as_ref().is_some_and(|f| f.creating) {
+                    self.new_worktree = None;
                 }
-                if self.history.is_some() && self.worktree_parent() != self.history_parent {
-                    self.load_history(false);
-                } else {
-                    self.select_head();
+            }
+            Action::BrowseWorktreeFolder => self.browse_worktree_folder(),
+            Action::CreateWorktree => self.create_worktree(),
+            Action::RemoveWorktree { path, force } => self.remove_worktree(path, force),
+            Action::LockWorktree { path, locked } => self.lock_worktree(path, locked),
+            Action::PruneWorktrees => self.prune_worktrees(),
+            Action::OpenTerminal(dir) => open_terminal(&dir),
+            Action::OpenFolder(dir) => {
+                if let Err(e) = open::that_detached(&dir) {
+                    self.notices
+                        .push(format!("Could not open {}: {e}", dir.display()));
                 }
-                self.diff_view = None;
-                self.commit_form = CommitForm::default();
-                self.sync_file_selection();
             }
             Action::ShowFileStatus => {
                 self.nav.tab = Tab::Workspace;

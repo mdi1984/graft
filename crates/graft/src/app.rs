@@ -493,6 +493,11 @@ impl GraftApp {
         if let Some(confirm) = &project.confirm {
             ui::confirm::show(ui.ctx(), confirm, &mut actions);
         }
+        let project = &mut self.projects[index];
+        if let (Some(form), Some(snap)) = (&mut project.new_worktree, &project.snapshot) {
+            ui::new_worktree::show(ui.ctx(), form, snap, &mut actions);
+        }
+        let project = &self.projects[index];
         let bar = |margin| Frame::new().fill(color::BAR_BG).inner_margin(margin);
 
         Panel::top("toolbar")

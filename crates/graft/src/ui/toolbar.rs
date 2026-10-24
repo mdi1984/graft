@@ -51,7 +51,13 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>, search: &
         if tool_button(ui, None, "Stash", None, Tone::Normal).clicked() {
             actions.push(Action::SetTab(Tab::Stashes));
         }
-        tool_button(ui, None, "New worktree", None, Tone::Normal).on_hover_text(LATER);
+        if tool_button(ui, None, "New worktree", None, Tone::Normal)
+            .on_hover_text("Check out a branch in a second folder")
+            .clicked()
+            && !busy
+        {
+            actions.push(Action::NewWorktree(None));
+        }
         toolbar_divider(ui);
 
         tool_button(ui, None, "Preview in main", None, Tone::Normal).on_hover_text(LATER);
