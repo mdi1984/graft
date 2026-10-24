@@ -1879,7 +1879,7 @@ dependencies = [
 
 [[package]]
 name = "graft"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -1903,7 +1903,7 @@ dependencies = [
 
 [[package]]
 name = "graft-core"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -2055,7 +2055,7 @@ dependencies = [
 
 [[package]]
 name = "icon-gen"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "ico",
  "resvg",
