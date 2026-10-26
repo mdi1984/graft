@@ -31,11 +31,17 @@ pub fn by_setup(key: &str, exe: &Path) -> bool {
     }
 }
 
-/// Make the record name `version` when it is about `exe`. Updates that only
-/// swapped the program file (Graft 1.0.1 and older did) left the old
-/// version there. Returns whether it changed anything.
+/// Make the record name `version` when it is about `exe` and names an older
+/// one. Updates that only swapped the program file (Graft 1.0.1 and older
+/// did) left the old version there. A newer one stays: a setup is updating
+/// this copy and has already written it. Returns whether it changed anything.
 pub fn record_version(key: &str, exe: &Path, version: &str) -> bool {
-    if !by_setup(key, exe) || self::version(key).as_deref() == Some(version) {
+    if !by_setup(key, exe) {
+        return false;
+    }
+    if let Some(recorded) = self::version(key)
+        && numbers(&recorded) >= numbers(version)
+    {
         return false;
     }
     match reg::set(key, "DisplayVersion", version) {
@@ -45,6 +51,15 @@ pub fn record_version(key: &str, exe: &Path, version: &str) -> bool {
             false
         }
     }
+}
+
+/// "1.0.10" as [1, 0, 10], so versions compare by number; anything that is
+/// not a number counts as 0.
+fn numbers(version: &str) -> Vec<u64> {
+    version
+        .split('.')
+        .map(|part| part.trim().parse().unwrap_or(0))
+        .collect()
 }
 
 /// Strings under HKEY_CURRENT_USER.
@@ -190,5 +205,10 @@ mod tests {
         assert!(record_version(&record.0, &exe, "1.0.2"));
         assert_eq!(version(&record.0).as_deref(), Some("1.0.2"));
         assert!(!record_version(&record.0, &exe, "1.0.2"), "already right");
+        reg::set(&record.0, "DisplayVersion", "1.0.10").unwrap();
+        assert!(!record_version(&record.0, &exe, "1.0.9"), "newer stays");
+        assert_eq!(version(&record.0).as_deref(), Some("1.0.10"));
+        assert!(record_version(&record.0, &exe, "1.0.11"));
+        assert_eq!(version(&record.0).as_deref(), Some("1.0.11"));
     }
 }

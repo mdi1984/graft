@@ -60,7 +60,7 @@ fn main() -> eframe::Result {
         }
     });
 
-    let options = eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Graft")
             .with_inner_size([1440.0, 900.0])
@@ -68,16 +68,14 @@ fn main() -> eframe::Result {
             // Graft draws its own title bar (see ui::window_frame).
             .with_decorations(false)
             .with_icon(window_icon()),
-        // A blocking vsync makes the window trail the mouse while resizing.
-        // On Windows, frames wait for the compositor instead (see
-        // `GraftApp::pace_frame`).
-        glow_options: eframe::egui_glow::GlowConfiguration {
-            vsync: !cfg!(windows),
-            ..Default::default()
-        },
+        // DirectX 12 through wgpu. With OpenGL, some drivers (Intel Arc)
+        // stalled for up to two seconds when the window was maximized or
+        // restored.
+        renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
-    eframe::run_native(
+    configure_gpu(&mut options.wgpu_options);
+    let result = eframe::run_native(
         "Graft",
         options,
         Box::new(move |cc| {
@@ -87,7 +85,39 @@ fn main() -> eframe::Result {
             native::style_window(cc);
             Ok(Box::new(app))
         }),
-    )
+    );
+    // Release builds have no console, so say why Graft could not start.
+    if let Err(e) = &result {
+        native::show_error("Graft could not start", &e.to_string());
+    }
+    result
+}
+
+/// Adjust egui's DirectX 12 setup.
+fn configure_gpu(options: &mut eframe::WgpuConfiguration) {
+    let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_setup else {
+        return;
+    };
+    // A git GUI needs no dedicated GPU: on laptops with two, stay on the
+    // integrated one and spare the battery.
+    setup.power_preference = wgpu::PowerPreference::LowPower;
+    // The shader compiler that comes with Windows. The newer one is looked
+    // up by name, so a dxcompiler.dll in the working folder (a cloned
+    // repository, say) or on PATH would be loaded.
+    setup
+        .instance_descriptor
+        .backend_options
+        .dx12
+        .shader_compiler = wgpu::Dx12Compiler::Fxc;
+    // egui asks for at most 8192 px, and a window wider than that (across
+    // several monitors) would crash; ask for what the GPU can do.
+    let device = Arc::clone(&setup.device_descriptor);
+    setup.device_descriptor = Arc::new(move |adapter| {
+        let mut descriptor = device(adapter);
+        descriptor.required_limits.max_texture_dimension_2d =
+            adapter.limits().max_texture_dimension_2d;
+        descriptor
+    });
 }
 
 fn window_icon() -> egui::IconData {
