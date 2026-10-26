@@ -39,9 +39,11 @@ jobs:
           "VERSION=$version" | Out-File -Append $env:GITHUB_ENV
 
       # Release mode reuses the cached release build; CI already ran the
-      # tests in debug mode on this commit.
+      # tests in debug mode on this commit. Not --workspace: icon-gen has no
+      # tests, and building it alongside changes the features of shared
+      # crates (gix, wgpu, egui), so they would all compile again.
       - name: Tests
-        run: cargo test --workspace --release --locked
+        run: cargo test --release --locked -p graft -p graft-core
 
       - name: Build
         run: cargo build --release --locked -p graft
