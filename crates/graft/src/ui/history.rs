@@ -65,7 +65,13 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
             .exact_size((height * 0.55).max(160.0))
             .frame(Frame::new().fill(color::app_bg()))
             .show(ui, |ui| {
-                diff_view::show_view(ui, view, project.is_operating(), actions)
+                diff_view::show_view(
+                    ui,
+                    view,
+                    project.is_operating(),
+                    project.settings.wrap_lines,
+                    actions,
+                )
             });
     }
     commit_list(ui, project, history, actions);
