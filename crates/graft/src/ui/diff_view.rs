@@ -1,14 +1,16 @@
 //! The diff of the selected file in File status: hunks with Stage / Unstage /
 //! Discard buttons, line numbers, word highlights, and per-line selection
 //! ("N lines selected → Stage lines"). In Review, lines are picked to comment
-//! on and comments show under the lines they are about.
+//! on and comments show under the lines they are about. With wrapping on,
+//! a long line takes as many rows as it needs instead of scrolling sideways.
 
 use std::sync::Arc;
 
-use egui::text::{CCursor, LayoutJob, TextFormat};
+use egui::style::ScrollStyle;
+use egui::text::{LayoutJob, TextFormat};
 use egui::{
-    Align2, Color32, Frame, Galley, Key, Margin, Painter, Panel, Rect, RichText, ScrollArea, Sense,
-    Stroke, StrokeKind, Ui, pos2, vec2,
+    Align, Align2, Color32, Frame, Galley, Key, Margin, Painter, Panel, Pos2, Rect, RichText,
+    ScrollArea, Sense, Stroke, StrokeKind, Ui, pos2, vec2,
 };
 use graft_core::diff::{FileDiff, Kind, Source};
 use graft_core::ops::LineOp;
@@ -55,19 +57,33 @@ fn token_color(token: Token) -> Color32 {
 }
 
 /// A line of code with its syntax colors; text without a token is `plain`.
+/// With `wrap`, the line breaks into rows no wider than that, each one
+/// [`ROW`] tall.
 fn code_galley(
     painter: &Painter,
     text: String,
     spans: Option<&Spans>,
     plain: Color32,
+    wrap: Option<f32>,
 ) -> Arc<Galley> {
-    let Some(spans) = spans.filter(|s| !s.is_empty()) else {
+    let spans = spans.filter(|s| !s.is_empty());
+    if spans.is_none() && wrap.is_none() {
         return painter.layout_no_wrap(text, theme::mono(), plain);
+    }
+    let format = |c| {
+        let mut format = TextFormat::simple(theme::mono(), c);
+        if wrap.is_some() {
+            format.line_height = Some(ROW);
+            format.valign = Align::Center;
+        }
+        format
     };
-    let format = |c| TextFormat::simple(theme::mono(), c);
     let mut job = LayoutJob::default();
+    if let Some(width) = wrap {
+        job.wrap.max_width = width;
+    }
     let mut pos = 0;
-    for (range, token) in spans {
+    for (range, token) in spans.into_iter().flatten() {
         let (Some(before), Some(part)) = (text.get(pos..range.start), text.get(range.clone()))
         else {
             continue;
@@ -78,6 +94,87 @@ fn code_galley(
     }
     job.append(text.get(pos..).unwrap_or_default(), 0.0, format(plain));
     painter.layout_job(job)
+}
+
+/// The changed words of a line: a stronger tint behind them, on every row
+/// they cover. `range` is in bytes of `text`.
+fn paint_word(
+    painter: &Painter,
+    galley: &Galley,
+    origin: Pos2,
+    text: &str,
+    range: std::ops::Range<usize>,
+    tint: Color32,
+) {
+    let start = text[..range.start].chars().count();
+    let end = text[..range.end].chars().count();
+    let mut index = 0;
+    for row in &galley.rows {
+        let mut span: Option<(f32, f32)> = None;
+        for glyph in &row.glyphs {
+            if (start..end).contains(&index) {
+                let (left, right) = (glyph.pos.x, glyph.pos.x + glyph.advance_width);
+                span = Some(span.map_or((left, right), |(l, r)| (l.min(left), r.max(right))));
+            }
+            index += 1;
+        }
+        if let Some((left, right)) = span {
+            let top = origin.y + row.pos.y + 1.0;
+            let bottom = origin.y + row.pos.y + row.size.y - 1.0;
+            let r = Rect::from_min_max(
+                pos2(origin.x + row.pos.x + left, top),
+                pos2(origin.x + row.pos.x + right, bottom),
+            );
+            painter.rect_filled(r, 2, color::app_bg().lerp_to_gamma(tint, 0.35));
+        }
+    }
+}
+
+/// How many rows a line takes when wrapped at `width` (one without wrapping).
+fn line_rows(
+    painter: &Painter,
+    view: &DiffView,
+    diff: &FileDiff,
+    at: (usize, usize),
+    width: Option<f32>,
+    char_width: f32,
+) -> usize {
+    let Some(width) = width else {
+        return 1;
+    };
+    let line = &diff.hunks[at.0].lines[at.1];
+    // Tabs show as four spaces; anything shorter than the row fits for sure.
+    let tabs = line.content.iter().filter(|&&b| b == b'\t').count();
+    if (line.content.len() + 3 * tabs) as f32 * char_width <= width {
+        return 1;
+    }
+    let (text, _) = shown(line.text());
+    let spans = spans_at(view, at.0, at.1);
+    code_galley(painter, text, spans, color::text(), Some(width))
+        .rows
+        .len()
+        .max(1)
+}
+
+/// Diff scroll bars always show and take their own room, so they are easy
+/// to find and dragging them never lands on a line.
+fn diff_scroll_style(ui: &mut Ui) {
+    ui.spacing_mut().scroll = ScrollStyle {
+        bar_width: 8.0,
+        ..ScrollStyle::solid()
+    };
+    // The handle uses the widget fills, which barely show on the background.
+    let widgets = &mut ui.visuals_mut().widgets;
+    widgets.inactive.bg_fill = color::text_faint().gamma_multiply(0.6);
+    widgets.hovered.bg_fill = color::text_weak();
+    widgets.active.bg_fill = color::text_weak();
+}
+
+fn char_width(ui: &Ui) -> f32 {
+    ui.painter()
+        .layout_no_wrap("M".to_owned(), theme::mono(), color::text())
+        .size()
+        .x
 }
 
 fn spans_at(view: &DiffView, h: usize, l: usize) -> Option<&Spans> {
@@ -212,11 +309,17 @@ struct Pointer {
     shift: bool,
 }
 
+/// Call inside the scroll area: a press that started outside its lines
+/// (on a scroll bar, say) neither picks nor extends.
 fn pointer(ui: &Ui) -> Pointer {
-    ui.input(|i| Pointer {
-        pressed: i.pointer.primary_pressed(),
-        down: i.pointer.primary_down(),
-        shift: i.modifiers.shift,
+    let lines = ui.clip_rect();
+    ui.input(|i| {
+        let on_lines = i.pointer.press_origin().is_some_and(|p| lines.contains(p));
+        Pointer {
+            pressed: i.pointer.primary_pressed() && on_lines,
+            down: i.pointer.primary_down() && on_lines,
+            shift: i.modifiers.shift,
+        }
     })
 }
 
@@ -255,12 +358,13 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
         );
         return;
     };
-    show_view(ui, view, project.is_operating(), actions);
+    let wrap = project.settings.wrap_lines;
+    show_view(ui, view, project.is_operating(), wrap, actions);
 }
 
 /// Any file diff: File status (with staging) or a commit or stash (read-only,
 /// with a close button).
-pub fn show_view(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Action>) {
+pub fn show_view(ui: &mut Ui, view: &DiffView, busy: bool, wrap: bool, actions: &mut Vec<Action>) {
     if matches!(view.key.source, Source::Commit(_)) && ui.input(|i| i.key_pressed(Key::Escape)) {
         actions.push(Action::CloseCommitFile);
     }
@@ -268,16 +372,18 @@ pub fn show_view(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Act
     if !view.selection.is_empty() {
         selection_bar(ui, view, busy, actions);
     }
-    body(ui, view, busy, false, None, actions);
+    body(ui, view, busy, false, wrap, None, actions);
 }
 
-/// The diff without its header: unified, or side by side with `split`.
-/// With `marks` (Review), clicking lines picks them to comment on.
+/// The diff without its header: unified, or side by side with `split`;
+/// long lines wrap with `wrap`. With `marks` (Review), clicking lines picks
+/// them to comment on.
 pub fn body(
     ui: &mut Ui,
     view: &DiffView,
     busy: bool,
     split: bool,
+    wrap: bool,
     marks: Option<&Marks>,
     actions: &mut Vec<Action>,
 ) {
@@ -311,10 +417,11 @@ pub fn body(
     if ui.input(|i| i.key_pressed(Key::Escape)) && !view.selection.is_empty() {
         actions.push(Action::ClearLines);
     }
+    diff_scroll_style(ui);
     if split {
-        side_by_side(ui, view, diff, marks, actions);
+        side_by_side(ui, view, diff, wrap, marks, actions);
     } else {
-        lines(ui, view, diff, busy, marks, actions);
+        lines(ui, view, diff, busy, wrap, marks, actions);
     }
 }
 
@@ -322,18 +429,27 @@ pub fn body(
 #[derive(Clone, Copy)]
 enum Pair {
     Hunk(usize),
-    Lines(Option<(usize, usize)>, Option<(usize, usize)>),
+    /// Row `.2` of an old and a new line (more than one when they wrap).
+    Lines(Option<(usize, usize)>, Option<(usize, usize)>, usize),
     /// Row `.1` of comment block `.0`.
     Comment(usize, usize),
 }
 
-fn pair_rows(diff: &FileDiff, blocks: &[Block]) -> Vec<Pair> {
+/// The rows of the side-by-side view; `rows_of` says how many rows a line
+/// takes.
+fn pair_rows(
+    diff: &FileDiff,
+    blocks: &[Block],
+    rows_of: impl Fn((usize, usize)) -> usize,
+) -> Vec<Pair> {
     let mut rows = Vec::new();
     let push = |rows: &mut Vec<Pair>, pair: Pair| {
-        rows.push(pair);
-        let Pair::Lines(left, right) = pair else {
+        let Pair::Lines(left, right, _) = pair else {
+            rows.push(pair);
             return;
         };
+        let parts = [left, right].into_iter().flatten().map(&rows_of).max();
+        rows.extend((0..parts.unwrap_or(1)).map(|part| Pair::Lines(left, right, part)));
         for (b, block) in blocks.iter().enumerate() {
             if left == Some(block.at) || right == Some(block.at) {
                 rows.extend((0..block.rows).map(|part| Pair::Comment(b, part)));
@@ -345,7 +461,7 @@ fn pair_rows(diff: &FileDiff, blocks: &[Block]) -> Vec<Pair> {
         let mut l = 0;
         while l < hunk.lines.len() {
             if hunk.lines[l].kind == Kind::Context {
-                push(&mut rows, Pair::Lines(Some((h, l)), Some((h, l))));
+                push(&mut rows, Pair::Lines(Some((h, l)), Some((h, l)), 0));
                 l += 1;
                 continue;
             }
@@ -362,7 +478,7 @@ fn pair_rows(diff: &FileDiff, blocks: &[Block]) -> Vec<Pair> {
             for i in 0..removed.len().max(added.len()) {
                 push(
                     &mut rows,
-                    Pair::Lines(removed.get(i).copied(), added.get(i).copied()),
+                    Pair::Lines(removed.get(i).copied(), added.get(i).copied(), 0),
                 );
             }
         }
@@ -374,17 +490,25 @@ fn side_by_side(
     ui: &mut Ui,
     view: &DiffView,
     diff: &FileDiff,
+    wrap: bool,
     marks: Option<&Marks>,
     actions: &mut Vec<Action>,
 ) {
-    let blocks = blocks(ui, marks, ui.available_width());
-    let rows = pair_rows(diff, &blocks);
-    let p = pointer(ui);
+    let width = ui.available_width() - ui.spacing().scroll.allocated_width();
+    let blocks = blocks(ui, marks, width);
+    // Each half has its line numbers, then the text up to the middle line.
+    let wrap_width = wrap.then_some((width / 2.0 - 1.0 - NUM - 16.0).max(80.0));
+    let char_width = char_width(ui);
+    let painter = ui.painter().clone();
+    let rows = pair_rows(diff, &blocks, |at| {
+        line_rows(&painter, view, diff, at, wrap_width, char_width)
+    });
     ui.spacing_mut().item_spacing.y = 0.0;
     ScrollArea::vertical()
         .id_salt(("diff-split-scroll", &view.key.path))
         .auto_shrink([false, false])
         .show_rows(ui, ROW, rows.len(), |ui, range| {
+            let p = pointer(ui);
             for row in &rows[range] {
                 let (rect, _) =
                     ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
@@ -411,12 +535,12 @@ fn side_by_side(
                             color::text_faint(),
                         );
                     }
-                    Pair::Lines(left, right) => {
+                    Pair::Lines(left, right, part) => {
                         let mid = rect.center().x;
                         let left_rect = Rect::from_min_max(rect.min, pos2(mid - 1.0, rect.max.y));
                         let right_rect = Rect::from_min_max(pos2(mid + 1.0, rect.min.y), rect.max);
                         for (r, at, old) in [(left_rect, left, true), (right_rect, right, false)] {
-                            half(ui, r, view, diff, at, old);
+                            half(ui, r, view, diff, at, old, part, wrap_width);
                             let (Some(marks), Some(at)) = (marks, at) else {
                                 continue;
                             };
@@ -444,7 +568,9 @@ fn side_by_side(
         });
 }
 
-/// One side of a side-by-side row. A missing line is a hatched gap.
+/// Row `part` of one side of a side-by-side row. A missing line is a
+/// hatched gap; a wrapped line paints all of its text, clipped to this row.
+#[allow(clippy::too_many_arguments)]
 fn half(
     ui: &Ui,
     rect: Rect,
@@ -452,6 +578,8 @@ fn half(
     diff: &FileDiff,
     at: Option<(usize, usize)>,
     old: bool,
+    part: usize,
+    wrap: Option<f32>,
 ) {
     let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
     let Some((h, l)) = at else {
@@ -473,7 +601,9 @@ fn half(
     }
     let y = rect.center().y;
     let number = if old { line.old_no } else { line.new_no };
-    if let Some(n) = number {
+    if let Some(n) = number
+        && part == 0
+    {
         painter.text(
             pos2(rect.left() + NUM - 6.0, y),
             Align2::RIGHT_CENTER,
@@ -488,8 +618,17 @@ fn half(
     } else {
         color::text_mid()
     };
-    let galley = code_galley(&painter, text.clone(), spans_at(view, h, l), text_color);
-    let origin = pos2(rect.left() + NUM + 8.0, y - galley.size().y / 2.0);
+    let galley = code_galley(
+        &painter,
+        text.clone(),
+        spans_at(view, h, l),
+        text_color,
+        wrap,
+    );
+    let origin = match wrap {
+        Some(_) => pos2(rect.left() + NUM + 8.0, rect.top() - part as f32 * ROW),
+        None => pos2(rect.left() + NUM + 8.0, y - galley.size().y / 2.0),
+    };
     let word = view
         .highlights
         .words
@@ -501,17 +640,9 @@ fn half(
         && !range.is_empty()
         && range.end <= kept
     {
-        let start = text[..range.start].chars().count();
-        let end = text[..range.end].chars().count();
-        let a = galley.pos_from_cursor(CCursor::new(start));
-        let b = galley.pos_from_cursor(CCursor::new(end));
-        let r = Rect::from_min_max(
-            origin + vec2(a.left(), 1.0),
-            origin + vec2(b.left(), galley.size().y - 1.0),
-        );
-        painter.rect_filled(r, 2, color::app_bg().lerp_to_gamma(tint, 0.35));
+        paint_word(&painter, &galley, origin, &text, range, tint);
     }
-    let too_wide = origin.x + galley.size().x > rect.right();
+    let too_wide = wrap.is_none() && origin.x + galley.size().x > rect.right();
     painter.galley(origin, galley, text_color);
     if too_wide && ui.rect_contains_pointer(rect) {
         egui::Tooltip::always_open(
@@ -689,7 +820,8 @@ fn selection_bar(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Act
 #[derive(Clone, Copy)]
 enum Row {
     Hunk(usize),
-    Line(usize, usize),
+    /// Row `.2` of a line (more than one when it wraps).
+    Line(usize, usize, usize),
     /// Row `.1` of comment block `.0`.
     Comment(usize, usize),
 }
@@ -699,15 +831,22 @@ fn lines(
     view: &DiffView,
     diff: &FileDiff,
     busy: bool,
+    wrap: bool,
     marks: Option<&Marks>,
     actions: &mut Vec<Action>,
 ) {
-    let blocks = blocks(ui, marks, ui.available_width());
+    let width = ui.available_width() - ui.spacing().scroll.allocated_width();
+    let blocks = blocks(ui, marks, width);
+    let text_x = GUTTER + 2.0 * NUM + 16.0;
+    let wrap_width = wrap.then_some((width - text_x - 8.0).max(80.0));
+    let char_width = char_width(ui);
+    let painter = ui.painter().clone();
     let mut rows = Vec::new();
     for (h, hunk) in diff.hunks.iter().enumerate() {
         rows.push(Row::Hunk(h));
         for l in 0..hunk.lines.len() {
-            rows.push(Row::Line(h, l));
+            let parts = line_rows(&painter, view, diff, (h, l), wrap_width, char_width);
+            rows.extend((0..parts).map(|part| Row::Line(h, l, part)));
             for (b, block) in blocks.iter().enumerate() {
                 if block.at == (h, l) {
                     rows.extend((0..block.rows).map(|part| Row::Comment(b, part)));
@@ -715,39 +854,36 @@ fn lines(
             }
         }
     }
-    let char_width = ui
-        .painter()
-        .layout_no_wrap("M".to_owned(), theme::mono(), color::text())
-        .size()
-        .x;
-    let longest = diff
-        .hunks
-        .iter()
-        .flat_map(|h| &h.lines)
-        .map(|l| l.content.len())
-        .max()
-        .unwrap_or(0);
-    let text_x = GUTTER + 2.0 * NUM + 16.0;
-    let content_width = (text_x + longest as f32 * char_width + 40.0).max(ui.available_width());
-    let (pressed, down, shift) = ui.input(|i| {
-        (
-            i.pointer.primary_pressed(),
-            i.pointer.primary_down(),
-            i.modifiers.shift,
-        )
-    });
+    let content_width = if wrap {
+        width
+    } else {
+        let longest = diff
+            .hunks
+            .iter()
+            .flat_map(|h| &h.lines)
+            .map(|l| l.content.len())
+            .max()
+            .unwrap_or(0);
+        (text_x + longest as f32 * char_width + 40.0).max(width)
+    };
 
     ui.spacing_mut().item_spacing.y = 0.0;
-    ScrollArea::both()
+    let scroll = if wrap {
+        ScrollArea::vertical()
+    } else {
+        ScrollArea::both()
+    };
+    scroll
         .id_salt(("diff-scroll", &view.key.path))
         .auto_shrink([false, false])
         .show_rows(ui, ROW, rows.len(), |ui, range| {
+            let p = pointer(ui);
             for row in &rows[range] {
                 let (rect, _) = ui.allocate_exact_size(vec2(content_width, ROW), Sense::hover());
                 match *row {
                     Row::Hunk(h) => hunk_row(ui, rect, view, diff, h, busy, actions),
                     Row::Comment(b, part) => comment_row(ui, rect, &blocks[b], part, actions),
-                    Row::Line(h, l) if marks.is_some() => {
+                    Row::Line(h, l, part) if marks.is_some() => {
                         let marks = marks.expect("checked");
                         let line = &diff.hunks[h].lines[l];
                         let word = view
@@ -757,29 +893,22 @@ fn lines(
                             .and_then(|w| w.get(l))
                             .cloned()
                             .flatten();
-                        paint_line(
-                            ui,
-                            rect,
-                            line,
-                            spans_at(view, h, l),
-                            false,
+                        let text = LineText {
+                            spans: spans_at(view, h, l),
                             word,
-                            text_x,
-                            false,
-                        );
+                            x: text_x,
+                            part,
+                            wrap: wrap_width,
+                        };
+                        paint_line(ui, rect, line, &text, false, false);
                         if marks.pick.is_some_and(|p| p.contains((h, l), line.kind)) {
                             paint_picked(ui, rect);
                         }
                         if ui.rect_contains_pointer(rect) && ui.is_rect_visible(rect) {
-                            let p = Pointer {
-                                pressed,
-                                down,
-                                shift,
-                            };
                             pick_on_hover(ui, marks, (h, l), None, p, actions);
                         }
                     }
-                    Row::Line(h, l) => {
+                    Row::Line(h, l, part) => {
                         let line = &diff.hunks[h].lines[l];
                         let selected = view.selection.contains(&(h, l));
                         let word = view
@@ -790,27 +919,25 @@ fn lines(
                             .cloned()
                             .flatten();
                         let editable = !view.read_only;
-                        paint_line(
-                            ui,
-                            rect,
-                            line,
-                            spans_at(view, h, l),
-                            selected,
+                        let text = LineText {
+                            spans: spans_at(view, h, l),
                             word,
-                            text_x,
-                            editable,
-                        );
+                            x: text_x,
+                            part,
+                            wrap: wrap_width,
+                        };
+                        paint_line(ui, rect, line, &text, selected, editable);
                         let hovered = ui.rect_contains_pointer(rect) && ui.is_rect_visible(rect);
                         let selectable = line.is_change() && editable;
                         if selectable && hovered {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                            if pressed {
+                            if p.pressed {
                                 actions.push(Action::ClickLine {
                                     hunk: h,
                                     line: l,
-                                    shift,
+                                    shift: p.shift,
                                 });
-                            } else if down && view.anchor.is_some_and(|a| a != (h, l)) {
+                            } else if p.down && view.anchor.is_some_and(|a| a != (h, l)) {
                                 actions.push(Action::DragLine { hunk: h, line: l });
                             }
                         }
@@ -910,18 +1037,27 @@ fn hunk_row(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// What to draw as a line's text: its syntax colors and changed words,
+/// where the text starts, and which of its wrapped rows this is.
+struct LineText<'a> {
+    spans: Option<&'a Spans>,
+    word: Option<std::ops::Range<usize>>,
+    x: f32,
+    part: usize,
+    wrap: Option<f32>,
+}
+
+/// Row `text.part` of a line. The gutter shows on its first row only; a
+/// wrapped line paints all of its text, clipped to this row.
 fn paint_line(
     ui: &Ui,
     rect: Rect,
     line: &graft_core::diff::Line,
-    spans: Option<&Spans>,
+    text: &LineText,
     selected: bool,
-    word: Option<std::ops::Range<usize>>,
-    text_x: f32,
     selectable: bool,
 ) {
-    let painter = ui.painter();
+    let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
     let tint = match line.kind {
         Kind::Added => Some(color::added()),
         Kind::Removed => Some(color::removed()),
@@ -932,9 +1068,10 @@ fn paint_line(
         painter.rect_filled(rect, 0, color::app_bg().lerp_to_gamma(tint, strength));
     }
     let y = rect.center().y;
+    let first = text.part == 0;
 
     // Selection box in the gutter.
-    if line.is_change() && selectable {
+    if line.is_change() && selectable && first {
         let b = Rect::from_center_size(pos2(rect.left() + GUTTER / 2.0, y), vec2(12.0, 12.0));
         if selected {
             painter.rect_filled(b, 3, color::accent());
@@ -974,50 +1111,57 @@ fn paint_line(
             );
         }
     };
-    num(line.old_no, rect.left() + GUTTER + NUM - 6.0);
-    num(line.new_no, rect.left() + GUTTER + 2.0 * NUM - 6.0);
-
     let (marker, fg) = match line.kind {
         Kind::Added => ("+", color::added()),
         Kind::Removed => ("−", color::removed()),
         Kind::Context => ("", color::text_faint()),
     };
-    painter.text(
-        pos2(rect.left() + GUTTER + 2.0 * NUM + 4.0, y),
-        Align2::LEFT_CENTER,
-        marker,
-        theme::mono(),
-        fg,
-    );
+    if first {
+        num(line.old_no, rect.left() + GUTTER + NUM - 6.0);
+        num(line.new_no, rect.left() + GUTTER + 2.0 * NUM - 6.0);
+        painter.text(
+            pos2(rect.left() + GUTTER + 2.0 * NUM + 4.0, y),
+            Align2::LEFT_CENTER,
+            marker,
+            theme::mono(),
+            fg,
+        );
+    }
 
-    let (text, kept) = shown(line.text());
+    let (shown_text, kept) = shown(line.text());
     let text_color = if line.kind == Kind::Context {
         color::text_mid()
     } else {
         color::text()
     };
-    let galley = code_galley(painter, text.clone(), spans, text_color);
-    let origin = pos2(rect.left() + text_x, y - galley.size().y / 2.0);
-    if let (Some(range), Some(tint)) = (word, tint)
+    let galley = code_galley(
+        &painter,
+        shown_text.clone(),
+        text.spans,
+        text_color,
+        text.wrap,
+    );
+    let origin = match text.wrap {
+        Some(_) => pos2(rect.left() + text.x, rect.top() - text.part as f32 * ROW),
+        None => pos2(rect.left() + text.x, y - galley.size().y / 2.0),
+    };
+    if let (Some(range), Some(tint)) = (text.word.clone(), tint)
         && !range.is_empty()
         && range.end <= kept
     {
-        let start = text[..range.start].chars().count();
-        let end = text[..range.end].chars().count();
-        let a = galley.pos_from_cursor(CCursor::new(start));
-        let b = galley.pos_from_cursor(CCursor::new(end));
-        let r = Rect::from_min_max(
-            origin + vec2(a.left(), 1.0),
-            origin + vec2(b.left(), galley.size().y - 1.0),
-        );
-        painter.rect_filled(r, 2, color::app_bg().lerp_to_gamma(tint, 0.35));
+        paint_word(&painter, &galley, origin, &shown_text, range, tint);
     }
-    let text_width = galley.size().x;
+    // The note goes after the end of the text, on its last row.
+    let end = galley
+        .rows
+        .last()
+        .map_or(pos2(0.0, galley.size().y / 2.0), |row| {
+            row.rect().right_center()
+        });
     painter.galley(origin, galley, text_color);
     if line.no_newline {
-        let x = origin.x + text_width + 8.0;
         painter.text(
-            pos2(x, y),
+            origin + end.to_vec2() + vec2(8.0, 0.0),
             Align2::LEFT_CENTER,
             "no newline at end of file",
             theme::small(),
@@ -1029,6 +1173,51 @@ fn paint_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wrapped_pair_takes_the_rows_of_its_longer_side() {
+        let line = |kind, text: &str| graft_core::diff::Line {
+            kind,
+            old_no: None,
+            new_no: None,
+            content: text.as_bytes().to_vec(),
+            no_newline: false,
+        };
+        let diff = FileDiff {
+            hunks: vec![graft_core::diff::Hunk {
+                old_start: 1,
+                old_count: 2,
+                new_start: 1,
+                new_count: 2,
+                section: String::new(),
+                lines: vec![
+                    line(Kind::Context, "same"),
+                    line(Kind::Removed, "a long old line"),
+                    line(Kind::Added, "new"),
+                ],
+            }],
+            ..Default::default()
+        };
+        let rows = pair_rows(&diff, &[], |(_, l)| if l == 1 { 3 } else { 1 });
+        let shape: Vec<String> = rows
+            .iter()
+            .map(|row| match row {
+                Pair::Hunk(h) => format!("hunk {h}"),
+                Pair::Lines(old, new, part) => format!("{old:?} {new:?} {part}"),
+                Pair::Comment(b, part) => format!("comment {b} {part}"),
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                "hunk 0",
+                "Some((0, 0)) Some((0, 0)) 0",
+                "Some((0, 1)) Some((0, 2)) 0",
+                "Some((0, 1)) Some((0, 2)) 1",
+                "Some((0, 1)) Some((0, 2)) 2",
+            ]
+        );
+    }
 
     #[test]
     fn long_lines_are_cut_for_display() {

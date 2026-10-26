@@ -53,9 +53,10 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
         .show(ui, |ui| commit_list(ui, view, commits, actions));
 
     let busy = project.is_operating();
+    let wrap = project.settings.wrap_lines;
     match view.mode {
         FileHistoryMode::Changes => match &project.commit_diff {
-            Some(diff) => diff_view::body(ui, diff, busy, false, None, actions),
+            Some(diff) => diff_view::body(ui, diff, busy, false, wrap, None, actions),
             None => {
                 let rect = ui.available_rect_before_wrap();
                 spinner(ui, rect.center(), 9.0, color::text_weak());

@@ -120,6 +120,17 @@ pub fn show(
              default program.",
         );
 
+        section(ui, "Diffs");
+        ui.checkbox(&mut form.draft.wrap_lines, "Wrap long lines");
+        let switch = match form.draft.keys.get(Command::WrapLines) {
+            Some(shortcut) => format!(" {} switches it anywhere.", keys::format(shortcut)),
+            None => String::new(),
+        };
+        hint(
+            ui,
+            &format!("Long lines continue on the next row instead of scrolling sideways.{switch}"),
+        );
+
         section(ui, "Fetching");
         ui.horizontal(|ui| {
             ui.label(

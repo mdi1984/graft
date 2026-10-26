@@ -20,6 +20,8 @@ pub struct Settings {
     pub copy_patterns: String,
     /// Ask GitHub for a newer Graft when it starts.
     pub check_updates: bool,
+    /// Long lines in diffs wrap instead of scrolling sideways.
+    pub wrap_lines: bool,
     /// Keyboard shortcuts; only the ones changed from the defaults are saved.
     pub keys: Keymap,
 }
@@ -33,6 +35,7 @@ impl Default for Settings {
             protected: PROTECTED.to_owned(),
             copy_patterns: DEFAULT_COPY_PATTERNS.to_owned(),
             check_updates: true,
+            wrap_lines: false,
             keys: Keymap::default(),
         }
     }

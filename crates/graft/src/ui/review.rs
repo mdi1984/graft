@@ -142,6 +142,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
             diff,
             project.is_operating(),
             split,
+            project.settings.wrap_lines,
             Some(&marks),
             actions,
         ),

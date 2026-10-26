@@ -19,6 +19,7 @@ pub enum Command {
     Settings,
     Refresh,
     Console,
+    WrapLines,
     StageFile,
     StageAll,
     UnstageAll,
@@ -70,12 +71,16 @@ const fn ctrl_shift(key: Key) -> Option<KeyboardShortcut> {
     ))
 }
 
+const fn alt(key: Key) -> Option<KeyboardShortcut> {
+    Some(KeyboardShortcut::new(Modifiers::ALT, key))
+}
+
 const fn plain(key: Key) -> Option<KeyboardShortcut> {
     Some(KeyboardShortcut::new(Modifiers::NONE, key))
 }
 
 impl Command {
-    pub const ALL: [Command; 18] = [
+    pub const ALL: [Command; 19] = [
         Command::Search,
         Command::NewTab,
         Command::OpenFolder,
@@ -85,6 +90,7 @@ impl Command {
         Command::Settings,
         Command::Refresh,
         Command::Console,
+        Command::WrapLines,
         Command::StageFile,
         Command::StageAll,
         Command::UnstageAll,
@@ -108,6 +114,7 @@ impl Command {
             Command::Settings => "settings",
             Command::Refresh => "refresh",
             Command::Console => "console",
+            Command::WrapLines => "wrap-lines",
             Command::StageFile => "stage-file",
             Command::StageAll => "stage-all",
             Command::UnstageAll => "unstage-all",
@@ -131,6 +138,7 @@ impl Command {
             Command::Settings => "Settings",
             Command::Refresh => "Refresh",
             Command::Console => "Show or hide the git console",
+            Command::WrapLines => "Wrap long lines in diffs",
             Command::StageFile => "Stage or unstage the selected file",
             Command::StageAll => "Stage all",
             Command::UnstageAll => "Unstage all",
@@ -168,6 +176,7 @@ impl Command {
             Command::Settings => ctrl(Key::Comma),
             Command::Refresh => plain(Key::F5),
             Command::Console => ctrl(Key::J),
+            Command::WrapLines => alt(Key::Z),
             Command::StageFile => plain(Key::Space),
             Command::StageAll => ctrl(Key::S),
             Command::UnstageAll => ctrl_shift(Key::S),
