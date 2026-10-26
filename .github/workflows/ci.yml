@@ -20,12 +20,20 @@ env:
 jobs:
   check:
     runs-on: windows-latest
+    env:
+      # File and line numbers in test failures, but no full debug info:
+      # a smaller target folder and cache, and faster linking.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      # Only main saves caches; pull requests start from main's. Per-PR
+      # caches would fill the 10 GB limit and push main's out.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Format
         run: cargo fmt --all --check
       - name: Lints
@@ -38,7 +46,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      # The release workflow starts from this cache too (shared-key).
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: package
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build
         run: cargo build --release --locked -p graft
       - name: Install Inno Setup
