@@ -68,13 +68,10 @@ fn main() -> eframe::Result {
             // Graft draws its own title bar (see ui::window_frame).
             .with_decorations(false)
             .with_icon(window_icon()),
-        // A blocking vsync makes the window trail the mouse while resizing.
-        // On Windows, frames wait for the compositor instead (see
-        // `GraftApp::pace_frame`).
-        glow_options: eframe::egui_glow::GlowConfiguration {
-            vsync: !cfg!(windows),
-            ..Default::default()
-        },
+        // DirectX 12 through wgpu. With OpenGL, some drivers (Intel Arc)
+        // stalled for up to two seconds when the window was maximized or
+        // restored.
+        renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
     eframe::run_native(

@@ -102,17 +102,6 @@ mod win {
     }
 }
 
-/// Wait for the compositor's next frame, so frames go out at the screen's
-/// refresh rate without a blocking vsync.
-pub fn wait_for_compositor() {
-    // SAFETY: a plain DWM call without arguments; if it fails, it returns
-    // right away and the frame simply isn't held back.
-    #[cfg(windows)]
-    unsafe {
-        windows_sys::Win32::Graphics::Dwm::DwmFlush();
-    }
-}
-
 /// Wait (up to 10 seconds) for the process `pid` to end.
 pub fn wait_for_exit(pid: u32) {
     #[cfg(windows)]

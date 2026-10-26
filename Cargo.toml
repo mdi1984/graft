@@ -10,7 +10,9 @@ license = "MIT"
 
 [workspace.dependencies]
 graft-core = { path = "crates/graft-core" }
-eframe = { version = "0.37", default-features = false, features = ["clipboard", "default_fonts", "glow", "persistence"] }
+eframe = { version = "0.37", default-features = false, features = ["clipboard", "default_fonts", "persistence", "wgpu_no_default_features"] }
+# eframe draws with wgpu; on Windows that is DirectX 12 only (see main.rs).
+wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "dx12", "wgsl"] }
 egui = "0.37"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

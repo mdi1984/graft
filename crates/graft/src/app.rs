@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
 use egui::{CentralPanel, Frame, Key, KeyboardShortcut, Margin, Modifiers, Panel};
@@ -82,9 +81,6 @@ pub struct GraftApp {
     search: String,
     window_title: String,
     was_focused: bool,
-    /// The window size, and when it last changed (see `pace_frame`).
-    window_size: egui::Vec2,
-    resized_at: Option<Instant>,
     /// Review state of repositories that are not open.
     reviews: HashMap<PathBuf, HashMap<PathBuf, ReviewState>>,
     /// "Recently slashed" of repositories that are not open.
@@ -169,8 +165,6 @@ impl GraftApp {
             search: String::new(),
             window_title: String::new(),
             was_focused: true,
-            window_size: egui::Vec2::ZERO,
-            resized_at: None,
             reviews,
             slashed,
             settings,
@@ -638,25 +632,6 @@ impl GraftApp {
         }
     }
 
-    /// Graft runs without vsync (see main.rs): each frame first waits for the
-    /// compositor, so animations run at the screen's refresh rate. While the
-    /// window is being resized, frames go out right away instead, so the
-    /// window keeps up with the mouse.
-    fn pace_frame(&mut self, ctx: &egui::Context) {
-        let size = ctx.content_rect().size();
-        let now = Instant::now();
-        if size != self.window_size {
-            self.window_size = size;
-            self.resized_at = Some(now);
-        }
-        let resizing = self
-            .resized_at
-            .is_some_and(|at| now - at < Duration::from_millis(250));
-        if !resizing {
-            crate::native::wait_for_compositor();
-        }
-    }
-
     /// Coming back to Graft (e.g. from an editor or terminal) re-reads status.
     fn refresh_on_focus(&mut self, ctx: &egui::Context) {
         let focused = ctx.input(|i| i.focused);
@@ -771,7 +746,6 @@ impl GraftApp {
 impl eframe::App for GraftApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.pace_frame(&ctx);
         if theme::sync(&ctx) {
             crate::native::set_border(color::border());
         }
