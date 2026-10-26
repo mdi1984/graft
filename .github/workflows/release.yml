@@ -1,10 +1,13 @@
 # Builds and publishes a release when a version tag (v1.2.3) is pushed.
 # The tag must match the version in Cargo.toml; see "Releases" in CLAUDE.md.
+# Run by hand (Actions > Release > Run workflow), it is a dry run: the same
+# tests and packages, uploaded as an artifact instead of published.
 name: Release
 
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -18,20 +21,29 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      # Start from the release build CI saved on main (its package job).
+      # A tag's own cache would never be used again, so none is saved.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: package
+          save-if: false
 
       - name: Check the tag matches Cargo.toml
         shell: pwsh
         run: |
           $meta = cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json
           $version = ($meta.packages | Where-Object name -eq 'graft').version
-          if ("v$version" -ne $env:GITHUB_REF_NAME) {
+          if ($env:GITHUB_EVENT_NAME -eq 'push' -and "v$version" -ne $env:GITHUB_REF_NAME) {
             throw "Tag $env:GITHUB_REF_NAME does not match the version in Cargo.toml ($version)."
           }
           "VERSION=$version" | Out-File -Append $env:GITHUB_ENV
 
+      # Release mode reuses the cached release build; CI already ran the
+      # tests in debug mode on this commit. Not --workspace: icon-gen has no
+      # tests, and building it alongside changes the features of shared
+      # crates (gix, wgpu, egui), so they would all compile again.
       - name: Tests
-        run: cargo test --workspace --locked
+        run: cargo test --release --locked -p graft -p graft-core
 
       - name: Build
         run: cargo build --release --locked -p graft
@@ -47,7 +59,16 @@ jobs:
         shell: pwsh
         run: ./tools/package.ps1 -Version $env:VERSION
 
+      - name: Keep the dry run's packages
+        if: github.event_name != 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: graft-release-dry-run
+          path: dist/
+          retention-days: 3
+
       - name: Publish the release
+        if: github.event_name == 'push'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
