@@ -83,6 +83,12 @@ pub enum Action {
     Refresh,
     /// Close this project's tab. Handled by the app.
     Close,
+    /// Switch to another open project and apply `actions` there (a search
+    /// hit in another project). Handled by the app.
+    InProject {
+        project: usize,
+        actions: Vec<Action>,
+    },
 
     // File status
     SelectFile(FileKey),
@@ -838,7 +844,7 @@ impl Project {
                 self.scroll_to_selected.set(true);
             }
             Action::Refresh => self.refresh(),
-            Action::Close => {}
+            Action::Close | Action::InProject { .. } => {}
             Action::OpenDialog(_)
             | Action::CloseDialog
             | Action::SubmitDialog

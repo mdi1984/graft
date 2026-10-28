@@ -1,5 +1,6 @@
 //! The toolbar search (Ctrl+K): type to find worktrees, branches, tags,
-//! commits and changed files; Enter or a click jumps there.
+//! commits and changed files in every open project; Enter or a click jumps
+//! there (switching to that project's tab).
 
 use egui::{
     Align, Area, Frame, Id, Key, Layout, Margin, Modifiers, Order, Rect, RichText, ScrollArea,
@@ -16,10 +17,38 @@ struct Hit {
     kind: &'static str,
     title: String,
     detail: String,
+    /// The other project's name, for a hit outside the active project.
+    project: Option<String>,
     actions: Vec<Action>,
 }
 
 const LIMIT: usize = 8;
+
+/// Result kinds in the order the list shows them.
+const KINDS: [&str; 6] = ["Worktree", "Branch", "Remote", "Tag", "Changed", "Commit"];
+
+/// Hits in every open project: grouped by kind, the active project's first
+/// within each kind. A hit elsewhere switches to its project when chosen.
+fn hits(projects: &[Project], active: usize, text: &str) -> Vec<Hit> {
+    let order = std::iter::once(active).chain((0..projects.len()).filter(|&i| i != active));
+    let mut out: Vec<Hit> = order
+        .filter_map(|i| Some((i, projects.get(i)?)))
+        .flat_map(|(i, project)| {
+            project_hits(project, text).into_iter().map(move |mut hit| {
+                if i != active {
+                    hit.project = Some(project.name.clone());
+                    hit.actions = vec![Action::InProject {
+                        project: i,
+                        actions: hit.actions,
+                    }];
+                }
+                hit
+            })
+        })
+        .collect();
+    out.sort_by_key(|hit| KINDS.iter().position(|k| *k == hit.kind));
+    out
+}
 
 /// Every word of `query` occurs in one of `fields`.
 fn matches(query: &[String], fields: &[&str]) -> bool {
@@ -30,7 +59,7 @@ fn matches(query: &[String], fields: &[&str]) -> bool {
     })
 }
 
-fn hits(project: &Project, text: &str) -> Vec<Hit> {
+fn project_hits(project: &Project, text: &str) -> Vec<Hit> {
     let query: Vec<String> = text.split_whitespace().map(str::to_lowercase).collect();
     let mut out = Vec::new();
     if query.is_empty() {
@@ -51,6 +80,7 @@ fn hits(project: &Project, text: &str) -> Vec<Hit> {
             kind: "Worktree",
             title: wt.label(),
             detail: wt.path.display().to_string(),
+            project: None,
             actions: vec![Action::OpenWorktree(wt.path.clone())],
         });
     }
@@ -64,6 +94,7 @@ fn hits(project: &Project, text: &str) -> Vec<Hit> {
             kind: "Branch",
             title: b.name.clone(),
             detail: graft_core::short(&b.target),
+            project: None,
             actions: vec![Action::Reveal(b.target)],
         });
     }
@@ -77,6 +108,7 @@ fn hits(project: &Project, text: &str) -> Vec<Hit> {
             kind: "Remote",
             title: b.name.clone(),
             detail: graft_core::short(&b.target),
+            project: None,
             actions: vec![Action::Reveal(b.target)],
         });
     }
@@ -90,6 +122,7 @@ fn hits(project: &Project, text: &str) -> Vec<Hit> {
             kind: "Tag",
             title: t.name.clone(),
             detail: graft_core::short(&t.target),
+            project: None,
             actions: vec![Action::Reveal(t.target)],
         });
     }
@@ -106,6 +139,7 @@ fn hits(project: &Project, text: &str) -> Vec<Hit> {
                 kind: "Changed",
                 title: entry.path.clone(),
                 detail: if staged { "staged" } else { "uncommitted" }.to_owned(),
+                project: None,
                 actions: vec![
                     Action::ShowFileStatus,
                     Action::SelectFile(FileKey::of(entry, staged)),
@@ -131,6 +165,7 @@ fn hits(project: &Project, text: &str) -> Vec<Hit> {
                 kind: "Commit",
                 title: c.summary.clone(),
                 detail: format!("{} · {}", graft_core::short(&c.id), c.author),
+                project: None,
                 actions: vec![Action::Reveal(c.id)],
             });
         }
@@ -138,11 +173,17 @@ fn hits(project: &Project, text: &str) -> Vec<Hit> {
     out
 }
 
-pub fn show(ui: &mut Ui, project: &Project, text: &mut String, actions: &mut Vec<Action>) {
+pub fn show(
+    ui: &mut Ui,
+    projects: &[Project],
+    active: usize,
+    text: &mut String,
+    actions: &mut Vec<Action>,
+) {
     let id = Id::unique("toolbar-search");
     let selected_id = id.with("selected");
     let popup_id = id.with("popup-rect");
-    let keys = &project.settings.keys;
+    let keys = &projects[active].settings.keys;
     if keys.pressed(ui.ctx(), Command::Search) {
         ui.memory_mut(|m| m.request_focus(id));
         // Select the old query so typing replaces it.
@@ -209,7 +250,7 @@ pub fn show(ui: &mut Ui, project: &Project, text: &mut String, actions: &mut Vec
         return;
     }
 
-    let results = hits(project, text);
+    let results = hits(projects, active, text);
     let mut selected: usize = ui.data(|d| d.get_temp(selected_id)).unwrap_or(0);
     if focused {
         ui.input_mut(|i| {
@@ -226,7 +267,9 @@ pub fn show(ui: &mut Ui, project: &Project, text: &mut String, actions: &mut Vec
     let mut chosen = enter.then_some(selected);
 
     let anchor = frame.response.rect;
-    let popup_width = 460.0f32.max(anchor.width());
+    // Hits from other projects carry a project name: make room for it.
+    let wide = results.iter().any(|hit| hit.project.is_some());
+    let popup_width = if wide { 600.0f32 } else { 460.0 }.max(anchor.width());
     let area = Area::new(id.with("popup"))
         .order(Order::Foreground)
         .fixed_pos(egui::pos2(
@@ -305,14 +348,20 @@ fn row(ui: &mut Ui, hit: &Hit, selected: bool) -> egui::Response {
     } else {
         theme::mono()
     };
+    let project_width = if hit.project.is_some() { 118.0 } else { 0.0 };
     let title = super::widgets::elided(
         ui,
         &hit.title,
         font,
         color::text(),
-        rect.width() - 80.0 - detail_width - 16.0,
+        rect.width() - 80.0 - detail_width - project_width - 16.0,
     );
     super::widgets::paint_galley_left(painter, rect.left() + 80.0, y, title, color::text());
+    if let Some(project) = &hit.project {
+        let name = super::widgets::elided(ui, project, theme::small(), color::accent(), 110.0);
+        let x = rect.right() - 8.0 - detail_width - 8.0 - name.size().x;
+        super::widgets::paint_galley_left(painter, x, y, name, color::accent());
+    }
     let detail = super::widgets::elided_path(
         ui,
         &hit.detail,
@@ -323,4 +372,120 @@ fn row(ui: &mut Ui, hit: &Hit, selected: bool) -> egui::Response {
     let x = rect.right() - 8.0 - detail.size().x;
     super::widgets::paint_galley_left(painter, x, y, detail, color::text_weak());
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::process::Command as Cmd;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use graft_core::Console;
+    use graft_core::jobs::JobPool;
+
+    use super::*;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Cmd::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// A repo with one commit and an extra branch `branch`.
+    fn repo(dir: &Path, branch: &str) {
+        git(dir, &["init", "-q", "-b", "main"]);
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        git(dir, &["add", "a.txt"]);
+        git(dir, &["commit", "-q", "-m", "first"]);
+        git(dir, &["branch", branch]);
+    }
+
+    fn open(root: &Path, pool: &JobPool) -> Project {
+        let mut project = Project::new(
+            root.to_path_buf(),
+            root.to_path_buf(),
+            Console::default(),
+            pool.clone(),
+        );
+        let start = Instant::now();
+        while project.snapshot.is_none() {
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "snapshot never came"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+            project.poll();
+        }
+        project
+    }
+
+    #[test]
+    fn finds_branches_in_other_projects() {
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        repo(a.path(), "feature-here");
+        repo(b.path(), "feature-there");
+        let pool = JobPool::new(2, Arc::new(|| {}));
+        let projects = [open(a.path(), &pool), open(b.path(), &pool)];
+
+        // Searching from the second tab: its own hit comes first.
+        let found: Vec<Hit> = hits(&projects, 1, "feature")
+            .into_iter()
+            .filter(|h| h.kind == "Branch")
+            .collect();
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].title, "feature-there");
+        assert!(found[0].project.is_none());
+        assert!(matches!(found[0].actions[..], [Action::Reveal(_)]));
+
+        assert_eq!(found[1].title, "feature-here");
+        assert_eq!(found[1].project.as_deref(), Some(projects[0].name.as_str()));
+        match &found[1].actions[..] {
+            [
+                Action::InProject {
+                    project: 0,
+                    actions,
+                },
+            ] => {
+                assert!(matches!(actions[..], [Action::Reveal(_)]));
+            }
+            other => panic!("unexpected actions {other:?}"),
+        }
+    }
+
+    #[test]
+    fn groups_hits_by_kind_across_projects() {
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        repo(a.path(), "topic");
+        repo(b.path(), "topic");
+        let pool = JobPool::new(2, Arc::new(|| {}));
+        let projects = [open(a.path(), &pool), open(b.path(), &pool)];
+
+        // "main" matches both main worktrees and both main branches.
+        let kinds: Vec<(&str, bool)> = hits(&projects, 0, "main")
+            .iter()
+            .filter(|h| matches!(h.kind, "Worktree" | "Branch"))
+            .map(|h| (h.kind, h.project.is_some()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("Worktree", false),
+                ("Worktree", true),
+                ("Branch", false),
+                ("Branch", true)
+            ]
+        );
+    }
 }
