@@ -24,14 +24,12 @@ struct Hit {
 
 const LIMIT: usize = 8;
 
-/// Result kinds in the order the list shows them.
-const KINDS: [&str; 6] = ["Worktree", "Branch", "Remote", "Tag", "Changed", "Commit"];
-
-/// Hits in every open project: grouped by kind, the active project's first
-/// within each kind. A hit elsewhere switches to its project when chosen.
+/// Hits in every open project: the active project's first, then one group
+/// per other project in tab order. A hit elsewhere switches to its project
+/// when chosen.
 fn hits(projects: &[Project], active: usize, text: &str) -> Vec<Hit> {
     let order = std::iter::once(active).chain((0..projects.len()).filter(|&i| i != active));
-    let mut out: Vec<Hit> = order
+    order
         .filter_map(|i| Some((i, projects.get(i)?)))
         .flat_map(|(i, project)| {
             project_hits(project, text).into_iter().map(move |mut hit| {
@@ -45,9 +43,22 @@ fn hits(projects: &[Project], active: usize, text: &str) -> Vec<Hit> {
                 hit
             })
         })
-        .collect();
-    out.sort_by_key(|hit| KINDS.iter().position(|k| *k == hit.kind));
-    out
+        .collect()
+}
+
+/// The group header to draw above `results[i]`: the project name where a
+/// new project's hits start. The active project gets one only when other
+/// projects have hits too.
+fn header<'a>(results: &'a [Hit], i: usize, active_name: &'a str) -> Option<&'a str> {
+    let here = |hit: &'a Hit| hit.project.as_deref();
+    let elsewhere = results.iter().any(|hit| hit.project.is_some());
+    let previous = i.checked_sub(1).map(|p| here(&results[p]));
+    match (previous, here(&results[i])) {
+        (None, None) => elsewhere.then_some(active_name),
+        (None, Some(name)) => Some(name),
+        (Some(prev), Some(name)) if prev != Some(name) => Some(name),
+        _ => None,
+    }
 }
 
 /// Every word of `query` occurs in one of `fields`.
@@ -267,9 +278,10 @@ pub fn show(
     let mut chosen = enter.then_some(selected);
 
     let anchor = frame.response.rect;
-    // Hits from other projects carry a project name: make room for it.
-    let wide = results.iter().any(|hit| hit.project.is_some());
-    let popup_width = if wide { 600.0f32 } else { 460.0 }.max(anchor.width());
+    let popup_width = 460.0f32.max(anchor.width());
+    let active_name = format!("{} · current", projects[active].name);
+    // The active project found nothing, but others did: say so on top.
+    let none_here = results.first().is_some_and(|hit| hit.project.is_some());
     let area = Area::new(id.with("popup"))
         .order(Order::Foreground)
         .fixed_pos(egui::pos2(
@@ -290,12 +302,40 @@ pub fn show(
                     }
                     // The popup keeps last frame's size; ask for this list's height.
                     let spacing = ui.spacing().item_spacing.y;
-                    let height = (results.len() as f32 * (30.0 + spacing)).min(420.0);
+                    let headers = (0..results.len())
+                        .filter(|&i| header(&results, i, &active_name).is_some())
+                        .count()
+                        + usize::from(none_here) * 2;
+                    let height = (results.len() as f32 * (30.0 + spacing)
+                        + headers as f32 * (HEADER_HEIGHT + spacing))
+                        .min(420.0);
                     ScrollArea::vertical()
                         .max_height(420.0)
                         .min_scrolled_height(height)
                         .show(ui, |ui| {
+                            if none_here {
+                                group_header(ui, &active_name, true);
+                                let (rect, _) = ui.allocate_exact_size(
+                                    vec2(ui.available_width(), HEADER_HEIGHT),
+                                    Sense::hover(),
+                                );
+                                let none = ui.painter().layout_no_wrap(
+                                    "No matches".to_owned(),
+                                    theme::small(),
+                                    color::text_faint(),
+                                );
+                                super::widgets::paint_galley_left(
+                                    ui.painter(),
+                                    rect.left() + 8.0,
+                                    rect.center().y,
+                                    none,
+                                    color::text_faint(),
+                                );
+                            }
                             for (i, hit) in results.iter().enumerate() {
+                                if let Some(name) = header(&results, i, &active_name) {
+                                    group_header(ui, name, i == 0 && !none_here);
+                                }
                                 let response = row(ui, hit, i == selected);
                                 if i == selected && (*text != before || chosen.is_none()) {
                                     response.scroll_to_me(None);
@@ -327,6 +367,23 @@ pub fn show(
     }
 }
 
+const HEADER_HEIGHT: f32 = 24.0;
+
+/// A project's name above its hits; a line separates it from the group above.
+fn group_header(ui: &mut Ui, name: &str, first: bool) {
+    let (rect, _) =
+        ui.allocate_exact_size(vec2(ui.available_width(), HEADER_HEIGHT), Sense::hover());
+    let painter = ui.painter();
+    if !first {
+        painter.hline(
+            rect.x_range(),
+            rect.top(),
+            Stroke::new(1.0, color::border()),
+        );
+    }
+    super::widgets::section_heading(ui, painter, rect.left() + 8.0, rect.center().y + 2.0, name);
+}
+
 fn row(ui: &mut Ui, hit: &Hit, selected: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
     let painter = ui.painter();
@@ -348,20 +405,14 @@ fn row(ui: &mut Ui, hit: &Hit, selected: bool) -> egui::Response {
     } else {
         theme::mono()
     };
-    let project_width = if hit.project.is_some() { 118.0 } else { 0.0 };
     let title = super::widgets::elided(
         ui,
         &hit.title,
         font,
         color::text(),
-        rect.width() - 80.0 - detail_width - project_width - 16.0,
+        rect.width() - 80.0 - detail_width - 16.0,
     );
     super::widgets::paint_galley_left(painter, rect.left() + 80.0, y, title, color::text());
-    if let Some(project) = &hit.project {
-        let name = super::widgets::elided(ui, project, theme::small(), color::accent(), 110.0);
-        let x = rect.right() - 8.0 - detail_width - 8.0 - name.size().x;
-        super::widgets::paint_galley_left(painter, x, y, name, color::accent());
-    }
     let detail = super::widgets::elided_path(
         ui,
         &hit.detail,
@@ -465,27 +516,61 @@ mod tests {
     }
 
     #[test]
-    fn groups_hits_by_kind_across_projects() {
-        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    fn groups_hits_by_project_active_first() {
+        let (a, b, c) = (
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        );
         repo(a.path(), "topic");
+        repo(b.path(), "topic");
+        repo(c.path(), "topic");
+        let pool = JobPool::new(2, Arc::new(|| {}));
+        let projects = [
+            open(a.path(), &pool),
+            open(b.path(), &pool),
+            open(c.path(), &pool),
+        ];
+        let (na, nc) = (projects[0].name.clone(), projects[2].name.clone());
+
+        // "main" matches each project's main worktree and main branch.
+        // Searching from the second tab: its hits first, then tab 1, tab 3.
+        let results = hits(&projects, 1, "main");
+        let found: Vec<(&str, Option<&str>)> = results
+            .iter()
+            .filter(|h| matches!(h.kind, "Worktree" | "Branch"))
+            .map(|h| (h.kind, h.project.as_deref()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("Worktree", None),
+                ("Branch", None),
+                ("Worktree", Some(na.as_str())),
+                ("Branch", Some(na.as_str())),
+                ("Worktree", Some(nc.as_str())),
+                ("Branch", Some(nc.as_str())),
+            ]
+        );
+
+        // One header per project, where its hits start.
+        let headers: Vec<&str> = (0..results.len())
+            .filter_map(|i| header(&results, i, "here"))
+            .collect();
+        assert_eq!(headers, ["here", na.as_str(), nc.as_str()]);
+    }
+
+    #[test]
+    fn no_header_when_only_the_active_project_matches() {
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        repo(a.path(), "only-in-a");
         repo(b.path(), "topic");
         let pool = JobPool::new(2, Arc::new(|| {}));
         let projects = [open(a.path(), &pool), open(b.path(), &pool)];
 
-        // "main" matches both main worktrees and both main branches.
-        let kinds: Vec<(&str, bool)> = hits(&projects, 0, "main")
-            .iter()
-            .filter(|h| matches!(h.kind, "Worktree" | "Branch"))
-            .map(|h| (h.kind, h.project.is_some()))
-            .collect();
-        assert_eq!(
-            kinds,
-            [
-                ("Worktree", false),
-                ("Worktree", true),
-                ("Branch", false),
-                ("Branch", true)
-            ]
-        );
+        let results = hits(&projects, 0, "only-in-a");
+        assert!(!results.is_empty());
+        assert!(results.iter().all(|h| h.project.is_none()));
+        assert!((0..results.len()).all(|i| header(&results, i, "here").is_none()));
     }
 }
