@@ -711,7 +711,7 @@ impl GraftApp {
         Panel::top("toolbar")
             .frame(bar(Margin::symmetric(12, 8)))
             .show(ui, |ui| {
-                ui::toolbar::show(ui, project, &mut actions, &mut self.search)
+                ui::toolbar::show(ui, &self.projects, index, &mut actions, &mut self.search)
             });
         Panel::top("tabs")
             .frame(bar(Margin::symmetric(12, 0)))
@@ -734,11 +734,19 @@ impl GraftApp {
             .show(ui, |ui| ui::main_area::show(ui, project, &mut actions));
 
         for action in actions {
-            if matches!(action, Action::Close) {
-                self.close_project(index);
-                break;
+            match action {
+                Action::Close => {
+                    self.close_project(index);
+                    break;
+                }
+                Action::InProject { project, actions } if project < self.projects.len() => {
+                    self.activate(Some(project));
+                    for action in actions {
+                        self.projects[project].apply(action);
+                    }
+                }
+                action => self.projects[index].apply(action),
             }
-            self.projects[index].apply(action);
         }
     }
 }

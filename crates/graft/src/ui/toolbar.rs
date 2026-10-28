@@ -36,7 +36,14 @@ fn no(hint: impl Into<String>) -> Can {
 
 const FINISH_FIRST: &str = "Finish or abort what is in progress first";
 
-pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>, search: &mut String) {
+pub fn show(
+    ui: &mut Ui,
+    projects: &[Project],
+    index: usize,
+    actions: &mut Vec<Action>,
+    search: &mut String,
+) {
+    let project = &projects[index];
     let snap = project.snapshot.as_deref();
     let wt = project.worktree();
     let busy = project.is_operating() || snap.is_none();
@@ -212,7 +219,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>, search: &
         }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            super::search::show(ui, project, search, actions)
+            super::search::show(ui, projects, index, search, actions)
         });
     });
 }

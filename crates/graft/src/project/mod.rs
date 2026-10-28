@@ -83,6 +83,12 @@ pub enum Action {
     Refresh,
     /// Close this project's tab. Handled by the app.
     Close,
+    /// Switch to another open project and apply `actions` there (a search
+    /// hit in another project). Handled by the app.
+    InProject {
+        project: usize,
+        actions: Vec<Action>,
+    },
 
     // File status
     SelectFile(FileKey),
@@ -384,6 +390,11 @@ pub struct Project {
     history_parent: Option<Oid>,
     /// HEAD of the selected worktree moved: select it once history is rebuilt.
     reselect_head: bool,
+    /// A search hit revealed this commit while a refresh was running: that
+    /// refresh must not move the selection to HEAD.
+    revealed: bool,
+    /// Bumped whenever a new snapshot or history arrives.
+    data_generation: u64,
     pub labels: HashMap<Oid, Vec<RefLabel>>,
 
     pub selected: Option<Oid>,
@@ -473,6 +484,8 @@ impl Project {
             history_cancel: CancelToken::default(),
             history_parent: None,
             reselect_head: false,
+            revealed: false,
+            data_generation: 0,
             labels: HashMap::new(),
             selected: None,
             details: None,
@@ -525,6 +538,11 @@ impl Project {
 
     pub fn is_dirty(&self) -> bool {
         self.snapshot.as_ref().is_some_and(|s| s.is_dirty())
+    }
+
+    /// Changes whenever what a search finds in this project can change.
+    pub fn search_stamp(&self) -> (u64, &Path) {
+        (self.data_generation, &self.nav.worktree)
     }
 
     /// The selected worktree.
@@ -596,6 +614,7 @@ impl Project {
                 let had_snapshot = self.snapshot.is_some();
                 let old_head = self.worktree().and_then(|wt| wt.head);
                 self.snapshot = Some(Arc::new(snap));
+                self.data_generation += 1;
                 let head_moved = had_snapshot && self.worktree().and_then(|wt| wt.head) != old_head;
                 if self.first_load {
                     self.first_load = false;
@@ -617,7 +636,8 @@ impl Project {
                 } else {
                     false
                 };
-                if head_moved {
+                let revealed = std::mem::take(&mut self.revealed);
+                if head_moved && !revealed {
                     if reload {
                         self.reselect_head = true;
                     } else {
@@ -706,6 +726,7 @@ impl Project {
                     .selected
                     .is_some_and(|id| history.index.contains_key(&id));
                 self.history = Some(history);
+                self.data_generation += 1;
                 if !keep || std::mem::take(&mut self.reselect_head) {
                     self.select_head();
                 }
@@ -832,13 +853,15 @@ impl Project {
             Action::DropStash(id) => self.drop_stash(id),
             Action::Select(id) => self.select(id),
             Action::Reveal(id) => {
+                self.revealed = self.loading;
+                self.reselect_head = false;
                 self.nav.tab = Tab::Workspace;
                 self.nav.view = WorkspaceView::History;
                 self.select(id);
                 self.scroll_to_selected.set(true);
             }
             Action::Refresh => self.refresh(),
-            Action::Close => {}
+            Action::Close | Action::InProject { .. } => {}
             Action::OpenDialog(_)
             | Action::CloseDialog
             | Action::SubmitDialog
