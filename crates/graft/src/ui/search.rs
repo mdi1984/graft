@@ -7,6 +7,9 @@ use egui::{
     Sense, Stroke, TextEdit, Ui, vec2,
 };
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use super::icons::{self, Icon};
 use crate::keys::Command;
 use crate::project::{Action, FileKey, Project};
@@ -17,12 +20,46 @@ struct Hit {
     kind: &'static str,
     title: String,
     detail: String,
-    /// The other project's name, for a hit outside the active project.
-    project: Option<String>,
+    /// The other project's tab index and name, for a hit outside the
+    /// active project.
+    project: Option<(usize, String)>,
     actions: Vec<Action>,
 }
 
 const LIMIT: usize = 8;
+const HEADER_HEIGHT: f32 = 24.0;
+
+/// What a list of hits was computed from: while it stays the same, the
+/// popup reuses the hits instead of searching every project each frame.
+#[derive(Clone, PartialEq)]
+struct SearchKey {
+    text: String,
+    active: usize,
+    projects: Vec<(u64, PathBuf)>,
+}
+
+fn cached_hits(ui: &Ui, id: Id, projects: &[Project], active: usize, text: &str) -> Arc<Vec<Hit>> {
+    let key = SearchKey {
+        text: text.to_owned(),
+        active,
+        projects: projects
+            .iter()
+            .map(|p| {
+                let (generation, worktree) = p.search_stamp();
+                (generation, worktree.to_path_buf())
+            })
+            .collect(),
+    };
+    let cached: Option<(SearchKey, Arc<Vec<Hit>>)> = ui.data(|d| d.get_temp(id));
+    if let Some((old, results)) = cached
+        && old == key
+    {
+        return results;
+    }
+    let results = Arc::new(hits(projects, active, text));
+    ui.data_mut(|d| d.insert_temp(id, (key, results.clone())));
+    results
+}
 
 /// Hits in every open project: the active project's first, then one group
 /// per other project in tab order. A hit elsewhere switches to its project
@@ -34,7 +71,7 @@ fn hits(projects: &[Project], active: usize, text: &str) -> Vec<Hit> {
         .flat_map(|(i, project)| {
             project_hits(project, text).into_iter().map(move |mut hit| {
                 if i != active {
-                    hit.project = Some(project.name.clone());
+                    hit.project = Some((i, project.name.clone()));
                     hit.actions = vec![Action::InProject {
                         project: i,
                         actions: hit.actions,
@@ -48,16 +85,19 @@ fn hits(projects: &[Project], active: usize, text: &str) -> Vec<Hit> {
 
 /// The group header to draw above `results[i]`: the project name where a
 /// new project's hits start. The active project gets one only when other
-/// projects have hits too.
-fn header<'a>(results: &'a [Hit], i: usize, active_name: &'a str) -> Option<&'a str> {
-    let here = |hit: &'a Hit| hit.project.as_deref();
-    let elsewhere = results.iter().any(|hit| hit.project.is_some());
-    let previous = i.checked_sub(1).map(|p| here(&results[p]));
-    match (previous, here(&results[i])) {
-        (None, None) => elsewhere.then_some(active_name),
-        (None, Some(name)) => Some(name),
-        (Some(prev), Some(name)) if prev != Some(name) => Some(name),
-        _ => None,
+/// projects have hits too (`elsewhere`).
+fn header<'a>(
+    results: &'a [Hit],
+    i: usize,
+    elsewhere: bool,
+    active_name: &'a str,
+) -> Option<&'a str> {
+    let tab = |hit: &Hit| hit.project.as_ref().map(|(tab, _)| *tab);
+    let starts = i == 0 || tab(&results[i - 1]) != tab(&results[i]);
+    match &results[i].project {
+        _ if !starts => None,
+        None => elsewhere.then_some(active_name),
+        Some((_, name)) => Some(name),
     }
 }
 
@@ -261,15 +301,19 @@ pub fn show(
         return;
     }
 
-    let results = hits(projects, active, text);
+    let results = cached_hits(ui, id.with("hits"), projects, active, text);
     let mut selected: usize = ui.data(|d| d.get_temp(selected_id)).unwrap_or(0);
+    // Scroll to the selection only when it moved, so the wheel still scrolls.
+    let mut scroll = *text != before;
     if focused {
         ui.input_mut(|i| {
             if i.consume_key(Modifiers::NONE, Key::ArrowDown) {
                 selected += 1;
+                scroll = true;
             }
             if i.consume_key(Modifiers::NONE, Key::ArrowUp) {
                 selected = selected.saturating_sub(1);
+                scroll = true;
             }
         });
     }
@@ -282,6 +326,7 @@ pub fn show(
     let active_name = format!("{} · current", projects[active].name);
     // The active project found nothing, but others did: say so on top.
     let none_here = results.first().is_some_and(|hit| hit.project.is_some());
+    let elsewhere = results.iter().any(|hit| hit.project.is_some());
     let area = Area::new(id.with("popup"))
         .order(Order::Foreground)
         .fixed_pos(egui::pos2(
@@ -303,7 +348,7 @@ pub fn show(
                     // The popup keeps last frame's size; ask for this list's height.
                     let spacing = ui.spacing().item_spacing.y;
                     let headers = (0..results.len())
-                        .filter(|&i| header(&results, i, &active_name).is_some())
+                        .filter(|&i| header(&results, i, elsewhere, &active_name).is_some())
                         .count()
                         + usize::from(none_here) * 2;
                     let height = (results.len() as f32 * (30.0 + spacing)
@@ -313,8 +358,10 @@ pub fn show(
                         .max_height(420.0)
                         .min_scrolled_height(height)
                         .show(ui, |ui| {
+                            // Headers right above the selected row scroll in with it.
+                            let mut above: Option<Rect> = None;
                             if none_here {
-                                group_header(ui, &active_name, true);
+                                let top = group_header(ui, &active_name, true);
                                 let (rect, _) = ui.allocate_exact_size(
                                     vec2(ui.available_width(), HEADER_HEIGHT),
                                     Sense::hover(),
@@ -331,15 +378,20 @@ pub fn show(
                                     none,
                                     color::text_faint(),
                                 );
+                                above = Some(top.union(rect));
                             }
                             for (i, hit) in results.iter().enumerate() {
-                                if let Some(name) = header(&results, i, &active_name) {
-                                    group_header(ui, name, i == 0 && !none_here);
+                                if let Some(name) = header(&results, i, elsewhere, &active_name) {
+                                    let rect = group_header(ui, name, i == 0 && !none_here);
+                                    above = Some(above.map_or(rect, |a| a.union(rect)));
                                 }
                                 let response = row(ui, hit, i == selected);
-                                if i == selected && (*text != before || chosen.is_none()) {
-                                    response.scroll_to_me(None);
+                                if i == selected && scroll {
+                                    let rect =
+                                        above.map_or(response.rect, |a| a.union(response.rect));
+                                    ui.scroll_to_rect(rect, None);
                                 }
+                                above = None;
                                 if response.clicked() {
                                     chosen = Some(i);
                                 }
@@ -367,10 +419,8 @@ pub fn show(
     }
 }
 
-const HEADER_HEIGHT: f32 = 24.0;
-
 /// A project's name above its hits; a line separates it from the group above.
-fn group_header(ui: &mut Ui, name: &str, first: bool) {
+fn group_header(ui: &mut Ui, name: &str, first: bool) -> Rect {
     let (rect, _) =
         ui.allocate_exact_size(vec2(ui.available_width(), HEADER_HEIGHT), Sense::hover());
     let painter = ui.painter();
@@ -382,6 +432,7 @@ fn group_header(ui: &mut Ui, name: &str, first: bool) {
         );
     }
     super::widgets::section_heading(ui, painter, rect.left() + 8.0, rect.center().y + 2.0, name);
+    rect
 }
 
 fn row(ui: &mut Ui, hit: &Hit, selected: bool) -> egui::Response {
@@ -501,7 +552,7 @@ mod tests {
         assert!(matches!(found[0].actions[..], [Action::Reveal(_)]));
 
         assert_eq!(found[1].title, "feature-here");
-        assert_eq!(found[1].project.as_deref(), Some(projects[0].name.as_str()));
+        assert_eq!(found[1].project, Some((0, projects[0].name.clone())));
         match &found[1].actions[..] {
             [
                 Action::InProject {
@@ -531,33 +582,30 @@ mod tests {
             open(b.path(), &pool),
             open(c.path(), &pool),
         ];
-        let (na, nc) = (projects[0].name.clone(), projects[2].name.clone());
+        let (na, nc) = (projects[0].name.as_str(), projects[2].name.as_str());
 
         // "main" matches each project's main worktree and main branch.
         // Searching from the second tab: its hits first, then tab 1, tab 3.
         let results = hits(&projects, 1, "main");
-        let found: Vec<(&str, Option<&str>)> = results
+        let found: Vec<(&str, Option<usize>)> = results
             .iter()
             .filter(|h| matches!(h.kind, "Worktree" | "Branch"))
-            .map(|h| (h.kind, h.project.as_deref()))
+            .map(|h| (h.kind, h.project.as_ref().map(|(tab, _)| *tab)))
             .collect();
         assert_eq!(
             found,
             [
                 ("Worktree", None),
                 ("Branch", None),
-                ("Worktree", Some(na.as_str())),
-                ("Branch", Some(na.as_str())),
-                ("Worktree", Some(nc.as_str())),
-                ("Branch", Some(nc.as_str())),
+                ("Worktree", Some(0)),
+                ("Branch", Some(0)),
+                ("Worktree", Some(2)),
+                ("Branch", Some(2)),
             ]
         );
 
         // One header per project, where its hits start.
-        let headers: Vec<&str> = (0..results.len())
-            .filter_map(|i| header(&results, i, "here"))
-            .collect();
-        assert_eq!(headers, ["here", na.as_str(), nc.as_str()]);
+        assert_eq!(headers(&results), ["here", na, nc]);
     }
 
     #[test]
@@ -571,6 +619,47 @@ mod tests {
         let results = hits(&projects, 0, "only-in-a");
         assert!(!results.is_empty());
         assert!(results.iter().all(|h| h.project.is_none()));
-        assert!((0..results.len()).all(|i| header(&results, i, "here").is_none()));
+        assert!(headers(&results).is_empty());
+    }
+
+    #[test]
+    fn other_projects_only_when_the_active_one_has_no_match() {
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        repo(a.path(), "topic");
+        repo(b.path(), "only-in-b");
+        let pool = JobPool::new(2, Arc::new(|| {}));
+        let projects = [open(a.path(), &pool), open(b.path(), &pool)];
+
+        // The popup puts "No matches" under the active project on top.
+        let results = hits(&projects, 0, "only-in-b");
+        assert!(results[0].project.is_some());
+        assert_eq!(headers(&results), [projects[1].name.as_str()]);
+    }
+
+    #[test]
+    fn projects_with_the_same_folder_name_get_their_own_groups() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = [
+            dir.path().join("here"),
+            dir.path().join("x").join("app"),
+            dir.path().join("y").join("app"),
+        ];
+        for root in &roots {
+            std::fs::create_dir_all(root).unwrap();
+            repo(root, "topic");
+        }
+        let pool = JobPool::new(2, Arc::new(|| {}));
+        let projects: Vec<Project> = roots.iter().map(|r| open(r, &pool)).collect();
+
+        let results = hits(&projects, 0, "topic");
+        assert_eq!(headers(&results), ["here", "app", "app"]);
+    }
+
+    /// The group headers the popup draws, the active project's as "here".
+    fn headers(results: &[Hit]) -> Vec<&str> {
+        let elsewhere = results.iter().any(|h| h.project.is_some());
+        (0..results.len())
+            .filter_map(|i| header(results, i, elsewhere, "here"))
+            .collect()
     }
 }
