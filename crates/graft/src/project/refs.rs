@@ -7,7 +7,7 @@ use graft_core::remote::{self, is_rejected_push};
 use graft_core::stash;
 
 use super::changes::Then;
-use super::{Action, Confirm, Project, RemoteOp};
+use super::{Action, Confirm, Project, RemoteOp, Tab};
 
 /// A dialog that asks for a name or a choice before running a git command.
 #[derive(Clone, Debug)]
@@ -299,7 +299,7 @@ impl Project {
                 self.confirm = Some(Confirm {
                     title: format!("Your changes are in the way of {branch}"),
                     body: format!(
-                        "Switching would overwrite uncommitted changes in this worktree: \
+                        "Switching would overwrite uncommitted changes in your main folder: \
                          {}.\n\nGraft can stash them first; get them back later from \
                          Stashes (Apply or Pop).",
                         files_in_the_way(&error)
@@ -356,13 +356,13 @@ impl Project {
             Action::SubmitDialog => self.submit_dialog(),
             Action::Checkout(branch) => {
                 let then = Then::Switched(branch.clone());
-                self.run_op("Switching branch", then, move |git| {
-                    refs::switch(&git, &branch)
+                self.checkout("Switching branch", then, move |git| {
+                    refs::switch(&git, &branch).map(|()| None)
                 });
             }
             Action::StashAndCheckout { branch, untracked } => {
                 let then = Then::Switched(branch.clone());
-                self.run_op_at(self.wt_git(), "Switching branch", then, move |git| {
+                self.checkout("Switching branch", then, move |git| {
                     stash::push(
                         &git,
                         &stash::Options {
@@ -379,15 +379,15 @@ impl Project {
             }
             Action::CheckoutRemote { local, remote } => {
                 let done = format!("Switched to {local}, tracking {remote}");
-                self.run_op("Switching branch", Then::Info(done), move |git| {
-                    refs::switch_tracking(&git, &local, &remote)
+                self.checkout("Switching branch", Then::Info(done), move |git| {
+                    refs::switch_tracking(&git, &local, &remote).map(|()| None)
                 });
             }
             Action::CheckoutDetached(id) => {
                 let rev = id.to_string();
                 let done = format!("Checked out {}", graft_core::short(&id));
-                self.run_op("Checking out", Then::Info(done), move |git| {
-                    refs::switch_detached(&git, &rev)
+                self.checkout("Checking out", Then::Info(done), move |git| {
+                    refs::switch_detached(&git, &rev).map(|()| None)
                 });
             }
             Action::DeleteBranch { name, force } => {
@@ -456,6 +456,36 @@ impl Project {
             _ => {}
         }
     }
+
+    /// Check out in the main folder, never in a linked worktree, and select
+    /// the main folder so the user sees where it happened. Stays put on
+    /// Review or with a drafted commit message, which selecting would reset.
+    fn checkout(
+        &mut self,
+        label: &str,
+        then: Then,
+        job: impl FnOnce(graft_core::Git) -> anyhow::Result<Option<String>> + Send + 'static,
+    ) {
+        if self.is_operating() {
+            return;
+        }
+        if let Some(reason) = self.checkout_blocked() {
+            self.notices.push(reason.to_owned());
+            return;
+        }
+        let draft =
+            !self.commit_form.summary.trim().is_empty() || !self.commit_form.body.trim().is_empty();
+        if self.nav.tab != Tab::Review
+            && !draft
+            && let Some(main) = self.main_worktree()
+            && !graft_core::same_path(&main.path, &self.nav.worktree)
+        {
+            let main = main.path.clone();
+            self.open_worktree(main);
+        }
+        // `self.git` works in the main folder.
+        self.run_op_at(self.git.clone(), label, then, job);
+    }
 }
 
 /// Git refused to switch branches because local changes would be lost.
@@ -484,7 +514,200 @@ fn files_in_the_way(error: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+    use std::process::Command as Cmd;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use graft_core::Console;
+    use graft_core::jobs::JobPool;
+
     use super::*;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Cmd::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// Poll until `done` holds for the project.
+    fn wait(project: &mut Project, what: &str, done: impl Fn(&Project) -> bool) {
+        let start = Instant::now();
+        loop {
+            project.poll();
+            if done(project) {
+                return;
+            }
+            assert!(start.elapsed() < Duration::from_secs(20), "{what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn branch_at(project: &Project, path: &Path) -> Option<String> {
+        project
+            .snapshot
+            .as_ref()?
+            .worktrees
+            .iter()
+            .find(|wt| graft_core::same_path(&wt.path, path))?
+            .branch
+            .clone()
+    }
+
+    struct Setup {
+        _dir: tempfile::TempDir,
+        project: Project,
+        main: PathBuf,
+        linked: PathBuf,
+    }
+
+    /// A repo on `main` with a branch `other` (a.txt differs) and a linked
+    /// worktree on `agent`, which is selected. `prepare` runs in the main
+    /// folder before Graft opens it.
+    fn setup(prepare: impl FnOnce(&Path)) -> Setup {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        let linked = dir.path().join("linked");
+        std::fs::create_dir_all(&main).unwrap();
+        git(&main, &["init", "-q", "-b", "main"]);
+        std::fs::write(main.join("a.txt"), "a\n").unwrap();
+        git(&main, &["add", "a.txt"]);
+        git(&main, &["commit", "-q", "-m", "first"]);
+        git(&main, &["switch", "-q", "-c", "other"]);
+        std::fs::write(main.join("a.txt"), "other\n").unwrap();
+        git(&main, &["commit", "-q", "-am", "other"]);
+        git(&main, &["switch", "-q", "main"]);
+        let linked_arg = linked.to_str().unwrap();
+        git(&main, &["worktree", "add", "-q", "-b", "agent", linked_arg]);
+        prepare(&main);
+
+        let pool = JobPool::new(2, Arc::new(|| {}));
+        let mut project = Project::new(main.clone(), main.clone(), Console::default(), pool);
+        wait(&mut project, "snapshot never came", |p| {
+            p.snapshot.is_some()
+        });
+        // Git's spelling of the folders (the temp folder may be a short name).
+        let snap = project.snapshot.clone().unwrap();
+        let main = snap.main_worktree().unwrap().path.clone();
+        let linked = snap.worktrees.iter().find(|wt| !wt.is_main).unwrap();
+        let linked = linked.path.clone();
+        project.apply(Action::OpenWorktree(linked.clone()));
+        assert_eq!(project.in_main_suffix(), " in the main folder");
+        Setup {
+            _dir: dir,
+            project,
+            main,
+            linked,
+        }
+    }
+
+    /// With a linked worktree selected, Check out switches the main folder,
+    /// selects it, and leaves the worktree on its branch.
+    #[test]
+    fn checkout_lands_in_the_main_folder() {
+        let Setup {
+            _dir,
+            mut project,
+            main,
+            linked,
+        } = setup(|_| {});
+        project.apply(Action::Checkout("other".to_owned()));
+        assert!(graft_core::same_path(&project.nav.worktree, &main));
+        wait(&mut project, "main never switched", |p| {
+            !p.is_operating() && branch_at(p, &main).as_deref() == Some("other")
+        });
+        assert_eq!(branch_at(&project, &linked).as_deref(), Some("agent"));
+        assert_eq!(project.in_main_suffix(), "");
+        assert!(project.notices.is_empty(), "{:?}", project.notices);
+    }
+
+    /// Changes in the main folder block the switch; "Stash and switch"
+    /// stashes them there, not in the selected worktree.
+    #[test]
+    fn stash_and_switch_works_in_the_main_folder() {
+        let Setup {
+            _dir,
+            mut project,
+            main,
+            linked,
+        } = setup(|main| std::fs::write(main.join("a.txt"), "local\n").unwrap());
+        std::fs::write(linked.join("b.txt"), "agent's work\n").unwrap();
+        project.apply(Action::Checkout("other".to_owned()));
+        wait(&mut project, "no stash offer", |p| p.confirm.is_some());
+        let action = project.confirm.take().unwrap().action;
+        assert!(matches!(action, Action::StashAndCheckout { .. }));
+        project.apply(action);
+        wait(&mut project, "main never switched", |p| {
+            !p.is_operating() && branch_at(p, &main).as_deref() == Some("other")
+        });
+        assert!(project.notices.is_empty(), "{:?}", project.notices);
+        let stashes = Cmd::new("git")
+            .args(["stash", "list"])
+            .current_dir(&main)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&stashes.stdout).lines().count(), 1);
+        // The worktree kept its branch and its own uncommitted file.
+        assert_eq!(branch_at(&project, &linked).as_deref(), Some("agent"));
+        assert!(linked.join("b.txt").exists());
+    }
+
+    /// A merge stopped in the main folder: Check out says why it can't,
+    /// and nothing switches.
+    #[test]
+    fn no_checkout_while_main_is_mid_merge() {
+        let Setup {
+            _dir,
+            mut project,
+            main,
+            ..
+        } = setup(|main| {
+            std::fs::write(main.join("a.txt"), "main\n").unwrap();
+            git(main, &["commit", "-q", "-am", "main"]);
+            let merge = Cmd::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(["merge", "-q", "other"])
+                .current_dir(main)
+                .output()
+                .unwrap();
+            assert!(!merge.status.success(), "the merge should conflict");
+        });
+        project.apply(Action::Checkout("other".to_owned()));
+        assert!(!project.is_operating());
+        assert_eq!(project.notices.len(), 1);
+        assert!(project.notices[0].contains("Finish or abort"));
+        assert_eq!(branch_at(&project, &main).as_deref(), Some("main"));
+    }
+
+    /// A drafted commit message in the selected worktree survives a
+    /// checkout: the main folder switches, the selection stays.
+    #[test]
+    fn checkout_keeps_a_drafted_message() {
+        let Setup {
+            _dir,
+            mut project,
+            main,
+            linked,
+        } = setup(|_| {});
+        project.commit_form.summary = "half-written".to_owned();
+        project.apply(Action::Checkout("other".to_owned()));
+        wait(&mut project, "main never switched", |p| {
+            !p.is_operating() && branch_at(p, &main).as_deref() == Some("other")
+        });
+        assert!(graft_core::same_path(&project.nav.worktree, &linked));
+        assert_eq!(project.commit_form.summary, "half-written");
+    }
 
     #[test]
     fn lists_files_in_the_way() {
