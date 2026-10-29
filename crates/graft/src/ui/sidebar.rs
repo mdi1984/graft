@@ -486,7 +486,7 @@ fn branch_menu(
         None if !is_head => {
             menu_item(
                 ui,
-                &format!("Check out {name}"),
+                &format!("Check out {name}{}", project.in_main_suffix()),
                 !busy,
                 actions,
                 Action::Checkout(name.to_owned()),
@@ -617,7 +617,7 @@ fn remote_branch_menu(
     match repo.branch(local) {
         Some(_) if repo.worktree_for_branch(local).is_none() => menu_item(
             ui,
-            &format!("Check out {local}"),
+            &format!("Check out {local}{}", project.in_main_suffix()),
             !busy,
             actions,
             Action::Checkout(local.to_owned()),
@@ -626,7 +626,7 @@ fn remote_branch_menu(
         None => {
             menu_item(
                 ui,
-                &format!("Check out as {local}"),
+                &format!("Check out as {local}{}", project.in_main_suffix()),
                 !busy,
                 actions,
                 Action::CheckoutRemote {
@@ -792,13 +792,13 @@ fn branch_row(
     let tip = match checked_out {
         Some(wt) if wt.is_main => format!("{tip}\nChecked out in your main folder"),
         Some(wt) => format!("{tip}\nChecked out in the worktree {}", wt.path.display()),
-        None => format!("{tip}\nDouble-click to check it out"),
+        None => format!("{tip}\nDouble-click to check it out in the main folder"),
     };
     response.on_hover_text(tip)
 }
 
 /// Double-click on a branch: go to the worktree that has it checked out, or
-/// check it out in the selected worktree.
+/// check it out in the main folder.
 fn open_branch(project: &Project, repo: &RepoSnapshot, name: &str) -> Option<Action> {
     match repo.worktree_for_branch(name) {
         Some(wt) if same_path(&wt.path, &project.nav.worktree) => None,

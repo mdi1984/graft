@@ -187,6 +187,40 @@ impl Project {
         self.git.at(&self.nav.worktree)
     }
 
+    /// The main folder. Checkouts always happen there, never in a linked
+    /// worktree: a worktree keeps its branch.
+    pub fn main_worktree(&self) -> Option<&graft_core::Worktree> {
+        self.snapshot.as_ref()?.main_worktree()
+    }
+
+    /// Why the main folder can't switch now, for a readable notice.
+    pub fn checkout_blocked(&self) -> Option<&'static str> {
+        let snap = self.snapshot.as_ref()?;
+        if snap.preview.is_some() {
+            Some("The main folder shows a preview. Restore main first, then check out.")
+        } else if self
+            .main_worktree()
+            .is_some_and(|wt| wt.in_progress.is_some())
+        {
+            Some(
+                "A merge, rebase, cherry-pick or revert is still going on in the main folder. \
+                 Finish or abort it first, then check out.",
+            )
+        } else {
+            None
+        }
+    }
+
+    /// " in the main folder" while a linked worktree is selected, so a menu
+    /// says where a checkout lands; empty while the main folder is selected.
+    pub fn in_main_suffix(&self) -> &'static str {
+        if self.worktree().is_some_and(|wt| !wt.is_main) {
+            " in the main folder"
+        } else {
+            ""
+        }
+    }
+
     pub fn is_operating(&self) -> bool {
         self.op.is_some()
     }

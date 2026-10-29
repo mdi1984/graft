@@ -10,8 +10,8 @@ use graft_core::details::{CommitDetails, FileChange};
 use graft_core::diff::Source;
 use graft_core::history::{Commit, GraphRow, History, LineKind};
 use graft_core::refs::ResetMode;
-use graft_core::short;
 use graft_core::status::Change;
+use graft_core::{same_path, short};
 
 use super::diff_view;
 use super::icons::Icon;
@@ -520,6 +520,8 @@ fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Ve
     let branch = wt.and_then(|wt| wt.branch.clone());
     let is_head = wt.and_then(|wt| wt.head) == Some(commit.id);
     let short_id = short(&commit.id);
+    let in_main = project.in_main_suffix();
+    let main_head = project.main_worktree().and_then(|wt| wt.head);
     let mut item = |ui: &mut Ui, label: &str, enabled: bool, action: Action| {
         if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
             actions.push(action);
@@ -527,6 +529,74 @@ fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Ve
         }
     };
 
+    // The branches on this commit, like the sidebar offers them.
+    if let Some(repo) = &project.snapshot {
+        let mut offered = false;
+        for b in repo.branches.iter().filter(|b| b.target == commit.id) {
+            let name = &b.name;
+            match repo.worktree_for_branch(name) {
+                Some(wt) if same_path(&wt.path, &project.nav.worktree) => continue,
+                Some(wt) => item(
+                    ui,
+                    &if wt.is_main {
+                        format!("Go to {name} in the main folder")
+                    } else {
+                        format!("Open the worktree of {name}")
+                    },
+                    true,
+                    Action::OpenWorktree(wt.path.clone()),
+                ),
+                None => {
+                    item(
+                        ui,
+                        &format!("Check out {name}{in_main}"),
+                        !busy,
+                        Action::Checkout(name.clone()),
+                    );
+                    item(
+                        ui,
+                        &format!("New worktree for {name}…"),
+                        !busy,
+                        Action::NewWorktree(Some(name.clone())),
+                    );
+                }
+            }
+            offered = true;
+        }
+        let mut tracked: Vec<&str> = Vec::new();
+        for r in repo
+            .remote_branches
+            .iter()
+            .filter(|r| r.target == commit.id)
+        {
+            // A local branch of that name is offered above, or points
+            // elsewhere; origin/HEAD is no branch to check out.
+            let local = r.branch_name();
+            if local == "HEAD" || repo.branch(local).is_some() || tracked.contains(&local) {
+                continue;
+            }
+            tracked.push(local);
+            item(
+                ui,
+                &format!("Check out {} as {local}{in_main}", r.name),
+                !busy,
+                Action::CheckoutRemote {
+                    local: local.to_owned(),
+                    remote: r.name.clone(),
+                },
+            );
+            item(
+                ui,
+                &format!("New worktree for {}…", r.name),
+                !busy,
+                Action::NewWorktree(Some(r.name.clone())),
+            );
+            offered = true;
+        }
+        if offered {
+            ui.separator();
+        }
+    }
     item(
         ui,
         "New branch here…",
@@ -551,8 +621,8 @@ fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Ve
     );
     item(
         ui,
-        "Check out this commit (detached)",
-        !busy && !is_head,
+        &format!("Check out this commit (detached){in_main}"),
+        !busy && main_head != Some(commit.id),
         Action::CheckoutDetached(commit.id),
     );
     ui.separator();
