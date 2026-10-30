@@ -16,6 +16,7 @@ pub enum Command {
     CloseTab,
     NextTab,
     PreviousTab,
+    AllTabs,
     Settings,
     Refresh,
     Console,
@@ -80,13 +81,14 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 }
 
 impl Command {
-    pub const ALL: [Command; 19] = [
+    pub const ALL: [Command; 20] = [
         Command::Search,
         Command::NewTab,
         Command::OpenFolder,
         Command::CloseTab,
         Command::NextTab,
         Command::PreviousTab,
+        Command::AllTabs,
         Command::Settings,
         Command::Refresh,
         Command::Console,
@@ -111,6 +113,7 @@ impl Command {
             Command::CloseTab => "close-tab",
             Command::NextTab => "next-tab",
             Command::PreviousTab => "previous-tab",
+            Command::AllTabs => "all-tabs",
             Command::Settings => "settings",
             Command::Refresh => "refresh",
             Command::Console => "console",
@@ -135,6 +138,7 @@ impl Command {
             Command::CloseTab => "Close the tab",
             Command::NextTab => "Next tab",
             Command::PreviousTab => "Previous tab",
+            Command::AllTabs => "Find an open tab",
             Command::Settings => "Settings",
             Command::Refresh => "Refresh",
             Command::Console => "Show or hide the git console",
@@ -173,6 +177,7 @@ impl Command {
             Command::CloseTab => ctrl(Key::W),
             Command::NextTab => ctrl(Key::Tab),
             Command::PreviousTab => ctrl_shift(Key::Tab),
+            Command::AllTabs => ctrl_shift(Key::A),
             Command::Settings => ctrl(Key::Comma),
             Command::Refresh => plain(Key::F5),
             Command::Console => ctrl(Key::J),

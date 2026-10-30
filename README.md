@@ -87,7 +87,8 @@ commit and push in one go.
 - **Windows only.** It is a personal tool, tuned for one platform.
 
 ## Everyday git, of course
-Open, clone or create repositories as tabs (they reopen on start) · commit graph with branch and tag
+Open, clone or create repositories as tabs (they reopen on start, scroll when there are many,
+and **Ctrl+Shift+A** finds one) · commit graph with branch and tag
 chips · checkout, create, rename, delete and track branches · cherry-pick, revert, reset ·
 merge and rebase with Continue/Abort · tags · remotes · pull, push, fetch with progress · background
 fetch · file history and blame · undo last commit · search everything with **Ctrl+K**.
@@ -136,6 +137,7 @@ shortcut for each action.
 | Ctrl+O | Open a folder |
 | Ctrl+W | Close the tab |
 | Ctrl+Tab, Ctrl+Shift+Tab | Next / previous tab |
+| Ctrl+Shift+A | Find an open tab |
 | Ctrl+, | Settings |
 | F5 | Refresh |
 | Ctrl+J | Show or hide the git console |
