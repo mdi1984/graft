@@ -3,6 +3,7 @@
 
 mod app;
 mod fonts;
+mod groups;
 mod installed;
 mod keys;
 mod launch;

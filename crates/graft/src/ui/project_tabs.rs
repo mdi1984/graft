@@ -1,12 +1,16 @@
 //! The strip of project tabs at the very top, like browser tabs: one per open
 //! repository, a "+" for the start page, drag to reorder, middle-click to close.
 //! When the tabs don't fit they scroll sideways (wheel, or the arrows at the
-//! ends), and the "All tabs" list next to "+" finds any of them.
+//! ends), and the "All tabs" list next to "+" finds any of them. Tabs can
+//! be grouped (see `groups`): a colored label before the group's tabs,
+//! which collapses them.
 //! It is also the window's title bar (see `window_frame`).
 
+use std::sync::Arc;
+
 use egui::{
-    Area, CornerRadius, Frame, Key, Margin, Modifiers, Order, Rect, Response, ScrollArea, Sense,
-    Stroke, Ui, UiBuilder, pos2, vec2,
+    Area, Color32, CornerRadius, Frame, Galley, Key, Margin, Modifiers, Order, Rect, Response,
+    RichText, ScrollArea, Sense, Stroke, Ui, UiBuilder, pos2, vec2,
 };
 
 use super::icons::Icon;
@@ -14,6 +18,7 @@ use super::widgets::{
     elided, elided_path, paint_galley_left, paint_icon_button, spinner, text_field,
 };
 use super::window_frame;
+use crate::groups::{self, GroupId, Item};
 use crate::keys::{Command, Keymap};
 use crate::theme::{self, RADIUS, color};
 
@@ -32,6 +37,8 @@ const BUTTON: f32 = 26.0;
 const ARROW: f32 = 22.0;
 const LIST_WIDTH: f32 = 380.0;
 const ROW_HEIGHT: f32 = 40.0;
+const LABEL_PAD: f32 = 10.0;
+const LABEL_MAX_WIDTH: f32 = 180.0;
 
 pub struct TabInfo {
     pub name: String,
@@ -40,14 +47,26 @@ pub struct TabInfo {
     pub dirty: bool,
     pub busy: bool,
     pub error: bool,
+    pub group: Option<GroupId>,
+}
+
+/// A tab group, as the strip shows it.
+pub struct GroupInfo {
+    pub id: GroupId,
+    pub name: String,
+    /// Index into `color::lanes()`.
+    pub color: usize,
+    pub collapsed: bool,
 }
 
 pub enum TabAction {
     Activate(usize),
     Close(usize),
+    /// A dragged tab moves to `to` (see [`groups::Step`]).
     Move {
         from: usize,
         to: usize,
+        group: Option<GroupId>,
     },
     /// Show the start page.
     NewTab,
@@ -55,6 +74,19 @@ pub enum TabAction {
     CloseStart,
     OpenSettings,
     OpenAbout,
+    ToggleGroup(GroupId),
+    /// Ask for a name, then put the tab into a new group.
+    NewGroup(usize),
+    SetGroup {
+        tab: usize,
+        group: Option<GroupId>,
+    },
+    RenameGroup(GroupId),
+    RecolorGroup(GroupId, usize),
+    /// Close the group's tabs; the group stays.
+    CloseGroup(GroupId),
+    /// Forget the group; its tabs stay open.
+    Ungroup(GroupId),
 }
 
 /// `active` is `None` while the start page is showing; it then gets a tab too.
@@ -62,6 +94,7 @@ pub enum TabAction {
 pub fn show(
     ui: &mut Ui,
     tabs: &[TabInfo],
+    tab_groups: &[GroupInfo],
     active: Option<usize>,
     update: Option<&str>,
     keys: &Keymap,
@@ -103,8 +136,20 @@ pub fn show(
         vec2(BUTTON, BUTTON),
     );
 
+    let group_info = |id: GroupId| tab_groups.iter().find(|g| g.id == id);
+    let collapsed = |id: GroupId| group_info(id).is_some_and(|g| g.collapsed);
+    let memberships: Vec<Option<GroupId>> = tabs.iter().map(|t| t.group).collect();
+    let items = groups::visible(&memberships, collapsed, active);
+
     // The tabs get what is left between the app icon and the buttons after
-    // them; past their minimum width they scroll.
+    // them, besides the group labels; past their minimum width they scroll.
+    let labels: Vec<Option<Label>> = items
+        .iter()
+        .map(|item| match *item {
+            Item::Label(id) => group_info(id).map(|g| Label::new(ui, g, tabs)),
+            Item::Tab(_) => None,
+        })
+        .collect();
     let left = full.left() + 40.0;
     let buttons = if tabs.is_empty() {
         32.0
@@ -112,10 +157,26 @@ pub fn show(
         32.0 + BUTTON + 4.0
     };
     let room = (gear.left() - 8.0 - update_width - left - buttons).max(MIN_WIDTH);
-    let count = tabs.len() + usize::from(active.is_none());
-    let width = (room / count.max(1) as f32 - GAP).clamp(MIN_WIDTH, MAX_WIDTH);
+    let tab_count =
+        items.iter().filter(|i| matches!(i, Item::Tab(_))).count() + usize::from(active.is_none());
+    let labels_width: f32 = labels.iter().flatten().map(|l| l.width + GAP).sum();
+    let width = ((room - labels_width) / tab_count.max(1) as f32 - GAP).clamp(MIN_WIDTH, MAX_WIDTH);
     let step = width + GAP;
-    let content = count as f32 * step;
+    // Where each item starts, from the strip's start. The start page's tab
+    // comes last.
+    let mut starts = Vec::with_capacity(items.len());
+    let mut content = 0.0;
+    for (item, label) in items.iter().zip(&labels) {
+        starts.push(content);
+        content += match item {
+            Item::Label(_) => label.as_ref().map_or(0.0, |l| l.width + GAP),
+            Item::Tab(_) => step,
+        };
+    }
+    let start_tab_at = content;
+    if active.is_none() {
+        content += step;
+    }
     let overflow = content > room;
     let max_offset = (content - room).max(0.0);
     let view = Rect::from_min_max(pos2(left, top), pos2(left + content.min(room), bottom));
@@ -129,11 +190,13 @@ pub fn show(
     // A tab that becomes active (click, shortcut, search, a new repository)
     // scrolls into view; otherwise the strip stays where the user left it.
     let follow_id = ui.scope_id().with("tab-follow");
-    let shown = active.unwrap_or(tabs.len());
-    if ui.data(|d| d.get_temp::<(usize, usize)>(follow_id)) != Some((shown, count)) {
-        ui.data_mut(|d| d.insert_temp(follow_id, (shown, count)));
+    let follow = (active.unwrap_or(tabs.len()), items.len());
+    if ui.data(|d| d.get_temp::<(usize, usize)>(follow_id)) != Some(follow) {
+        ui.data_mut(|d| d.insert_temp(follow_id, follow));
         let margin = if overflow { ARROW } else { 0.0 };
-        let tab_left = shown as f32 * step;
+        let tab_left = active
+            .and_then(|a| items.iter().position(|it| *it == Item::Tab(a)))
+            .map_or(start_tab_at, |k| starts[k]);
         offset = offset
             .min(tab_left - margin)
             .max(tab_left + width + margin - room);
@@ -145,10 +208,28 @@ pub fn show(
     tab_ui.set_clip_rect(view.intersect(ui.clip_rect()));
     let tab_ui = &tab_ui;
 
-    let mut x = left - offset;
-    let mut rects = Vec::with_capacity(tabs.len());
+    let mut rects = Vec::with_capacity(items.len());
     let mut dragged = None;
-    for (i, tab) in tabs.iter().enumerate() {
+    for (k, item) in items.iter().enumerate() {
+        let x = left - offset + starts[k];
+        let i = match *item {
+            Item::Tab(i) => i,
+            Item::Label(_) => {
+                let rect = match &labels[k] {
+                    Some(label) => {
+                        let rect = Rect::from_min_size(pos2(x, top), vec2(label.width, TAB_HEIGHT));
+                        if let Some(a) = label.show(tab_ui, rect, tab_groups) {
+                            action = Some(a);
+                        }
+                        rect
+                    }
+                    None => Rect::NOTHING,
+                };
+                rects.push(rect);
+                continue;
+            }
+        };
+        let tab = &tabs[i];
         let rect = Rect::from_min_size(pos2(x, top), vec2(width, TAB_HEIGHT));
         rects.push(rect);
         // Keyed by folder, not position: a drag must stay with its tab
@@ -167,6 +248,13 @@ pub fn show(
             selected,
             response.hovered() || close.hovered(),
         );
+        if let Some(g) = tab.group.and_then(group_info) {
+            tab_ui.painter().hline(
+                rect.x_range(),
+                rect.bottom() - 1.0,
+                Stroke::new(2.0, group_color(g.color)),
+            );
+        }
         let y = rect.center().y;
         let text_x = rect.left() + PAD_X + status_dot(tab_ui, rect.left() + PAD_X, y, tab);
         let show_close = selected || response.hovered() || close.hovered();
@@ -191,18 +279,45 @@ pub fn show(
         } else if (response.clicked() || response.drag_started()) && active != Some(i) {
             action = Some(TabAction::Activate(i));
         }
+        response.context_menu(|ui| {
+            if let Some(a) = tab_menu(ui, i, tab, tab_groups) {
+                action = Some(a);
+            }
+        });
         if response.dragged() {
-            dragged = Some(i);
+            dragged = Some((k, i));
         }
-        x += step;
     }
 
-    // Reorder: swap with a neighbour once the pointer passes its middle.
-    if let (Some(i), Some(pointer)) = (dragged, ui.ctx().pointer_interact_pos()) {
-        if i + 1 < rects.len() && pointer.x > rects[i + 1].center().x {
-            action = Some(TabAction::Move { from: i, to: i + 1 });
-        } else if i > 0 && pointer.x < rects[i - 1].center().x {
-            action = Some(TabAction::Move { from: i, to: i - 1 });
+    // Reorder: step past a neighbour (a tab or a group's label) once the
+    // pointer passes its middle. The last tab of a group at the very end
+    // leaves it once the pointer passes its own end.
+    let hold_id = ui.scope_id().with("tab-drag-hold");
+    if let (Some((k, i)), Some(pointer)) = (dragged, ui.ctx().pointer_interact_pos()) {
+        let right = match rects.get(k + 1) {
+            Some(next) => pointer.x > next.center().x,
+            None => tabs[i].group.is_some() && pointer.x > rects[k].right(),
+        };
+        let back = k > 0 && pointer.x < rects[k - 1].center().x;
+        // Joining or leaving a group can leave the tab where it is, with the
+        // pointer still past the neighbour: the next step waits until the
+        // pointer has moved on by half a tab.
+        let hold: Option<f32> = ui.data(|d| d.get_temp(hold_id));
+        let held = hold.is_some_and(|x| (pointer.x - x).abs() < step / 2.0);
+        if (right || back)
+            && !held
+            && let Some(next) = groups::drag_step(&memberships, &items, collapsed, i, right)
+        {
+            if next.to == i {
+                ui.data_mut(|d| d.insert_temp(hold_id, pointer.x));
+            } else {
+                ui.data_mut(|d| d.remove::<f32>(hold_id));
+            }
+            action = Some(TabAction::Move {
+                from: i,
+                to: next.to,
+                group: next.group,
+            });
         }
         // Dragging to an end of a scrolling strip scrolls it along.
         if overflow {
@@ -213,9 +328,12 @@ pub fn show(
             }
             ui.ctx().request_repaint();
         }
+    } else {
+        ui.data_mut(|d| d.remove::<f32>(hold_id));
     }
 
     if active.is_none() {
+        let x = left - offset + start_tab_at;
         let rect = Rect::from_min_size(pos2(x, top), vec2(width, TAB_HEIGHT));
         let id = tab_ui.scope_id().with("start-tab");
         let close_rect = close_rect(rect);
@@ -276,7 +394,7 @@ pub fn show(
             .on_hover_text(keys.tip("All tabs", Command::AllTabs));
         paint_icon_button(ui, rect, &response, Icon::ChevronDown);
         let toggle = response.clicked() || keys.pressed(ui.ctx(), Command::AllTabs);
-        if let Some(i) = all_tabs(ui, &response, toggle, tabs, active) {
+        if let Some(i) = all_tabs(ui, &response, toggle, tabs, tab_groups, active) {
             action = Some(TabAction::Activate(i));
         }
     } else {
@@ -355,14 +473,19 @@ fn arrow(ui: &Ui, view: Rect, right: bool) -> Response {
 }
 
 /// The "All tabs" list under its button: every open repository, filtered by
-/// name or folder as you type. Returns the tab picked.
+/// name, folder or group as you type. Returns the tab picked.
 fn all_tabs(
     ui: &Ui,
     button: &Response,
     toggle: bool,
     tabs: &[TabInfo],
+    tab_groups: &[GroupInfo],
     active: Option<usize>,
 ) -> Option<usize> {
+    let group_of = |tab: &TabInfo| {
+        tab.group
+            .and_then(|id| tab_groups.iter().find(|g| g.id == id))
+    };
     let id = button.id.with("list");
     let open_id = id.with("open");
     let filter_id = id.with("filter");
@@ -421,6 +544,8 @@ fn all_tabs(
                             needle.is_empty()
                                 || tabs[i].name.to_lowercase().contains(&needle)
                                 || tabs[i].tooltip.to_lowercase().contains(&needle)
+                                || group_of(&tabs[i])
+                                    .is_some_and(|g| g.name.to_lowercase().contains(&needle))
                         })
                         .collect();
                     // The selection is a tab index; keep it on a visible one.
@@ -457,7 +582,9 @@ fn all_tabs(
                         .show(ui, |ui| {
                             ui.spacing_mut().item_spacing.y = 0.0;
                             for (k, &i) in hits.iter().enumerate() {
-                                let response = list_row(ui, &tabs[i], k == pos, active == Some(i));
+                                let tab = &tabs[i];
+                                let response =
+                                    list_row(ui, tab, group_of(tab), k == pos, active == Some(i));
                                 if k == pos && scroll {
                                     ui.scroll_to_rect(response.rect, None);
                                 }
@@ -490,7 +617,13 @@ fn all_tabs(
     chosen
 }
 
-fn list_row(ui: &mut Ui, tab: &TabInfo, selected: bool, current: bool) -> Response {
+fn list_row(
+    ui: &mut Ui,
+    tab: &TabInfo,
+    group: Option<&GroupInfo>,
+    selected: bool,
+    current: bool,
+) -> Response {
     let (rect, response) =
         ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
     let painter = ui.painter();
@@ -507,12 +640,21 @@ fn list_row(ui: &mut Ui, tab: &TabInfo, selected: bool, current: bool) -> Respon
     let left = rect.left() + 12.0;
     let top_y = rect.top() + 13.0;
     let text_x = left + status_dot(ui, left, top_y, tab);
+    // The group's name, in its color, at the right end.
+    let mut name_right = rect.right() - 10.0;
+    if let Some(g) = group {
+        let fg = group_color(g.color);
+        let galley = elided(ui, &g.name, theme::small(), fg, 120.0);
+        let x = name_right - galley.size().x;
+        paint_galley_left(painter, x, top_y, galley, fg);
+        name_right = x - 8.0;
+    }
     let name = elided(
         ui,
         &tab.name,
         theme::semibold(theme::BODY_SIZE),
         color::text(),
-        rect.right() - 10.0 - text_x,
+        name_right - text_x,
     );
     paint_galley_left(painter, text_x, top_y, name, color::text());
     let path = elided_path(
@@ -551,4 +693,167 @@ fn paint_tab(ui: &Ui, rect: Rect, selected: bool, hovered: bool) {
     } else if hovered {
         painter.rect_filled(rect, radius, color::hover_row_bg());
     }
+}
+
+/// A group's color.
+pub fn group_color(index: usize) -> Color32 {
+    let lanes = color::lanes();
+    lanes[index % lanes.len()]
+}
+
+/// A group's label in the strip: its name on a tint of its color. Click to
+/// collapse or expand; right-click for the group's menu.
+struct Label {
+    id: GroupId,
+    color: Color32,
+    galley: Arc<Galley>,
+    /// Collapsed, with changes in one of its tabs.
+    dirty: bool,
+    collapsed: bool,
+    width: f32,
+}
+
+impl Label {
+    fn new(ui: &Ui, group: &GroupInfo, tabs: &[TabInfo]) -> Self {
+        let color = group_color(group.color);
+        let members = || tabs.iter().filter(|t| t.group == Some(group.id));
+        // Collapsed, the label says how many tabs it hides.
+        let text = if group.collapsed {
+            format!("{}  {}", group.name, members().count())
+        } else {
+            group.name.clone()
+        };
+        let galley =
+            ui.painter()
+                .layout_no_wrap(text, theme::semibold(theme::SMALL_SIZE + 1.0), color);
+        let dirty = group.collapsed && members().any(|t| t.dirty);
+        let width = (galley.size().x + 2.0 * LABEL_PAD + if dirty { 11.0 } else { 0.0 })
+            .min(LABEL_MAX_WIDTH);
+        Self {
+            id: group.id,
+            color,
+            galley,
+            dirty,
+            collapsed: group.collapsed,
+            width,
+        }
+    }
+
+    fn show(&self, ui: &Ui, rect: Rect, groups: &[GroupInfo]) -> Option<TabAction> {
+        let id = ui.scope_id().with(("group-label", self.id));
+        let response = ui
+            .interact(rect, id, Sense::click())
+            .on_hover_text(if self.collapsed {
+                "Show this group's tabs"
+            } else {
+                "Collapse this group"
+            });
+        let chip = Rect::from_center_size(rect.center(), vec2(rect.width(), 22.0));
+        let tint = if response.hovered() { 0.32 } else { 0.2 };
+        let painter = ui.painter();
+        painter.rect_filled(chip, RADIUS, self.color.gamma_multiply(tint));
+        let mut x = chip.left() + LABEL_PAD;
+        if self.dirty {
+            painter.circle_filled(pos2(x + 3.0, chip.center().y), 3.0, color::dirty_fg());
+            x += 11.0;
+        }
+        let clip = chip.shrink2(vec2(LABEL_PAD - 2.0, 0.0));
+        painter
+            .with_clip_rect(clip.intersect(ui.clip_rect()))
+            .galley(
+                pos2(x, chip.center().y - self.galley.size().y / 2.0),
+                self.galley.clone(),
+                self.color,
+            );
+        let mut action = None;
+        if response.clicked() {
+            action = Some(TabAction::ToggleGroup(self.id));
+        }
+        response.context_menu(|ui| {
+            if let Some(a) = group_menu(ui, self.id, groups) {
+                action = Some(a);
+            }
+        });
+        action
+    }
+}
+
+fn tab_menu(ui: &mut Ui, i: usize, tab: &TabInfo, groups: &[GroupInfo]) -> Option<TabAction> {
+    let mut action = None;
+    ui.menu_button("Add to group", |ui| {
+        if ui.button("New group…").clicked() {
+            action = Some(TabAction::NewGroup(i));
+            ui.close();
+        }
+        let others: Vec<&GroupInfo> = groups.iter().filter(|g| Some(g.id) != tab.group).collect();
+        if !others.is_empty() {
+            ui.separator();
+        }
+        for g in others {
+            let name = RichText::new(&g.name).color(group_color(g.color));
+            if ui.button(name).clicked() {
+                action = Some(TabAction::SetGroup {
+                    tab: i,
+                    group: Some(g.id),
+                });
+                ui.close();
+            }
+        }
+    });
+    if tab.group.is_some() && ui.button("Remove from group").clicked() {
+        action = Some(TabAction::SetGroup {
+            tab: i,
+            group: None,
+        });
+        ui.close();
+    }
+    ui.separator();
+    if ui.button("Close tab").clicked() {
+        action = Some(TabAction::Close(i));
+        ui.close();
+    }
+    action
+}
+
+fn group_menu(ui: &mut Ui, id: GroupId, groups: &[GroupInfo]) -> Option<TabAction> {
+    let current = groups.iter().find(|g| g.id == id)?.color;
+    let mut action = None;
+    if ui.button("Rename…").clicked() {
+        action = Some(TabAction::RenameGroup(id));
+        ui.close();
+    }
+    if let Some(c) = color_swatches(ui, current) {
+        action = Some(TabAction::RecolorGroup(id, c));
+        ui.close();
+    }
+    ui.separator();
+    if ui.button("Close its tabs").clicked() {
+        action = Some(TabAction::CloseGroup(id));
+        ui.close();
+    }
+    if ui.button("Ungroup").clicked() {
+        action = Some(TabAction::Ungroup(id));
+        ui.close();
+    }
+    action
+}
+
+/// A row of the group colors; returns the one clicked.
+pub fn color_swatches(ui: &mut Ui, current: usize) -> Option<usize> {
+    let mut picked = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        for (c, fill) in color::lanes().into_iter().enumerate() {
+            let (rect, response) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
+            let painter = ui.painter();
+            painter.circle_filled(rect.center(), 6.0, fill);
+            if c == current || response.hovered() {
+                painter.circle_stroke(rect.center(), 8.5, Stroke::new(1.5, color::text_mid()));
+            }
+            if response.clicked() {
+                picked = Some(c);
+            }
+        }
+    });
+    picked
 }

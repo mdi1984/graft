@@ -6,6 +6,7 @@ pub mod dialog;
 pub mod diff_view;
 pub mod file_history;
 pub mod file_status;
+pub mod group_dialog;
 pub mod history;
 pub mod icons;
 pub mod main_area;
