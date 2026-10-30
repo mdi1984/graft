@@ -279,6 +279,10 @@ pub fn show(
         if let Some(i) = all_tabs(ui, &response, toggle, tabs, active) {
             action = Some(TabAction::Activate(i));
         }
+    } else {
+        // No tabs, no list: it must not pop up again with the next one.
+        let open_id = ui.scope_id().with("all-tabs").with("list").with("open");
+        ui.data_mut(|d| d.insert_temp(open_id, false));
     }
 
     let response = ui
@@ -374,7 +378,8 @@ fn all_tabs(
             d.insert_temp(selected_id, active.unwrap_or(0));
         });
     }
-    if !open || ui.input(|i| i.key_pressed(Key::Escape)) {
+    // Escape closes the list and nothing else.
+    if !open || ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
         ui.data_mut(|d| d.insert_temp(open_id, false));
         return None;
     }
@@ -382,6 +387,7 @@ fn all_tabs(
     let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
     let mut selected: usize = ui.data(|d| d.get_temp(selected_id)).unwrap_or(0);
     let mut chosen = None;
+    let mut focus_moved = false;
     let area = Area::new(id)
         .order(Order::Foreground)
         .fixed_pos(pos2(
@@ -398,7 +404,15 @@ fn all_tabs(
                     ui.set_width(LIST_WIDTH - 12.0);
                     let before = filter.clone();
                     let edit = text_field(ui, &mut filter, "Find a tab…", LIST_WIDTH - 12.0);
-                    if opened {
+                    // The list takes keys only while its field has the
+                    // focus. Focus moved to another field (Ctrl+K, say)
+                    // closes it; a click on the list's padding gives the
+                    // focus back.
+                    let focused = edit.has_focus() || edit.lost_focus();
+                    let other = ui.memory(|m| m.focused().is_some_and(|f| f != edit.id));
+                    if !opened && other {
+                        focus_moved = true;
+                    } else if !edit.has_focus() {
                         edit.request_focus();
                     }
                     let needle = filter.trim().to_lowercase();
@@ -415,18 +429,20 @@ fn all_tabs(
                         pos = 0;
                     }
                     let mut scroll = opened || filter != before;
-                    ui.input_mut(|i| {
-                        if i.consume_key(Modifiers::NONE, Key::ArrowDown) {
-                            pos = (pos + 1).min(hits.len().saturating_sub(1));
-                            scroll = true;
-                        }
-                        if i.consume_key(Modifiers::NONE, Key::ArrowUp) {
-                            pos = pos.saturating_sub(1);
-                            scroll = true;
-                        }
-                    });
-                    if ui.input(|i| i.key_pressed(Key::Enter)) {
-                        chosen = hits.get(pos).copied();
+                    if focused {
+                        ui.input_mut(|i| {
+                            if i.consume_key(Modifiers::NONE, Key::ArrowDown) {
+                                pos = (pos + 1).min(hits.len().saturating_sub(1));
+                                scroll = true;
+                            }
+                            if i.consume_key(Modifiers::NONE, Key::ArrowUp) {
+                                pos = pos.saturating_sub(1);
+                                scroll = true;
+                            }
+                            if i.consume_key(Modifiers::NONE, Key::Enter) {
+                                chosen = hits.get(pos).copied();
+                            }
+                        });
                     }
                     ui.add_space(4.0);
                     if hits.is_empty() {
@@ -465,7 +481,7 @@ fn all_tabs(
             .ctx()
             .pointer_interact_pos()
             .is_some_and(|p| !area.response.rect.contains(p) && !button.rect.contains(p));
-    let keep = chosen.is_none() && !clicked_outside;
+    let keep = chosen.is_none() && !clicked_outside && !focus_moved;
     ui.data_mut(|d| {
         d.insert_temp(open_id, keep);
         d.insert_temp(filter_id, filter);

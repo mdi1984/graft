@@ -295,7 +295,23 @@ impl Keymap {
                 Some((command.id(), shortcut))
             })
             .collect();
-        Self { changed }
+        let mut keymap = Self { changed };
+        // A default that came with an update must not take a key the user
+        // already gave to another action: that action keeps it.
+        for command in Command::ALL {
+            let Some(default) = command.default_shortcut() else {
+                continue;
+            };
+            let taken = Command::ALL.into_iter().any(|other| {
+                other != command
+                    && other.scope().overlaps(command.scope())
+                    && keymap.changed.get(other.id()) == Some(&Some(default))
+            });
+            if taken && !keymap.changed.contains_key(command.id()) {
+                keymap.changed.insert(command.id(), None);
+            }
+        }
+        keymap
     }
 
     /// What to save: only the shortcuts that differ from the defaults, so
@@ -639,6 +655,18 @@ mod tests {
         assert!(consume_exact(&mut input, plain(Key::Space).unwrap(), false));
         assert!(is_function_key(Key::F5) && is_function_key(Key::F12));
         assert!(!is_function_key(Key::F) && !is_function_key(Key::Space));
+    }
+
+    #[test]
+    fn a_new_default_leaves_a_key_the_user_took() {
+        let saved = BTreeMap::from([("unstage-all".to_owned(), "Ctrl+Shift+A".to_owned())]);
+        let keys = Keymap::from_saved(&saved);
+        assert_eq!(keys.get(Command::UnstageAll), parse("Ctrl+Shift+A"));
+        assert_eq!(keys.get(Command::AllTabs), None);
+        assert_eq!(
+            keys.get(Command::Search),
+            Command::Search.default_shortcut()
+        );
     }
 
     #[test]
