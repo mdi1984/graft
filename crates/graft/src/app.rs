@@ -12,13 +12,15 @@ use graft_core::repo::{self, Location, Progress};
 use graft_core::{CancelToken, Console, same_path};
 use serde::{Deserialize, Serialize};
 
+use crate::groups::{self, GroupId, TabGroup};
 use crate::keys::{self, Command};
 use crate::project::{Action, Project, ReviewState, SlashedBranch};
 use crate::settings::Settings;
 use crate::theme::color;
 use crate::ui::about::AboutAction;
 use crate::ui::console::{self as console_ui, ConsoleView, STATUS_HEIGHT};
-use crate::ui::project_tabs::{self, TabAction, TabInfo};
+use crate::ui::group_dialog::{self, GroupForm, GroupTarget};
+use crate::ui::project_tabs::{self, GroupInfo, TabAction, TabInfo};
 use crate::ui::settings::{self as settings_ui, SettingsForm};
 use crate::ui::start::{Busy, Recent, StartAction, StartPage};
 use crate::ui::toasts::Toasts;
@@ -35,6 +37,7 @@ struct Persisted {
     open: Vec<PathBuf>,
     active: Option<usize>,
     recent: Vec<PathBuf>,
+    groups: Vec<TabGroup>,
     clone_parent: Option<PathBuf>,
     console_open: bool,
     /// Review marks and notes per repository root, then per worktree.
@@ -71,6 +74,10 @@ pub struct GraftApp {
     last_active: Option<usize>,
     start: StartPage,
     recent: Vec<Recent>,
+    /// Tab groups, open or not.
+    groups: Vec<TabGroup>,
+    /// Naming a new group or renaming one.
+    group_form: Option<GroupForm>,
     console: Console,
     console_view: ConsoleView,
     console_open: bool,
@@ -155,6 +162,8 @@ impl GraftApp {
             last_active: None,
             start: StartPage::new(clone_parent),
             recent: persisted.recent.into_iter().map(Recent::new).collect(),
+            groups: persisted.groups,
+            group_form: None,
             console,
             console_view: ConsoleView::default(),
             console_open: persisted.console_open,
@@ -174,6 +183,7 @@ impl GraftApp {
             closing: false,
             forwarded,
         };
+        app.arrange();
         match last_update {
             Some(Ok(done)) => app.toasts.info(done),
             Some(Err(failed)) => app.toasts.error(failed),
@@ -293,6 +303,151 @@ impl GraftApp {
         project.settings = self.settings.clone();
         self.projects.push(project);
         self.activate(Some(self.projects.len() - 1));
+        // Next to the other open tabs of its group.
+        self.arrange();
+    }
+
+    /// The group of each open tab.
+    fn memberships(&self) -> Vec<Option<GroupId>> {
+        self.projects
+            .iter()
+            .map(|p| groups::group_of(&self.groups, &p.root))
+            .collect()
+    }
+
+    /// Put the tabs in `order` (old indexes); the active tab stays active.
+    fn reorder(&mut self, order: &[usize]) {
+        let mut old: Vec<Option<Project>> = std::mem::take(&mut self.projects)
+            .into_iter()
+            .map(Some)
+            .collect();
+        self.projects = order.iter().filter_map(|&i| old[i].take()).collect();
+        let map = |slot: Option<usize>| slot.and_then(|i| order.iter().position(|&o| o == i));
+        self.active = map(self.active);
+        self.last_active = map(self.last_active);
+    }
+
+    /// Keep each group's tabs together, in the group's order.
+    fn arrange(&mut self) {
+        let rank = |i: usize| {
+            let root = &self.projects[i].root;
+            self.groups
+                .iter()
+                .find_map(|g| g.repos.iter().position(|r| same_path(r, root)))
+                .unwrap_or(0)
+        };
+        let order = groups::contiguous_order(&self.memberships(), rank);
+        if order.iter().enumerate().any(|(k, &i)| k != i) {
+            self.reorder(&order);
+        }
+    }
+
+    fn group_mut(&mut self, id: GroupId) -> Option<&mut TabGroup> {
+        self.groups.iter_mut().find(|g| g.id == id)
+    }
+
+    /// Put tab `index` into `group` (or none), keeping groups together.
+    fn set_group(&mut self, index: usize, group: Option<GroupId>) {
+        let root = self.projects[index].root.clone();
+        groups::set_group(&mut self.groups, &root, group);
+        // A tab added to a collapsed group would vanish into it.
+        if let Some(g) = group.and_then(|id| self.group_mut(id)) {
+            g.collapsed = false;
+        }
+        self.arrange();
+    }
+
+    fn toggle_group(&mut self, id: GroupId) {
+        let Some(group) = self.group_mut(id) else {
+            return;
+        };
+        group.collapsed = !group.collapsed;
+        if !group.collapsed {
+            return;
+        }
+        // Collapsing hides its tabs: move off them, to the tab after the
+        // group, else the one before it. Without another tab, the active
+        // one stays shown.
+        let memberships = self.memberships();
+        if self.active.is_none_or(|a| memberships[a] != Some(id)) {
+            return;
+        }
+        let first = memberships.iter().position(|g| *g == Some(id));
+        let last = memberships.iter().rposition(|g| *g == Some(id));
+        let next = last
+            .map(|l| l + 1)
+            .filter(|&n| n < self.projects.len())
+            .or_else(|| first.and_then(|f| f.checked_sub(1)));
+        if next.is_some() {
+            self.activate(next);
+        }
+    }
+
+    /// Open every repository of a group that is not open yet.
+    fn open_group(&mut self, id: GroupId) {
+        let Some(group) = self.group_mut(id) else {
+            return;
+        };
+        group.collapsed = false;
+        let repos = group.repos.clone();
+        let mut first_open = None;
+        for root in repos {
+            match self.projects.iter().position(|p| same_path(&p.root, &root)) {
+                Some(i) => first_open = first_open.or(Some(i)),
+                None => self.open_folder(root),
+            }
+        }
+        if let Some(i) = first_open {
+            self.activate(Some(i));
+        }
+    }
+
+    fn save_group_form(&mut self) {
+        let Some(form) = self.group_form.take() else {
+            return;
+        };
+        let name = form.name.trim().to_owned();
+        match form.target {
+            GroupTarget::New(root) => {
+                let (id, _) = groups::next_id_and_color(&self.groups, color::lanes().len());
+                self.groups.push(TabGroup {
+                    id,
+                    name,
+                    color: form.color,
+                    collapsed: false,
+                    repos: Vec::new(),
+                });
+                groups::set_group(&mut self.groups, &root, Some(id));
+                self.arrange();
+            }
+            GroupTarget::Rename(id) => {
+                if let Some(g) = self.group_mut(id) {
+                    g.name = name;
+                    g.color = form.color;
+                }
+            }
+        }
+    }
+
+    fn group_form_ui(&mut self, ctx: &egui::Context) {
+        let Some(form) = &mut self.group_form else {
+            return;
+        };
+        match group_dialog::show(ctx, form) {
+            group_dialog::Outcome::Open => {}
+            group_dialog::Outcome::Cancel => self.group_form = None,
+            group_dialog::Outcome::Save => self.save_group_form(),
+        }
+    }
+
+    fn rename_group(&mut self, id: GroupId) {
+        if let Some(g) = self.groups.iter().find(|g| g.id == id) {
+            self.group_form = Some(GroupForm::new(
+                GroupTarget::Rename(id),
+                g.name.clone(),
+                g.color,
+            ));
+        }
     }
 
     fn remember(&mut self, root: &Path) {
@@ -361,16 +516,52 @@ impl GraftApp {
         match action {
             TabAction::Activate(i) => self.activate(Some(i)),
             TabAction::Close(i) => self.close_project(i),
-            TabAction::Move { from, to } => {
-                self.projects.swap(from, to);
-                let swap = |slot: Option<usize>| match slot {
-                    Some(i) if i == from => Some(to),
-                    Some(i) if i == to => Some(from),
-                    other => other,
-                };
-                self.active = swap(self.active);
-                self.last_active = swap(self.last_active);
+            TabAction::Move { from, to, group } => {
+                if from >= self.projects.len() || to >= self.projects.len() {
+                    return;
+                }
+                let mut order: Vec<usize> = (0..self.projects.len()).collect();
+                order.remove(from);
+                order.insert(to, from);
+                self.reorder(&order);
+                let root = self.projects[to].root.clone();
+                groups::set_group(&mut self.groups, &root, group);
+                // Groups remember the order their tabs were dragged into.
+                let roots: Vec<PathBuf> = self.projects.iter().map(|p| p.root.clone()).collect();
+                groups::follow_tabs(&mut self.groups, &roots);
+                self.arrange();
             }
+            TabAction::ToggleGroup(id) => self.toggle_group(id),
+            TabAction::NewGroup(i) => {
+                if let Some(p) = self.projects.get(i) {
+                    let (_, color) = groups::next_id_and_color(&self.groups, color::lanes().len());
+                    self.group_form = Some(GroupForm::new(
+                        GroupTarget::New(p.root.clone()),
+                        String::new(),
+                        color,
+                    ));
+                }
+            }
+            TabAction::SetGroup { tab, group } => {
+                if tab < self.projects.len() {
+                    self.set_group(tab, group);
+                }
+            }
+            TabAction::RenameGroup(id) => self.rename_group(id),
+            TabAction::RecolorGroup(id, c) => {
+                if let Some(g) = self.group_mut(id) {
+                    g.color = c;
+                }
+            }
+            TabAction::CloseGroup(id) => {
+                let memberships = self.memberships();
+                for i in (0..memberships.len()).rev() {
+                    if memberships[i] == Some(id) {
+                        self.close_project(i);
+                    }
+                }
+            }
+            TabAction::Ungroup(id) => self.groups.retain(|g| g.id != id),
             TabAction::NewTab => self.activate(None),
             TabAction::CloseStart => self.close_start(),
             TabAction::OpenSettings => self.open_settings(),
@@ -425,6 +616,9 @@ impl GraftApp {
             }
             StartAction::OpenRecent(path) => self.open_folder(path),
             StartAction::ForgetRecent(path) => self.recent.retain(|r| !same_path(&r.path, &path)),
+            StartAction::OpenGroup(id) => self.open_group(id),
+            StartAction::RenameGroup(id) => self.rename_group(id),
+            StartAction::DeleteGroup(id) => self.groups.retain(|g| g.id != id),
         }
     }
 
@@ -765,6 +959,7 @@ impl eframe::App for GraftApp {
         self.sync_window_title(&ctx);
         self.settings_ui(&ctx);
         self.about_ui(&ctx);
+        self.group_form_ui(&ctx);
         if self.closing {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -781,6 +976,17 @@ impl eframe::App for GraftApp {
                 dirty: p.is_dirty(),
                 busy: p.snapshot.is_none() && p.error.is_none(),
                 error: p.error.is_some(),
+                group: groups::group_of(&self.groups, &p.root),
+            })
+            .collect();
+        let group_infos: Vec<GroupInfo> = self
+            .groups
+            .iter()
+            .map(|g| GroupInfo {
+                id: g.id,
+                name: g.name.clone(),
+                color: g.color,
+                collapsed: g.collapsed,
             })
             .collect();
         let tab_action = Panel::top("project-tabs")
@@ -792,7 +998,14 @@ impl eframe::App for GraftApp {
                     update::Status::Available(release) => Some(release.version.as_str()),
                     _ => None,
                 };
-                project_tabs::show(ui, &infos, self.active, update, &self.settings.keys)
+                project_tabs::show(
+                    ui,
+                    &infos,
+                    &group_infos,
+                    self.active,
+                    update,
+                    &self.settings.keys,
+                )
             })
             .inner;
         if let Some(action) = tab_action {
@@ -842,7 +1055,7 @@ impl eframe::App for GraftApp {
             None => {
                 let action = CentralPanel::no_frame()
                     .frame(Frame::new().fill(color::app_bg()))
-                    .show(ui, |ui| self.start.show(ui, &self.recent))
+                    .show(ui, |ui| self.start.show(ui, &self.recent, &self.groups))
                     .inner;
                 if let Some(action) = action {
                     self.on_start_action(action);
@@ -874,6 +1087,7 @@ impl eframe::App for GraftApp {
             open: self.projects.iter().map(|p| p.root.clone()).collect(),
             active: self.active,
             recent: self.recent.iter().map(|r| r.path.clone()).collect(),
+            groups: self.groups.clone(),
             clone_parent: (!clone_parent.is_empty()).then(|| PathBuf::from(clone_parent)),
             console_open: self.console_open,
             reviews,

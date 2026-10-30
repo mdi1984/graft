@@ -1,5 +1,5 @@
 //! The start page ("New tab"): open a local repository, clone one, create one,
-//! or reopen a recent one.
+//! reopen a recent one, or open all repositories of a tab group.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -9,10 +9,12 @@ use graft_core::CancelToken;
 use graft_core::repo::{Progress, clone_folder_name, native};
 
 use super::icons::{self, Icon};
+use super::project_tabs::group_color;
 use super::widgets::{
     ButtonKind, button, elided, elided_path, paint_galley_left, paint_icon_button, progress_bar,
     section_heading, text_field,
 };
+use crate::groups::{GroupId, TabGroup};
 use crate::theme::{self, RADIUS, color};
 
 const WIDTH: f32 = 600.0;
@@ -68,6 +70,9 @@ pub enum StartAction {
     Cancel,
     OpenRecent(PathBuf),
     ForgetRecent(PathBuf),
+    OpenGroup(GroupId),
+    RenameGroup(GroupId),
+    DeleteGroup(GroupId),
 }
 
 impl StartPage {
@@ -100,7 +105,12 @@ impl StartPage {
         native(self.clone_parent.trim()).join(self.folder_name.trim())
     }
 
-    pub fn show(&mut self, ui: &mut Ui, recent: &[Recent]) -> Option<StartAction> {
+    pub fn show(
+        &mut self,
+        ui: &mut Ui,
+        recent: &[Recent],
+        groups: &[TabGroup],
+    ) -> Option<StartAction> {
         let mut action = None;
         ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -131,6 +141,10 @@ impl StartPage {
                             ui.label(egui::RichText::new(error).color(color::removed()));
                         }
                         ui.add_space(24.0);
+                        if !groups.is_empty() {
+                            group_list(ui, groups, width, &mut action);
+                            ui.add_space(16.0);
+                        }
                         recent_list(ui, recent, width, &mut action);
                         ui.add_space(16.0);
                         ui.label(
@@ -500,5 +514,98 @@ fn recent_list(ui: &mut Ui, recent: &[Recent], width: f32, action: &mut Option<S
         } else if response.clicked() && exists {
             *action = Some(StartAction::OpenRecent(path.clone()));
         }
+    }
+}
+
+/// Tab groups: click one to open all of its repositories.
+fn group_list(ui: &mut Ui, groups: &[TabGroup], width: f32, action: &mut Option<StartAction>) {
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 20.0), Sense::hover());
+    section_heading(ui, ui.painter(), rect.left(), rect.center().y, "GROUPS");
+    for group in groups {
+        let (rect, response) = ui.allocate_exact_size(vec2(width, 44.0), Sense::click());
+        let response = response.on_hover_text("Open all of its repositories");
+        let painter = ui.painter();
+        if response.hovered() {
+            painter.rect_filled(rect, RADIUS, color::hover_row_bg());
+        }
+        let fg = group_color(group.color);
+        painter.circle_filled(pos2(rect.left() + 14.0, rect.top() + 14.0), 4.0, fg);
+        let count = match group.repos.len() {
+            1 => "1 repository".to_owned(),
+            n => format!("{n} repositories"),
+        };
+        let name = elided(
+            ui,
+            &group.name,
+            theme::semibold(theme::BODY_SIZE),
+            color::text(),
+            width - 200.0,
+        );
+        let name_right = rect.left() + 26.0 + name.size().x;
+        paint_galley_left(
+            painter,
+            rect.left() + 26.0,
+            rect.top() + 14.0,
+            name,
+            color::text(),
+        );
+        let count = elided(ui, &count, theme::small(), color::text_weak(), 160.0);
+        paint_galley_left(
+            painter,
+            name_right + 8.0,
+            rect.top() + 14.0,
+            count,
+            color::text_weak(),
+        );
+        let names: Vec<String> = group
+            .repos
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| p.display().to_string())
+            })
+            .collect();
+        let names = elided(
+            ui,
+            &names.join(" · "),
+            theme::small(),
+            color::text_weak(),
+            width - 120.0,
+        );
+        paint_galley_left(
+            painter,
+            rect.left() + 26.0,
+            rect.top() + 31.0,
+            names,
+            color::text_weak(),
+        );
+        if response.hovered() {
+            painter.text(
+                pos2(rect.right() - 12.0, rect.center().y),
+                Align2::RIGHT_CENTER,
+                "Open all",
+                theme::semibold(theme::BODY_SIZE),
+                color::accent(),
+            );
+        }
+        if response.clicked() {
+            *action = Some(StartAction::OpenGroup(group.id));
+        }
+        response.context_menu(|ui| {
+            if ui.button("Open all").clicked() {
+                *action = Some(StartAction::OpenGroup(group.id));
+                ui.close();
+            }
+            if ui.button("Rename…").clicked() {
+                *action = Some(StartAction::RenameGroup(group.id));
+                ui.close();
+            }
+            ui.separator();
+            if ui.button("Delete group").clicked() {
+                *action = Some(StartAction::DeleteGroup(group.id));
+                ui.close();
+            }
+        });
     }
 }

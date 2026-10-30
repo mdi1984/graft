@@ -88,7 +88,8 @@ commit and push in one go.
 
 ## Everyday git, of course
 Open, clone or create repositories as tabs (they reopen on start, scroll when there are many,
-and **Ctrl+Shift+A** finds one) · commit graph with branch and tag
+and **Ctrl+Shift+A** finds one) · tab groups, e.g. one per customer: right-click a tab, collapse a
+group to its label, reopen all of its repositories from the start page · commit graph with branch and tag
 chips · checkout, create, rename, delete and track branches · cherry-pick, revert, reset ·
 merge and rebase with Continue/Abort · tags · remotes · pull, push, fetch with progress · background
 fetch · file history and blame · undo last commit · search everything with **Ctrl+K**.
