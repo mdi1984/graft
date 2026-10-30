@@ -24,6 +24,7 @@ pub enum Icon {
     Tag,
     Cloud,
     ChevronRight,
+    ChevronLeft,
     Merge,
     Settings,
 }
@@ -176,6 +177,7 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.add(Shape::line(pts, stroke));
         }
         Icon::ChevronRight => line(&[(9.0, 6.0), (15.0, 12.0), (9.0, 18.0)]),
+        Icon::ChevronLeft => line(&[(15.0, 6.0), (9.0, 12.0), (15.0, 18.0)]),
         Icon::Merge => {
             circle(7.0, 5.0, 2.2);
             circle(7.0, 19.0, 2.2);
