@@ -290,17 +290,33 @@ pub fn show(
     }
 
     // Reorder: step past a neighbour (a tab or a group's label) once the
-    // pointer passes its middle.
+    // pointer passes its middle. The last tab of a group at the very end
+    // leaves it once the pointer passes its own end.
+    let hold_id = ui.scope_id().with("tab-drag-hold");
     if let (Some((k, i)), Some(pointer)) = (dragged, ui.ctx().pointer_interact_pos()) {
-        let right = k + 1 < rects.len() && pointer.x > rects[k + 1].center().x;
+        let right = match rects.get(k + 1) {
+            Some(next) => pointer.x > next.center().x,
+            None => tabs[i].group.is_some() && pointer.x > rects[k].right(),
+        };
         let back = k > 0 && pointer.x < rects[k - 1].center().x;
+        // Joining or leaving a group can leave the tab where it is, with the
+        // pointer still past the neighbour: the next step waits until the
+        // pointer has moved on by half a tab.
+        let hold: Option<f32> = ui.data(|d| d.get_temp(hold_id));
+        let held = hold.is_some_and(|x| (pointer.x - x).abs() < step / 2.0);
         if (right || back)
-            && let Some(step) = groups::drag_step(&memberships, &items, collapsed, i, right)
+            && !held
+            && let Some(next) = groups::drag_step(&memberships, &items, collapsed, i, right)
         {
+            if next.to == i {
+                ui.data_mut(|d| d.insert_temp(hold_id, pointer.x));
+            } else {
+                ui.data_mut(|d| d.remove::<f32>(hold_id));
+            }
             action = Some(TabAction::Move {
                 from: i,
-                to: step.to,
-                group: step.group,
+                to: next.to,
+                group: next.group,
             });
         }
         // Dragging to an end of a scrolling strip scrolls it along.
@@ -312,6 +328,8 @@ pub fn show(
             }
             ui.ctx().request_repaint();
         }
+    } else {
+        ui.data_mut(|d| d.remove::<f32>(hold_id));
     }
 
     if active.is_none() {

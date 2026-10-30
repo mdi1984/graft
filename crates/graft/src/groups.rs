@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 
 pub type GroupId = u64;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TabGroup {
     pub id: GroupId,
     pub name: String,
@@ -32,9 +33,10 @@ pub fn group_of(groups: &[TabGroup], root: &Path) -> Option<GroupId> {
         .map(|g| g.id)
 }
 
-/// Put `root` into `group` (or into none), out of any other. Groups left
-/// without repositories are dropped.
-pub fn set_group(groups: &mut Vec<TabGroup>, root: &Path, group: Option<GroupId>) {
+/// Put `root` into `group` (or into none), out of any other. A group left
+/// without repositories stays, with its name and color, until the user
+/// ungroups or deletes it.
+pub fn set_group(groups: &mut [TabGroup], root: &Path, group: Option<GroupId>) {
     if group_of(groups, root) == group {
         return;
     }
@@ -44,7 +46,6 @@ pub fn set_group(groups: &mut Vec<TabGroup>, root: &Path, group: Option<GroupId>
     if let Some(g) = groups.iter_mut().find(|g| Some(g.id) == group) {
         g.repos.push(root.to_path_buf());
     }
-    groups.retain(|g| !g.repos.is_empty());
 }
 
 /// A fresh id and the first color no group uses yet.
@@ -311,12 +312,12 @@ mod tests {
     }
 
     #[test]
-    fn membership_moves_between_groups_and_empty_groups_go() {
+    fn membership_moves_between_groups_and_empty_groups_stay() {
         let mut groups = vec![group(1, &[r"C:\a", r"C:\b"]), group(2, &[r"C:\c"])];
         assert_eq!(group_of(&groups, Path::new(r"c:\A\")), Some(1));
         set_group(&mut groups, Path::new(r"C:\c"), Some(1));
-        assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].repos.len(), 3);
+        assert!(groups[1].repos.is_empty());
         set_group(&mut groups, Path::new(r"C:\a"), None);
         assert_eq!(group_of(&groups, Path::new(r"C:\a")), None);
     }

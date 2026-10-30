@@ -531,6 +531,7 @@ fn group_list(ui: &mut Ui, groups: &[TabGroup], width: f32, action: &mut Option<
         let fg = group_color(group.color);
         painter.circle_filled(pos2(rect.left() + 14.0, rect.top() + 14.0), 4.0, fg);
         let count = match group.repos.len() {
+            0 => "no repositories yet".to_owned(),
             1 => "1 repository".to_owned(),
             n => format!("{n} repositories"),
         };
