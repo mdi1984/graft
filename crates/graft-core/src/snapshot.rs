@@ -1,6 +1,6 @@
 //! Building a [`RepoSnapshot`]: refs, worktrees with their status, remotes, stashes.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
@@ -9,7 +9,6 @@ use crate::conflicts;
 use crate::model::{
     Branch, Oid, Remote, RemoteBranch, RepoSnapshot, Tag, Upstream, Worktree, same_path,
 };
-use crate::repo::native;
 use crate::status;
 
 /// Read the whole snapshot. `git` must point at the main worktree. The git
@@ -155,10 +154,11 @@ fn parse_upstream(upstream: &str, track: &str) -> Upstream {
 
 fn load_worktrees(git: &Git, root: &Path) -> Result<Vec<Worktree>> {
     let out = git.run(["worktree", "list", "--porcelain", "-z"])?;
-    Ok(parse_worktrees(&out.stdout, root))
+    Ok(parse_worktrees(&out.stdout, root, |p| git.native_path(p)))
 }
 
-fn parse_worktrees(bytes: &[u8], root: &Path) -> Vec<Worktree> {
+/// `to_path` turns a path git printed into a Windows path.
+fn parse_worktrees(bytes: &[u8], root: &Path, to_path: impl Fn(&str) -> PathBuf) -> Vec<Worktree> {
     let mut list = Vec::new();
     let mut current: Option<Worktree> = None;
     for field in bytes.split(|&b| b == 0) {
@@ -172,7 +172,7 @@ fn parse_worktrees(bytes: &[u8], root: &Path) -> Vec<Worktree> {
         match key {
             "worktree" => {
                 list.extend(current.take());
-                let path = native(value);
+                let path = to_path(value);
                 current = Some(Worktree {
                     is_main: same_path(&path, root),
                     path,
@@ -256,6 +256,7 @@ fn load_stash_count(git: &Git) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repo::native;
 
     #[test]
     fn refs_git_would_read_as_options_are_left_out() {
@@ -309,7 +310,7 @@ mod tests {
         let raw = b"worktree C:/dev/graft\0HEAD 1111111111111111111111111111111111111111\0branch refs/heads/main\0\0\
 worktree C:/dev/graft.wt/x\0HEAD 2222222222222222222222222222222222222222\0detached\0locked\0\0\
 worktree C:/gone\0HEAD 3333333333333333333333333333333333333333\0branch refs/heads/old\0prunable gitdir file points to non-existent location\0\0";
-        let wts = parse_worktrees(raw, Path::new(r"C:\dev\graft"));
+        let wts = parse_worktrees(raw, Path::new(r"C:\dev\graft"), native);
         assert_eq!(wts.len(), 3);
         assert!(wts[0].is_main);
         assert_eq!(wts[0].branch.as_deref(), Some("main"));

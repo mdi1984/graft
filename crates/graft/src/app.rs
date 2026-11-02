@@ -56,6 +56,8 @@ enum Pick {
 
 enum AppEvent {
     Picked(Pick, Option<PathBuf>),
+    Distros(Vec<String>),
+    Home(String, Option<String>),
     Opened(Result<Location, String>),
     /// `manual` when the user asked (About), so failures are shown.
     UpdateChecked {
@@ -205,11 +207,13 @@ impl GraftApp {
                 AppEvent::Picked(_, None) => {}
                 AppEvent::Picked(Pick::Open, Some(path)) => self.open_folder(path),
                 AppEvent::Picked(Pick::CloneParent, Some(path)) => {
-                    self.start.clone_parent = path.display().to_string();
+                    self.start.picked_clone_parent(&path);
                 }
                 AppEvent::Picked(Pick::InitFolder, Some(path)) => {
-                    self.start.init_path = path.display().to_string();
+                    self.start.picked_init_folder(&path);
                 }
+                AppEvent::Distros(distros) => self.start.set_distros(distros),
+                AppEvent::Home(distro, home) => self.start.set_home(distro, home),
                 AppEvent::Opened(Ok(location)) => self.add_project(location),
                 AppEvent::Opened(Err(error)) => {
                     self.start.busy = None;
@@ -571,13 +575,27 @@ impl GraftApp {
 
     fn on_start_action(&mut self, action: StartAction) {
         match action {
-            StartAction::PickOpen => self.pick(Pick::Open, "Open a git repository", None),
+            StartAction::PickOpen => {
+                let start = self.start.open_start();
+                self.pick(Pick::Open, "Open a git repository", start);
+            }
+            StartAction::LoadDistros => {
+                self.pool
+                    .spawn(&self.tx, || AppEvent::Distros(graft_core::wsl::distros()));
+            }
+            StartAction::LoadHome(distro) => {
+                self.pool.spawn(&self.tx, move || {
+                    let home = graft_core::wsl::Wsl::new(&distro).home();
+                    AppEvent::Home(distro, home)
+                });
+            }
             StartAction::PickCloneParent => {
-                let dir = PathBuf::from(self.start.clone_parent.trim());
-                self.pick(Pick::CloneParent, "Clone into folder", Some(dir));
+                let start = self.start.clone_parent_start();
+                self.pick(Pick::CloneParent, "Clone into folder", start);
             }
             StartAction::PickInitFolder => {
-                self.pick(Pick::InitFolder, "Folder for the new repository", None);
+                let start = self.start.init_start();
+                self.pick(Pick::InitFolder, "Folder for the new repository", start);
             }
             StartAction::Clone { url, dest } => {
                 let progress = Arc::new(Mutex::new(Progress::default()));
@@ -600,7 +618,7 @@ impl GraftApp {
             }
             StartAction::Init(path) => {
                 self.start.busy = Some(Busy {
-                    label: format!("Creating {}", path.display()),
+                    label: format!("Creating {}", self.start.show_path(&path)),
                     progress: Arc::default(),
                     cancel: None,
                 });
@@ -972,7 +990,7 @@ impl eframe::App for GraftApp {
             .iter()
             .map(|p| TabInfo {
                 name: p.name.clone(),
-                tooltip: p.root.display().to_string(),
+                tooltip: graft_core::wsl::display(&p.root),
                 dirty: p.is_dirty(),
                 busy: p.snapshot.is_none() && p.error.is_none(),
                 error: p.error.is_some(),
@@ -1053,6 +1071,9 @@ impl eframe::App for GraftApp {
         match self.active {
             Some(index) => self.project_ui(ui, index),
             None => {
+                if let Some(load) = self.start.take_load() {
+                    self.on_start_action(load);
+                }
                 let action = CentralPanel::no_frame()
                     .frame(Frame::new().fill(color::app_bg()))
                     .show(ui, |ui| self.start.show(ui, &self.recent, &self.groups))
@@ -1068,7 +1089,7 @@ impl eframe::App for GraftApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        let clone_parent = self.start.clone_parent.trim();
+        let clone_parent = self.start.clone_parent_path();
         let mut reviews = self.reviews.clone();
         for p in &self.projects {
             reviews.insert(p.root.clone(), p.reviews.clone());
@@ -1088,7 +1109,7 @@ impl eframe::App for GraftApp {
             active: self.active,
             recent: self.recent.iter().map(|r| r.path.clone()).collect(),
             groups: self.groups.clone(),
-            clone_parent: (!clone_parent.is_empty()).then(|| PathBuf::from(clone_parent)),
+            clone_parent: Some(clone_parent),
             console_open: self.console_open,
             reviews,
             slashed,
@@ -1109,7 +1130,7 @@ fn take_reviews<T: Default>(reviews: &mut HashMap<PathBuf, T>, root: &Path) -> T
 }
 
 /// Where clones go when the user has not picked a folder yet.
-fn default_clone_parent() -> PathBuf {
+pub fn default_clone_parent() -> PathBuf {
     std::env::var_os("USERPROFILE")
         .map(|home| PathBuf::from(home).join("source").join("repos"))
         .unwrap_or_else(|| PathBuf::from(r"C:\dev"))

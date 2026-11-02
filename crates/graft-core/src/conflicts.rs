@@ -57,6 +57,12 @@ pub(crate) fn git_dir(worktree: &Path) -> Option<PathBuf> {
     }
     let text = std::fs::read_to_string(&dot).ok()?;
     let target = text.trim().strip_prefix("gitdir:")?.trim();
+    // In WSL git writes a Linux path.
+    if let Some(wsl) = crate::wsl::Wsl::of(worktree)
+        && target.starts_with('/')
+    {
+        return Some(wsl.to_windows(target));
+    }
     let path = PathBuf::from(target);
     Some(if path.is_absolute() {
         path

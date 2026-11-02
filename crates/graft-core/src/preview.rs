@@ -97,14 +97,20 @@ fn write_marker(main: &Path, preview: &Preview) -> Result<()> {
 /// binary patch against its HEAD, and the files that patch creates. Uses a
 /// copy of the index, so the worktree's own staging is left alone.
 fn uncommitted_patch(source: &Git) -> Result<(Vec<u8>, Vec<String>)> {
-    let tmp = std::env::temp_dir().join(format!(
+    let name = format!(
         "graft-preview-{}-{}.index",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos())
-    ));
-    let real = conflicts::git_dir(source.cwd()).map(|d| d.join("index"));
+    );
+    let git_dir = conflicts::git_dir(source.cwd());
+    // Git inside WSL reads the copy best from its own disk.
+    let tmp = match &git_dir {
+        Some(dir) if crate::wsl::Wsl::of(dir).is_some() => dir.join(name),
+        _ => std::env::temp_dir().join(name),
+    };
+    let real = git_dir.map(|d| d.join("index"));
     let copied = real.is_some_and(|r| std::fs::copy(r, &tmp).is_ok());
     let git = source.with_index(&tmp);
     let result = (|| {
@@ -231,7 +237,9 @@ pub fn restore_main(main: &Git) -> Result<()> {
     };
     clear(main, &preview)?;
     match &preview.restore {
-        Restore::Branch(b) => main.run(["checkout", "-q", "--end-of-options", b])?,
+        // `switch`: git before 2.44 (e.g. Ubuntu 24.04's, in WSL) reads
+        // `checkout --end-of-options` as a file name.
+        Restore::Branch(b) => main.run(["switch", "-q", "--end-of-options", b])?,
         Restore::Detached(id) => main.run(["checkout", "-q", "--detach", &id.to_string()])?,
     };
     if let Some(path) = marker_path(main.cwd()) {

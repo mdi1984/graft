@@ -177,13 +177,18 @@ pub fn through_link(root: &Path, rel: &Path) -> bool {
 }
 
 /// Compare paths the way Windows does: case-insensitive, either slash, no
-/// trailing separator.
+/// trailing separator, `\\wsl$` and `\\wsl.localhost` alike.
 pub fn same_path(a: &Path, b: &Path) -> bool {
     let norm = |p: &Path| {
-        p.to_string_lossy()
+        let text = p
+            .to_string_lossy()
             .replace('/', "\\")
             .trim_end_matches('\\')
-            .to_lowercase()
+            .to_lowercase();
+        match text.strip_prefix(r"\\wsl$\") {
+            Some(rest) => format!(r"\\wsl.localhost\{rest}"),
+            None => text,
+        }
     };
     norm(a) == norm(b)
 }

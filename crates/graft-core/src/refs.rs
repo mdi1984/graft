@@ -158,7 +158,9 @@ pub fn revert(git: &Git, rev: &str) -> Result<bool> {
 }
 
 pub fn reset(git: &Git, rev: &str, mode: ResetMode) -> Result<()> {
-    git.run(["reset", mode.flag(), "--end-of-options", rev])?;
+    // `rev -- ` rather than `--end-of-options rev`: git before 2.44 (e.g.
+    // Ubuntu 24.04's, in WSL) rejects the latter for reset.
+    git.run(["reset", mode.flag(), rev, "--"])?;
     Ok(())
 }
 

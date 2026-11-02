@@ -3,11 +3,17 @@
 //! Events are debounced, and changes that cannot affect what Graft shows are
 //! dropped: git's object store and logs, lock files, and anything gitignored
 //! (build output churning in `target/` must not trigger a refresh every tick).
+//!
+//! Windows reports no changes at all for folders inside WSL, so those are
+//! checked every few seconds by asking git inside the distro instead.
 
 use std::collections::HashSet;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -15,64 +21,130 @@ use notify_debouncer_full::notify::{self, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, Debouncer, NoCache, new_debouncer_opt};
 
 use crate::cli;
+use crate::wsl::Wsl;
 
 const DEBOUNCE: Duration = Duration::from_millis(300);
 /// More changed paths than this in one batch: refresh without asking git.
 const MAX_CHECK: usize = 2_000;
+/// How often worktrees inside WSL are checked for changes.
+const POLL: Duration = Duration::from_secs(2);
 
 pub struct Watcher {
-    _debouncer: Debouncer<RecommendedWatcher, NoCache>,
+    _debouncer: Option<Debouncer<RecommendedWatcher, NoCache>>,
+    /// Dropping it stops the WSL checks.
+    _poll: Option<mpsc::Sender<()>>,
     roots: Vec<PathBuf>,
 }
 
 impl Watcher {
     /// Watch the given worktree folders recursively (the main worktree's
     /// folder includes `.git`). `on_change` runs on a background thread.
-    pub fn new(roots: Vec<PathBuf>, on_change: impl Fn() + Send + 'static) -> Result<Self> {
-        let mut filter = Filter {
-            roots: roots.clone(),
-            ignored: HashSet::new(),
+    pub fn new(roots: Vec<PathBuf>, on_change: impl Fn() + Send + Sync + 'static) -> Result<Self> {
+        let on_change = Arc::new(on_change);
+        let (polled, watched): (Vec<PathBuf>, Vec<PathBuf>) =
+            roots.iter().cloned().partition(|r| Wsl::of(r).is_some());
+        let poll = (!polled.is_empty()).then(|| {
+            let on_change = on_change.clone();
+            let (stop, stopped) = mpsc::channel();
+            std::thread::spawn(move || poll(&polled, &stopped, &*on_change));
+            stop
+        });
+        let debouncer = if watched.is_empty() {
+            None
+        } else {
+            Some(watch(watched, move || on_change())?)
         };
-        // No file id cache: building it walks every file under the roots
-        // (node_modules included), which took 38 s on a big repo. It only
-        // serves rename tracking, which Graft does not need.
-        let handler = move |result: DebounceEventResult| {
-            let Ok(events) = result else {
-                // Overflowed or failed: refresh to be safe.
-                on_change();
-                return;
-            };
-            let paths: Vec<&Path> = events
-                .iter()
-                .flat_map(|e| e.paths.iter().map(PathBuf::as_path))
-                .collect();
-            if filter.relevant(&paths) {
-                on_change();
-            }
-        };
-        let mut debouncer = new_debouncer_opt::<_, RecommendedWatcher, _>(
-            DEBOUNCE,
-            None,
-            handler,
-            NoCache::new(),
-            notify::Config::default(),
-        )?;
-        for root in &roots {
-            // A worktree inside another one (e.g. `.claude/worktrees/x`) is
-            // already covered by the outer recursive watch.
-            let nested = roots.iter().any(|r| r != root && root.starts_with(r));
-            if root.is_dir() && !nested {
-                debouncer.watch(root, RecursiveMode::Recursive)?;
-            }
-        }
         Ok(Self {
             _debouncer: debouncer,
+            _poll: poll,
             roots,
         })
     }
 
     pub fn roots(&self) -> &[PathBuf] {
         &self.roots
+    }
+}
+
+fn watch(
+    roots: Vec<PathBuf>,
+    on_change: impl Fn() + Send + 'static,
+) -> Result<Debouncer<RecommendedWatcher, NoCache>> {
+    let mut filter = Filter {
+        roots: roots.clone(),
+        ignored: HashSet::new(),
+    };
+    // No file id cache: building it walks every file under the roots
+    // (node_modules included), which took 38 s on a big repo. It only
+    // serves rename tracking, which Graft does not need.
+    let handler = move |result: DebounceEventResult| {
+        let Ok(events) = result else {
+            // Overflowed or failed: refresh to be safe.
+            on_change();
+            return;
+        };
+        let paths: Vec<&Path> = events
+            .iter()
+            .flat_map(|e| e.paths.iter().map(PathBuf::as_path))
+            .collect();
+        if filter.relevant(&paths) {
+            on_change();
+        }
+    };
+    let mut debouncer = new_debouncer_opt::<_, RecommendedWatcher, _>(
+        DEBOUNCE,
+        None,
+        handler,
+        NoCache::new(),
+        notify::Config::default(),
+    )?;
+    for root in &roots {
+        // A worktree inside another one (e.g. `.claude/worktrees/x`) is
+        // already covered by the outer recursive watch.
+        let nested = roots.iter().any(|r| r != root && root.starts_with(r));
+        if root.is_dir() && !nested {
+            debouncer.watch(root, RecursiveMode::Recursive)?;
+        }
+    }
+    Ok(debouncer)
+}
+
+/// Every [`POLL`], fingerprint each worktree inside WSL (status, size and
+/// time of changed files, refs and git's marker files like `MERGE_HEAD`)
+/// and call `on_change` when one differs from the last check. Runs until
+/// `stop` is dropped.
+fn poll(roots: &[PathBuf], stop: &mpsc::Receiver<()>, on_change: &dyn Fn()) {
+    // Status alone hides a second edit of an already changed file: it lists
+    // the HEAD and index versions, not what is on disk.
+    const SCRIPT: &str = r#"git status --porcelain=v2 --branch -z --untracked-files=all \
+        && git ls-files -z -m -o --exclude-standard | xargs -0 -r stat -c '%n %s %.9Y' -- \
+        ; git for-each-ref --format='%(objectname) %(refname)' \
+        && ls -a "$(git rev-parse --git-dir)" | grep -v '\.lock$'"#;
+    let fingerprint = |root: &Path| {
+        let mut cmd = cli::program(root, "sh");
+        cmd.args(["-c", SCRIPT])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null());
+        cli::share_env(&mut cmd);
+        let out = cmd.output().ok()?;
+        let mut hasher = DefaultHasher::new();
+        out.stdout.hash(&mut hasher);
+        out.status.code().hash(&mut hasher);
+        Some(hasher.finish())
+    };
+    // No baseline: the first check refreshes once, so a change between the
+    // caller's last load and this thread starting is not missed.
+    let mut last: Vec<Option<u64>> = vec![None; roots.len()];
+    loop {
+        match stop.recv_timeout(POLL) {
+            Err(RecvTimeoutError::Timeout) => {}
+            _ => return,
+        }
+        let now: Vec<Option<u64>> = roots.iter().map(|r| fingerprint(r)).collect();
+        if now != last {
+            last = now;
+            on_change();
+        }
     }
 }
 
@@ -195,15 +267,15 @@ fn git_file_matters(inside: &Path) -> bool {
 /// Which of `paths` (relative to `root`) git ignores, or `None` if git could
 /// not tell.
 fn check_ignore(root: &Path, paths: &[PathBuf]) -> Option<HashSet<PathBuf>> {
-    let mut child = cli::command(root)
-        .args(["check-ignore", "-z", "--stdin"])
+    let mut cmd = cli::command(root);
+    cmd.args(["check-ignore", "-z", "--stdin"])
         // check-ignore refuses literal pathspecs; it reads plain paths anyway.
         .env_remove("GIT_LITERAL_PATHSPECS")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::null());
+    cli::share_env(&mut cmd);
+    let mut child = cmd.spawn().ok()?;
     let mut input = Vec::new();
     for p in paths {
         input.extend_from_slice(p.to_string_lossy().replace('\\', "/").as_bytes());

@@ -240,7 +240,7 @@ fn candidate_row(
             ui.add_space(24.0);
             ui.spacing_mut().item_spacing.x = 0.0;
             small(ui, prefix, color::text_weak());
-            let full = path.display().to_string();
+            let full = graft_core::wsl::display(path);
             let galley = elided_path(
                 ui,
                 &full,

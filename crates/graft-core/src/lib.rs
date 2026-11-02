@@ -28,6 +28,7 @@ pub mod status;
 pub mod syntax;
 pub mod watch;
 pub mod worktree;
+pub mod wsl;
 
 pub use cli::{CancelToken, Git};
 pub use console::Console;
