@@ -350,9 +350,9 @@ fn worktree_row(ui: &mut Ui, wt: &Worktree, selected: bool) -> Response {
     let branch = elided(ui, &wt.label(), theme::mono(), fg, badges_x - 6.0 - text_x);
     paint_galley_left(painter, text_x, top_y, branch, fg);
     let path = if wt.is_main {
-        format!("{}  · main folder", wt.path.display())
+        format!("{}  · main folder", graft_core::wsl::display(&wt.path))
     } else {
-        wt.path.display().to_string()
+        graft_core::wsl::display(&wt.path)
     };
     let path = elided_path(
         ui,
@@ -363,7 +363,7 @@ fn worktree_row(ui: &mut Ui, wt: &Worktree, selected: bool) -> Response {
     );
     paint_galley_left(painter, text_x, bottom_y, path, color::text_weak());
 
-    response.on_hover_text(wt.path.display().to_string())
+    response.on_hover_text(graft_core::wsl::display(&wt.path))
 }
 
 fn worktree_menu(ui: &mut Ui, wt: &Worktree, busy: bool, actions: &mut Vec<Action>) {

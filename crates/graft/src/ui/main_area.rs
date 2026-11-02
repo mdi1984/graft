@@ -142,7 +142,7 @@ fn header(ui: &mut Ui, title: &str, worktree: Option<&Worktree>) {
             paint_galley_left(painter, chip.left() + 8.0, y, chip_text, color::dirty_fg());
             x = chip.right() + 10.0;
 
-            let path = wt.path.display().to_string();
+            let path = graft_core::wsl::display(&wt.path);
             let path = elided_path(
                 ui,
                 &path,
@@ -176,7 +176,9 @@ fn not_loaded(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
                 .font(theme::semibold(15.0))
                 .color(color::text()),
         );
-        ui.label(egui::RichText::new(project.root.display().to_string()).color(color::text_weak()));
+        ui.label(
+            egui::RichText::new(graft_core::wsl::display(&project.root)).color(color::text_weak()),
+        );
         ui.add_space(4.0);
         ui.add(egui::Label::new(egui::RichText::new(error).color(color::removed())).wrap());
         ui.add_space(8.0);

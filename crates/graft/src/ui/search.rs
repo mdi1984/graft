@@ -130,7 +130,7 @@ fn project_hits(project: &Project, text: &str) -> Vec<Hit> {
         out.push(Hit {
             kind: "Worktree",
             title: wt.label(),
-            detail: wt.path.display().to_string(),
+            detail: graft_core::wsl::display(&wt.path),
             project: None,
             actions: vec![Action::OpenWorktree(wt.path.clone())],
         });

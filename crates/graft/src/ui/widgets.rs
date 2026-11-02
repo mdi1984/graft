@@ -37,8 +37,10 @@ pub fn elided_path(
         return full;
     }
     let parts: Vec<&str> = path.split(['\\', '/']).collect();
+    // Linux paths (WSL) keep their slashes.
+    let sep = if path.contains('\\') { "\\" } else { "/" };
     for skip in 1..parts.len() {
-        let candidate = format!("…\\{}", parts[skip..].join("\\"));
+        let candidate = format!("…{sep}{}", parts[skip..].join(sep));
         let galley = painter.layout_no_wrap(candidate, font.clone(), color);
         if galley.size().x <= max_width {
             return galley;

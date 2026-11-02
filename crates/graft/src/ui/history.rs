@@ -951,7 +951,7 @@ fn uncommitted(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
             .color(color::text()),
     );
     let Some(wt) = project.worktree() else { return };
-    ui.label(RichText::new(wt.path.display().to_string()).color(color::text_weak()));
+    ui.label(RichText::new(graft_core::wsl::display(&wt.path)).color(color::text_weak()));
     let Some(status) = &wt.status else { return };
     let staged = status.staged().count();
     let unstaged = status.unstaged().count();

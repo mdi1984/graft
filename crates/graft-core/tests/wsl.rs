@@ -208,6 +208,18 @@ fn preview_in_main() {
 }
 
 #[test]
+fn distros_and_home_folders() {
+    let Some(d) = Distro::start() else { return };
+    assert!(graft_core::wsl::distros().contains(&d.name));
+    let wsl = Wsl::new(&d.name);
+    let home = wsl.home().expect("home folder");
+    assert_eq!(home, d.sh("echo $HOME"));
+    // `~/x` typed on the start page is the folder git sees as `$HOME/x`.
+    let typed = wsl.resolve("~/x", Some(&home)).unwrap();
+    assert_eq!(wsl.to_linux(&typed).unwrap(), format!("{home}/x"));
+}
+
+#[test]
 fn changes_inside_wsl_are_noticed() {
     let Some(d) = Distro::start() else { return };
     repo_with_worktree(&d);

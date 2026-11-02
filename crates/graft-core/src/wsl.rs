@@ -18,6 +18,14 @@ pub struct Wsl {
 }
 
 impl Wsl {
+    /// The distro `name`, reached through `\\wsl.localhost`.
+    pub fn new(name: &str) -> Self {
+        Self {
+            prefix: format!(r"\\wsl.localhost\{name}"),
+            distro: name.to_owned(),
+        }
+    }
+
     /// The distro holding `path`, if it is a path into WSL.
     pub fn of(path: &Path) -> Option<Self> {
         split(path).map(|(wsl, _)| wsl)
@@ -75,6 +83,54 @@ impl Wsl {
         }
     }
 
+    /// A folder the user typed for this distro: `~/x` (needs `home`), `/x`,
+    /// or a Windows path, which is taken as is.
+    pub fn resolve(&self, text: &str, home: Option<&str>) -> Option<PathBuf> {
+        let text = text.trim();
+        if text.contains('\\') || text.chars().nth(1) == Some(':') {
+            return Some(crate::repo::native(text));
+        }
+        let linux = if text == "~" {
+            home?.to_owned()
+        } else if let Some(rest) = text.strip_prefix("~/") {
+            format!("{}/{rest}", home?.trim_end_matches('/'))
+        } else if text.starts_with('/') {
+            text.trim_end_matches('/').to_owned()
+        } else {
+            return None;
+        };
+        Some(self.to_windows(&linux))
+    }
+
+    /// `path` the way a Linux user writes it: `~/x` under `home`, else `/x`.
+    pub fn show(&self, path: &Path, home: Option<&str>) -> Option<String> {
+        let linux = self.to_linux(path)?;
+        if let Some(home) = home
+            .map(|h| h.trim_end_matches('/'))
+            .filter(|h| !h.is_empty())
+        {
+            if linux == home {
+                return Some("~".to_owned());
+            }
+            if let Some(rest) = linux.strip_prefix(home).and_then(|r| r.strip_prefix('/')) {
+                return Some(format!("~/{rest}"));
+            }
+        }
+        Some(linux)
+    }
+
+    /// The home folder of the distro's default user (starts the distro).
+    pub fn home(&self) -> Option<String> {
+        let out = no_window(
+            self.command(Path::new("/"), "sh")
+                .args(["-c", "echo $HOME"]),
+        )
+        .output()
+        .ok()?;
+        let home = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        (out.status.success() && home.starts_with('/')).then_some(home)
+    }
+
     /// `program` run inside the distro in the Linux folder for `cwd`.
     /// Environment variables reach it only when named in `WSLENV`.
     pub(crate) fn command(&self, cwd: &Path, program: &str) -> Command {
@@ -86,6 +142,80 @@ impl Wsl {
         cmd.args(["--exec", program]);
         cmd
     }
+}
+
+/// A path for showing: `/home/x/app (Ubuntu)` for one inside WSL.
+pub fn display(path: &Path) -> String {
+    match split(path) {
+        Some((wsl, linux)) => format!("{linux} ({})", wsl.distro),
+        None => path.display().to_string(),
+    }
+}
+
+/// Installed distros, the default one first, without Docker's and Rancher
+/// Desktop's internal ones. Starts none of them. Empty without WSL.
+pub fn distros() -> Vec<String> {
+    let Ok(out) = no_window(Command::new("wsl.exe").args(["-l", "-v"])).output() else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    parse_list(&decode(&out.stdout))
+}
+
+/// wsl.exe answers in UTF-16 unless `WSL_UTF8` is set.
+fn decode(bytes: &[u8]) -> String {
+    let zeros = bytes.iter().skip(1).step_by(2).filter(|b| **b == 0).count();
+    if bytes.len() >= 2 && zeros * 4 >= bytes.len() {
+        let units: Vec<u16> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
+            .collect();
+        String::from_utf16_lossy(&units)
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
+/// `wsl -l -v`: a (translated) header, then `* name state version` lines.
+fn parse_list(text: &str) -> Vec<String> {
+    let mut list = Vec::new();
+    for line in text.lines().skip(1) {
+        let line = line.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+        let (default, line) = match line.strip_prefix('*') {
+            Some(rest) => (true, rest.trim_start()),
+            None => (false, line),
+        };
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        let [name, _state, version] = parts[..] else {
+            continue;
+        };
+        if !version.chars().all(|c| c.is_ascii_digit())
+            || name.starts_with("docker-desktop")
+            || name.starts_with("rancher-desktop")
+        {
+            continue;
+        }
+        if default {
+            list.insert(0, name.to_owned());
+        } else {
+            list.push(name.to_owned());
+        }
+    }
+    list
+}
+
+fn no_window(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
 }
 
 /// `\\wsl.localhost\<distro>\rest` (or `\\wsl$\...`, either slash, with or
@@ -117,6 +247,61 @@ fn split(path: &Path) -> Option<(Wsl, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_paths() {
+        let wsl = Wsl::new("Ubuntu");
+        let home = Some("/home/mdi");
+        let unc = |s: &str| Some(PathBuf::from(s));
+        assert_eq!(
+            wsl.resolve("~/projects", home),
+            unc(r"\\wsl.localhost\Ubuntu\home\mdi\projects")
+        );
+        assert_eq!(
+            wsl.resolve(" ~ ", home),
+            unc(r"\\wsl.localhost\Ubuntu\home\mdi")
+        );
+        assert_eq!(
+            wsl.resolve("/srv/x/", home),
+            unc(r"\\wsl.localhost\Ubuntu\srv\x")
+        );
+        assert_eq!(wsl.resolve("~/x", None), None, "home not known yet");
+        assert_eq!(wsl.resolve("projects", home), None, "relative");
+        assert_eq!(wsl.resolve(r"C:\dev", home), unc(r"C:\dev"));
+
+        let p = Path::new(r"\\wsl.localhost\Ubuntu\home\mdi\projects\x");
+        assert_eq!(wsl.show(p, home).unwrap(), "~/projects/x");
+        let home_dir = Path::new(r"\\wsl.localhost\Ubuntu\home\mdi");
+        assert_eq!(wsl.show(home_dir, home).unwrap(), "~");
+        let other = Path::new(r"\\wsl.localhost\Ubuntu\home\mdix");
+        assert_eq!(wsl.show(other, home).unwrap(), "/home/mdix");
+        assert_eq!(display(p), "/home/mdi/projects/x (Ubuntu)");
+        assert_eq!(display(Path::new(r"C:\dev")), r"C:\dev");
+    }
+
+    #[test]
+    fn distro_list() {
+        let text = "  NAME                   STATE           VERSION\r\n\
+                    * Ubuntu-24.04           Running         2\r\n  \
+                    rancher-desktop-data   Stopped         2\r\n  \
+                    Debian                 Stopped         2\r\n";
+        assert_eq!(parse_list(text), ["Ubuntu-24.04", "Debian"]);
+        let utf16: Vec<u8> = "NAME\r\n  Alpine Stopped 2\r\n* Arch Running 2\r\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert_eq!(parse_list(&decode(&utf16)), ["Arch", "Alpine"]);
+        let none = "Windows Subsystem for Linux has no installed distributions.\r\n\
+                    Use 'wsl.exe --list --online' to list available distributions.";
+        assert!(parse_list(none).is_empty());
+    }
+
+    #[test]
+    fn real_distros() {
+        // Whatever is installed here: never Docker's or Rancher's own.
+        let list = distros();
+        assert!(!list.iter().any(|d| d.starts_with("rancher-desktop")));
+    }
 
     #[test]
     fn detects_wsl_paths() {

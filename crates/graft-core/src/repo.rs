@@ -20,7 +20,7 @@ pub struct Location {
 /// to its main repository, so each repository gets one project tab.
 pub fn locate(path: &Path, console: &Console) -> Result<Location> {
     if !path.is_dir() {
-        bail!("{} is not a folder", path.display());
+        bail!("{} is not a folder", crate::wsl::display(path));
     }
     let git = Git::new(path, console.clone());
     let out = git.run_raw([
@@ -33,7 +33,7 @@ pub fn locate(path: &Path, console: &Console) -> Result<Location> {
     if !out.success() {
         let msg = failure_message(&out);
         if msg.contains("not a git repository") {
-            bail!("{} is not a git repository", path.display());
+            bail!("{} is not a git repository", crate::wsl::display(path));
         }
         bail!(msg);
     }
@@ -59,7 +59,8 @@ pub fn locate(path: &Path, console: &Console) -> Result<Location> {
 
 /// `git init` a new repository in `path` (created if missing).
 pub fn init(path: &Path, console: &Console) -> Result<Location> {
-    std::fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
+    std::fs::create_dir_all(path)
+        .with_context(|| format!("Could not create {}", crate::wsl::display(path)))?;
     Git::new(path, console.clone()).run(["init"])?;
     locate(path, console)
 }
@@ -114,14 +115,15 @@ pub fn clone(
     if dest.exists() && std::fs::read_dir(dest)?.next().is_some() {
         bail!(
             "The folder {} already exists and is not empty. Pick another folder name.",
-            dest.display()
+            crate::wsl::display(dest)
         );
     }
     let parent = dest
         .parent()
         .context("destination has no parent folder")?
         .to_path_buf();
-    std::fs::create_dir_all(&parent).with_context(|| format!("create {}", parent.display()))?;
+    std::fs::create_dir_all(&parent)
+        .with_context(|| format!("Could not create {}", crate::wsl::display(&parent)))?;
     let git = Git::new(&parent, console.clone());
     let dest_arg = git.path_arg(dest);
     let result = git.run_with_progress(

@@ -1,12 +1,14 @@
 //! The start page ("New tab"): open a local repository, clone one, create one,
 //! reopen a recent one, or open all repositories of a tab group.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use egui::{Align2, Rect, ScrollArea, Sense, Stroke, StrokeKind, TextureHandle, Ui, pos2, vec2};
 use graft_core::CancelToken;
 use graft_core::repo::{Progress, clone_folder_name, native};
+use graft_core::wsl::Wsl;
 
 use super::icons::{self, Icon};
 use super::project_tabs::group_color;
@@ -24,6 +26,29 @@ pub enum Mode {
     Home,
     Clone,
     Init,
+}
+
+/// Where Open starts looking and where Clone and Create put repositories.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Place {
+    Windows,
+    /// A WSL distro; its folders are typed as Linux paths (`~/projects`).
+    Wsl(String),
+}
+
+/// A distro's home folder, read in the background (that starts the distro).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Home {
+    Loading,
+    Known(String),
+    Failed,
+}
+
+fn place_of(path: &Path) -> Place {
+    match Wsl::of(path) {
+        Some(wsl) => Place::Wsl(wsl.distro().to_owned()),
+        None => Place::Windows,
+    }
 }
 
 /// A clone or init in progress.
@@ -44,6 +69,15 @@ pub struct StartPage {
     pub busy: Option<Busy>,
     pub error: Option<String>,
     logo: Option<TextureHandle>,
+    pub place: Place,
+    /// Installed WSL distros; `None` until asked for.
+    distros: Option<Vec<String>>,
+    homes: HashMap<String, Home>,
+    /// The clone folder and new repository folder typed for other places.
+    other_fields: HashMap<Place, (String, String)>,
+    /// The clone folder Graft started with, kept while the field does not
+    /// resolve (e.g. `~` before the home folder is known).
+    saved_clone_parent: PathBuf,
 }
 
 /// A recently opened repository; `exists` is checked when the list changes,
@@ -63,9 +97,16 @@ impl Recent {
 /// What the user asked for; the app carries it out.
 pub enum StartAction {
     PickOpen,
+    /// List the installed WSL distros; answer with [`StartPage::set_distros`].
+    LoadDistros,
+    /// Read a distro's home folder; answer with [`StartPage::set_home`].
+    LoadHome(String),
     PickCloneParent,
     PickInitFolder,
-    Clone { url: String, dest: PathBuf },
+    Clone {
+        url: String,
+        dest: PathBuf,
+    },
     Init(PathBuf),
     Cancel,
     OpenRecent(PathBuf),
@@ -77,17 +118,167 @@ pub enum StartAction {
 
 impl StartPage {
     pub fn new(clone_parent: PathBuf) -> Self {
-        Self {
+        let mut page = Self {
             mode: Mode::Home,
             url: String::new(),
-            clone_parent: clone_parent.display().to_string(),
+            clone_parent: String::new(),
             folder_name: String::new(),
             folder_name_edited: false,
             init_path: String::new(),
             busy: None,
             error: None,
             logo: None,
+            place: place_of(&clone_parent),
+            distros: None,
+            homes: HashMap::new(),
+            other_fields: HashMap::new(),
+            saved_clone_parent: clone_parent.clone(),
+        };
+        page.clone_parent = page.show_path(&clone_parent);
+        page
+    }
+
+    fn home(&self, distro: &str) -> Option<&str> {
+        match self.homes.get(distro) {
+            Some(Home::Known(home)) => Some(home),
+            _ => None,
         }
+    }
+
+    /// The distro of the current place, if it is one, and its home folder.
+    fn wsl(&self) -> Option<(Wsl, Option<&str>)> {
+        match &self.place {
+            Place::Windows => None,
+            Place::Wsl(name) => Some((Wsl::new(name), self.home(name))),
+        }
+    }
+
+    /// A folder the user typed, as a Windows path. `None` while a `~` path
+    /// waits for the home folder, or for a relative Linux path.
+    fn resolve(&self, text: &str) -> Option<PathBuf> {
+        let text = text.trim();
+        if text.is_empty() {
+            return None;
+        }
+        match self.wsl() {
+            None => Some(native(text)),
+            Some((wsl, home)) => wsl.resolve(text, home),
+        }
+    }
+
+    /// `path` the way the user types it: a Linux path for one inside WSL.
+    pub fn show_path(&self, path: &Path) -> String {
+        Wsl::of(path)
+            .and_then(|wsl| wsl.show(path, self.home(wsl.distro())))
+            .unwrap_or_else(|| path.display().to_string())
+    }
+
+    /// Like [`Self::show_path`], plus the distro for a path inside WSL.
+    fn describe(&self, path: &Path) -> String {
+        match Wsl::of(path) {
+            Some(wsl) => format!("{} · {}", self.show_path(path), wsl.distro()),
+            None => path.display().to_string(),
+        }
+    }
+
+    /// Switch to `place`, keeping what was typed for the one left.
+    fn set_place(&mut self, place: Place) {
+        if place == self.place {
+            return;
+        }
+        let fields = (
+            std::mem::take(&mut self.clone_parent),
+            std::mem::take(&mut self.init_path),
+        );
+        let old = std::mem::replace(&mut self.place, place.clone());
+        self.other_fields.insert(old, fields);
+        let (clone_parent, init_path) =
+            self.other_fields
+                .remove(&place)
+                .unwrap_or_else(|| match place {
+                    Place::Windows => (
+                        self.show_path(&crate::app::default_clone_parent()),
+                        String::new(),
+                    ),
+                    Place::Wsl(_) => ("~".to_owned(), String::new()),
+                });
+        self.clone_parent = clone_parent;
+        self.init_path = init_path;
+        self.error = None;
+    }
+
+    /// A folder picked in the dialog; switches to the place it is in.
+    pub fn picked_clone_parent(&mut self, path: &Path) {
+        self.set_place(place_of(path));
+        self.clone_parent = self.show_path(path);
+    }
+
+    pub fn picked_init_folder(&mut self, path: &Path) {
+        self.set_place(place_of(path));
+        self.init_path = self.show_path(path);
+    }
+
+    /// The installed distros arrived; a remembered one that is gone falls
+    /// back to Windows.
+    pub fn set_distros(&mut self, distros: Vec<String>) {
+        if let Place::Wsl(name) = &self.place
+            && !distros.contains(name)
+        {
+            self.set_place(Place::Windows);
+        }
+        self.distros = Some(distros);
+    }
+
+    /// A home folder arrived: show folders under it with `~`.
+    pub fn set_home(&mut self, distro: String, home: Option<String>) {
+        let parent = self.resolve(&self.clone_parent);
+        let home = home.map_or(Home::Failed, Home::Known);
+        self.homes.insert(distro, home);
+        if let Some(parent) = parent {
+            self.clone_parent = self.show_path(&parent);
+        }
+    }
+
+    /// The clone folder to remember for next time.
+    pub fn clone_parent_path(&self) -> PathBuf {
+        self.resolve(&self.clone_parent)
+            .unwrap_or_else(|| self.saved_clone_parent.clone())
+    }
+
+    /// Where the Open dialog starts: the home folder in WSL.
+    pub fn open_start(&self) -> Option<PathBuf> {
+        let (wsl, home) = self.wsl()?;
+        Some(wsl.to_windows(home.unwrap_or("/")))
+    }
+
+    /// Where the Browse dialog of the clone form starts.
+    pub fn clone_parent_start(&self) -> Option<PathBuf> {
+        self.resolve(&self.clone_parent)
+            .or_else(|| self.open_start())
+    }
+
+    /// Where the Browse dialog of the create form starts.
+    pub fn init_start(&self) -> Option<PathBuf> {
+        self.resolve(&self.init_path).or_else(|| self.open_start())
+    }
+
+    /// Why a typed folder does not resolve, if it doesn't.
+    fn folder_problem(&self, text: &str) -> Option<String> {
+        let (wsl, _) = self.wsl()?;
+        if text.trim().is_empty() || self.resolve(text).is_some() {
+            return None;
+        }
+        Some(if text.trim().starts_with('~') {
+            match self.homes.get(wsl.distro()) {
+                Some(Home::Failed) => format!(
+                    "Could not read your home folder in {}. Use a full path like /home/you/projects.",
+                    wsl.distro()
+                ),
+                _ => format!("Starting {}…", wsl.distro()),
+            }
+        } else {
+            "Use a Linux path, like ~/projects or /home/you/projects.".to_owned()
+        })
     }
 
     /// Forget the forms after a repository was opened.
@@ -101,8 +292,11 @@ impl StartPage {
         self.error = None;
     }
 
-    pub fn clone_dest(&self) -> PathBuf {
-        native(self.clone_parent.trim()).join(self.folder_name.trim())
+    pub fn clone_dest(&self) -> Option<PathBuf> {
+        Some(
+            self.resolve(&self.clone_parent)?
+                .join(self.folder_name.trim()),
+        )
     }
 
     pub fn show(
@@ -112,6 +306,16 @@ impl StartPage {
         groups: &[TabGroup],
     ) -> Option<StartAction> {
         let mut action = None;
+        if self.distros.is_none() {
+            self.distros = Some(Vec::new());
+            action = Some(StartAction::LoadDistros);
+        } else if let Place::Wsl(name) = &self.place
+            && !self.homes.contains_key(name)
+        {
+            let name = name.clone();
+            self.homes.insert(name.clone(), Home::Loading);
+            action = Some(StartAction::LoadHome(name));
+        }
         ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -126,6 +330,7 @@ impl StartPage {
                         ui.spacing_mut().item_spacing.y = 8.0;
                         self.header(ui);
                         ui.add_space(20.0);
+                        self.places(ui);
                         self.cards(ui, width, &mut action);
                         ui.add_space(12.0);
                         match self.mode {
@@ -145,7 +350,7 @@ impl StartPage {
                             group_list(ui, groups, width, &mut action);
                             ui.add_space(16.0);
                         }
-                        recent_list(ui, recent, width, &mut action);
+                        self.recent_list(ui, recent, width, &mut action);
                         ui.add_space(16.0);
                         ui.label(
                             egui::RichText::new(
@@ -194,23 +399,56 @@ impl StartPage {
         });
     }
 
+    /// "Location: This PC | WSL distros", only when WSL has distros.
+    fn places(&mut self, ui: &mut Ui) {
+        let Some(distros) = self.distros.clone().filter(|d| !d.is_empty()) else {
+            return;
+        };
+        let idle = self.busy.is_none();
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.label(
+                egui::RichText::new("Location")
+                    .color(color::text_weak())
+                    .size(theme::SMALL_SIZE),
+            );
+            ui.add_space(4.0);
+            let mut choice = None;
+            let windows = place_button(ui, "This PC", self.place == Place::Windows)
+                .on_hover_text("Folders on Windows");
+            if windows.clicked() {
+                choice = Some(Place::Windows);
+            }
+            for name in distros {
+                let place = Place::Wsl(name.clone());
+                let response = place_button(ui, &format!("WSL · {name}"), self.place == place)
+                    .on_hover_text(format!(
+                        "Folders inside {name}; git runs there too. Type Linux paths like ~/projects."
+                    ));
+                if response.clicked() {
+                    choice = Some(place);
+                }
+            }
+            if let Some(place) = choice
+                && idle
+            {
+                self.set_place(place);
+            }
+        });
+        ui.add_space(8.0);
+    }
+
     fn cards(&mut self, ui: &mut Ui, width: f32, action: &mut Option<StartAction>) {
         let gap = 12.0;
         let card_width = (width - 2.0 * gap) / 3.0;
         let idle = self.busy.is_none();
+        let open_detail = match &self.place {
+            Place::Windows => "A folder with a git repository".to_owned(),
+            Place::Wsl(_) => "A git repository in WSL".to_owned(),
+        };
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
-            if card(
-                ui,
-                card_width,
-                Icon::Folder,
-                "Open local",
-                "A folder with a git repository",
-                false,
-            )
-            .clicked()
-                && idle
-            {
+            if card(ui, card_width, Icon::Folder, "Open", &open_detail, false).clicked() && idle {
                 self.error = None;
                 *action = Some(StartAction::PickOpen);
             }
@@ -267,8 +505,12 @@ impl StartPage {
             }
             ui.add_space(4.0);
             field_label(ui, "Clone into folder");
+            let hint = match self.place {
+                Place::Windows => r"C:\dev",
+                Place::Wsl(_) => "~/projects",
+            };
             ui.horizontal(|ui| {
-                if text_field(ui, &mut self.clone_parent, r"C:\dev", inner - 96.0).changed() {
+                if text_field(ui, &mut self.clone_parent, hint, inner - 96.0).changed() {
                     self.error = None;
                 }
                 if button(ui, "Browse…", ButtonKind::Secondary, self.busy.is_none()).clicked() {
@@ -281,11 +523,18 @@ impl StartPage {
                 self.folder_name_edited = true;
                 self.error = None;
             }
+            let dest = self.clone_dest();
             let ready = !self.url.trim().is_empty()
-                && !self.clone_parent.trim().is_empty()
+                && dest.is_some()
                 && !self.folder_name.trim().is_empty()
                 && self.busy.is_none();
-            if ready {
+            if let Some(problem) = self.folder_problem(&self.clone_parent) {
+                ui.label(
+                    egui::RichText::new(problem)
+                        .color(color::text_weak())
+                        .size(theme::SMALL_SIZE),
+                );
+            } else if let Some(dest) = dest.as_deref().filter(|_| ready) {
                 let (rect, _) = ui.allocate_exact_size(vec2(inner, 16.0), Sense::hover());
                 let prefix = ui.painter().layout_no_wrap(
                     "Will clone to ".to_owned(),
@@ -295,7 +544,7 @@ impl StartPage {
                 let prefix_width = prefix.size().x;
                 let y = rect.center().y;
                 paint_galley_left(ui.painter(), rect.left(), y, prefix, color::text_faint());
-                let dest = self.clone_dest().display().to_string();
+                let dest = self.describe(dest);
                 let dest = elided_path(
                     ui,
                     &dest,
@@ -314,11 +563,14 @@ impl StartPage {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 let submit = url.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (button(ui, "Clone", ButtonKind::Primary, ready).clicked() || submit) && ready {
+                if (button(ui, "Clone", ButtonKind::Primary, ready).clicked() || submit)
+                    && ready
+                    && let Some(dest) = dest
+                {
                     self.error = None;
                     *action = Some(StartAction::Clone {
                         url: self.url.trim().to_owned(),
-                        dest: self.clone_dest(),
+                        dest,
                     });
                 }
                 if button(ui, "Cancel", ButtonKind::Secondary, self.busy.is_none()).clicked() {
@@ -333,18 +585,32 @@ impl StartPage {
         form_frame(ui, |ui| {
             let inner = width - 32.0;
             field_label(ui, "New repository folder (created if missing)");
+            let hint = match self.place {
+                Place::Windows => r"C:\dev\my-project",
+                Place::Wsl(_) => "~/projects/my-project",
+            };
             ui.horizontal(|ui| {
-                text_field(ui, &mut self.init_path, r"C:\dev\my-project", inner - 96.0);
+                text_field(ui, &mut self.init_path, hint, inner - 96.0);
                 if button(ui, "Browse…", ButtonKind::Secondary, self.busy.is_none()).clicked() {
                     *action = Some(StartAction::PickInitFolder);
                 }
             });
+            if let Some(problem) = self.folder_problem(&self.init_path) {
+                ui.label(
+                    egui::RichText::new(problem)
+                        .color(color::text_weak())
+                        .size(theme::SMALL_SIZE),
+                );
+            }
             ui.add_space(6.0);
-            let ready = !self.init_path.trim().is_empty() && self.busy.is_none();
+            let target = self.resolve(&self.init_path);
+            let ready = target.is_some() && self.busy.is_none();
             ui.horizontal(|ui| {
-                if button(ui, "Create repository", ButtonKind::Primary, ready).clicked() {
+                if button(ui, "Create repository", ButtonKind::Primary, ready).clicked()
+                    && let Some(target) = target
+                {
                     self.error = None;
-                    *action = Some(StartAction::Init(PathBuf::from(self.init_path.trim())));
+                    *action = Some(StartAction::Init(target));
                 }
                 if button(ui, "Cancel", ButtonKind::Secondary, self.busy.is_none()).clicked() {
                     self.mode = Mode::Home;
@@ -449,70 +715,119 @@ fn busy_panel(ui: &mut Ui, busy: &Busy, width: f32, action: &mut Option<StartAct
     });
 }
 
-fn recent_list(ui: &mut Ui, recent: &[Recent], width: f32, action: &mut Option<StartAction>) {
-    let (rect, _) = ui.allocate_exact_size(vec2(width, 20.0), Sense::hover());
-    section_heading(ui, ui.painter(), rect.left(), rect.center().y, "RECENT");
-    if recent.is_empty() {
-        ui.label(
-            egui::RichText::new("Repositories you open show up here.").color(color::text_faint()),
-        );
-        return;
-    }
-    for Recent { path, exists } in recent {
-        let exists = *exists;
-        let (rect, response) = ui.allocate_exact_size(vec2(width, 44.0), Sense::click());
-        let close =
-            Rect::from_center_size(pos2(rect.right() - 18.0, rect.center().y), vec2(22.0, 22.0));
-        let close_response =
-            ui.interact(close, ui.scope_id().with(("forget", path)), Sense::click());
-        let hovered = response.hovered() || close_response.hovered();
-        let painter = ui.painter();
-        if hovered {
-            painter.rect_filled(rect, RADIUS, color::hover_row_bg());
-        }
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
-        let fg = if exists {
-            color::text()
-        } else {
-            color::text_faint()
-        };
-        let name = elided(
-            ui,
-            &name,
-            theme::semibold(theme::BODY_SIZE),
-            fg,
-            width - 60.0,
-        );
-        paint_galley_left(painter, rect.left() + 10.0, rect.top() + 14.0, name, fg);
-        let detail = if exists {
-            path.display().to_string()
-        } else {
-            format!("{} (missing)", path.display())
-        };
-        let detail = elided_path(
-            ui,
-            &detail,
-            theme::small(),
+/// A toggle in the Location row.
+fn place_button(ui: &mut Ui, label: &str, selected: bool) -> egui::Response {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), theme::small(), color::text());
+    let size = vec2(galley.size().x + 20.0, 24.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let (fill, border, fg) = if selected {
+        (
+            color::selected_row_bg(),
+            color::accent().gamma_multiply(0.6),
+            color::text(),
+        )
+    } else if response.hovered() {
+        (
+            color::control_hover_bg(),
+            color::control_border(),
+            color::text(),
+        )
+    } else {
+        (
+            color::control_bg(),
+            color::control_border(),
             color::text_weak(),
-            width - 60.0,
-        );
-        paint_galley_left(
-            painter,
-            rect.left() + 10.0,
-            rect.top() + 31.0,
-            detail,
-            color::text_weak(),
-        );
-        if hovered {
-            paint_icon_button(ui, close, &close_response, Icon::Close);
+        )
+    };
+    ui.painter()
+        .rect(rect, 6, fill, Stroke::new(1.0, border), StrokeKind::Inside);
+    paint_galley_left(
+        ui.painter(),
+        rect.left() + 10.0,
+        rect.center().y,
+        galley,
+        fg,
+    );
+    response
+}
+
+impl StartPage {
+    fn recent_list(
+        &self,
+        ui: &mut Ui,
+        recent: &[Recent],
+        width: f32,
+        action: &mut Option<StartAction>,
+    ) {
+        let (rect, _) = ui.allocate_exact_size(vec2(width, 20.0), Sense::hover());
+        section_heading(ui, ui.painter(), rect.left(), rect.center().y, "RECENT");
+        if recent.is_empty() {
+            ui.label(
+                egui::RichText::new("Repositories you open show up here.")
+                    .color(color::text_faint()),
+            );
+            return;
         }
-        if close_response.on_hover_text("Remove from recent").clicked() {
-            *action = Some(StartAction::ForgetRecent(path.clone()));
-        } else if response.clicked() && exists {
-            *action = Some(StartAction::OpenRecent(path.clone()));
+        for Recent { path, exists } in recent {
+            let exists = *exists;
+            let (rect, response) = ui.allocate_exact_size(vec2(width, 44.0), Sense::click());
+            let close = Rect::from_center_size(
+                pos2(rect.right() - 18.0, rect.center().y),
+                vec2(22.0, 22.0),
+            );
+            let close_response =
+                ui.interact(close, ui.scope_id().with(("forget", path)), Sense::click());
+            let hovered = response.hovered() || close_response.hovered();
+            let painter = ui.painter();
+            if hovered {
+                painter.rect_filled(rect, RADIUS, color::hover_row_bg());
+            }
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            let fg = if exists {
+                color::text()
+            } else {
+                color::text_faint()
+            };
+            let name = elided(
+                ui,
+                &name,
+                theme::semibold(theme::BODY_SIZE),
+                fg,
+                width - 60.0,
+            );
+            paint_galley_left(painter, rect.left() + 10.0, rect.top() + 14.0, name, fg);
+            let detail = if exists {
+                self.describe(path)
+            } else {
+                format!("{} (missing)", self.describe(path))
+            };
+            let detail = elided_path(
+                ui,
+                &detail,
+                theme::small(),
+                color::text_weak(),
+                width - 60.0,
+            );
+            paint_galley_left(
+                painter,
+                rect.left() + 10.0,
+                rect.top() + 31.0,
+                detail,
+                color::text_weak(),
+            );
+            if hovered {
+                paint_icon_button(ui, close, &close_response, Icon::Close);
+            }
+            if close_response.on_hover_text("Remove from recent").clicked() {
+                *action = Some(StartAction::ForgetRecent(path.clone()));
+            } else if response.clicked() && exists {
+                *action = Some(StartAction::OpenRecent(path.clone()));
+            }
         }
     }
 }
