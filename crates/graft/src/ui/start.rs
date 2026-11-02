@@ -89,7 +89,9 @@ pub struct Recent {
 
 impl Recent {
     pub fn new(path: PathBuf) -> Self {
-        let exists = path.is_dir();
+        // Looking into WSL would start a stopped distro, and this runs when
+        // Graft starts: assume it is there; opening says if it is not.
+        let exists = graft_core::wsl::Wsl::of(&path).is_some() || path.is_dir();
         Self { path, exists }
     }
 }
@@ -221,10 +223,13 @@ impl StartPage {
     /// The installed distros arrived; a remembered one that is gone falls
     /// back to Windows.
     pub fn set_distros(&mut self, distros: Vec<String>) {
-        if let Place::Wsl(name) = &self.place
-            && !distros.contains(name)
-        {
-            self.set_place(Place::Windows);
+        if let Place::Wsl(name) = &self.place {
+            // Distro names are case-insensitive; use the listed spelling.
+            match distros.iter().find(|d| d.eq_ignore_ascii_case(name)) {
+                Some(listed) if listed != name => self.place = Place::Wsl(listed.clone()),
+                Some(_) => {}
+                None => self.set_place(Place::Windows),
+            }
         }
         self.distros = Some(distros);
     }
@@ -265,20 +270,37 @@ impl StartPage {
     /// Why a typed folder does not resolve, if it doesn't.
     fn folder_problem(&self, text: &str) -> Option<String> {
         let (wsl, _) = self.wsl()?;
-        if text.trim().is_empty() || self.resolve(text).is_some() {
+        let text = text.trim();
+        if text.is_empty() || self.resolve(text).is_some() {
             return None;
         }
-        Some(if text.trim().starts_with('~') {
-            match self.homes.get(wsl.distro()) {
-                Some(Home::Failed) => format!(
-                    "Could not read your home folder in {}. Use a full path like /home/you/projects.",
-                    wsl.distro()
-                ),
-                _ => format!("Starting {}…", wsl.distro()),
-            }
-        } else {
-            "Use a Linux path, like ~/projects or /home/you/projects.".to_owned()
+        let in_home = text == "~" || text.starts_with("~/");
+        Some(match self.homes.get(wsl.distro()) {
+            Some(Home::Failed) if in_home => format!(
+                "Could not read your home folder in {}. Use a full path like /home/you/projects.",
+                wsl.distro()
+            ),
+            Some(Home::Loading) | None if in_home => format!("Starting {}…", wsl.distro()),
+            _ => "Use a Linux path, like ~/projects or /home/you/projects.".to_owned(),
         })
+    }
+
+    /// Background work the page needs before it can be used: the distro
+    /// list, then the home folder of the chosen distro. Asked for apart from
+    /// the page's own actions, so a click in the same frame cannot drop it.
+    pub fn take_load(&mut self) -> Option<StartAction> {
+        if self.distros.is_none() {
+            self.distros = Some(Vec::new());
+            return Some(StartAction::LoadDistros);
+        }
+        if let Place::Wsl(name) = &self.place
+            && !self.homes.contains_key(name)
+        {
+            let name = name.clone();
+            self.homes.insert(name.clone(), Home::Loading);
+            return Some(StartAction::LoadHome(name));
+        }
+        None
     }
 
     /// Forget the forms after a repository was opened.
@@ -306,16 +328,6 @@ impl StartPage {
         groups: &[TabGroup],
     ) -> Option<StartAction> {
         let mut action = None;
-        if self.distros.is_none() {
-            self.distros = Some(Vec::new());
-            action = Some(StartAction::LoadDistros);
-        } else if let Place::Wsl(name) = &self.place
-            && !self.homes.contains_key(name)
-        {
-            let name = name.clone();
-            self.homes.insert(name.clone(), Home::Loading);
-            action = Some(StartAction::LoadHome(name));
-        }
         ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -923,5 +935,84 @@ fn group_list(ui: &mut Ui, groups: &[TabGroup], width: f32, action: &mut Option<
                 ui.close();
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PROJECTS: &str = r"\\wsl.localhost\Ubuntu\home\mdi\projects";
+
+    #[test]
+    fn starts_where_the_last_clone_went() {
+        let mut page = StartPage::new(PathBuf::from(PROJECTS));
+        assert_eq!(page.place, Place::Wsl("Ubuntu".into()));
+        // Before the home folder is known the path is shown in full.
+        assert_eq!(page.clone_parent, "/home/mdi/projects");
+        assert!(matches!(page.take_load(), Some(StartAction::LoadDistros)));
+        page.set_distros(vec!["ubuntu".into()]);
+        assert_eq!(page.place, Place::Wsl("ubuntu".into()), "listed spelling");
+        assert!(matches!(page.take_load(), Some(StartAction::LoadHome(d)) if d == "ubuntu"));
+        assert!(page.take_load().is_none(), "asked once");
+        page.set_home("ubuntu".into(), Some("/home/mdi".into()));
+        assert_eq!(page.clone_parent, "~/projects");
+        assert_eq!(
+            page.clone_dest().map(|_| page.clone_parent_path()),
+            Some(PathBuf::from(r"\\wsl.localhost\ubuntu\home\mdi\projects"))
+        );
+    }
+
+    #[test]
+    fn a_missing_distro_falls_back_to_windows() {
+        let mut page = StartPage::new(PathBuf::from(PROJECTS));
+        page.set_distros(vec!["Debian".into()]);
+        assert_eq!(page.place, Place::Windows);
+        assert!(!page.clone_parent.starts_with('/'));
+    }
+
+    #[test]
+    fn each_place_keeps_its_folders() {
+        let mut page = StartPage::new(PathBuf::from(r"C:\dev"));
+        page.set_distros(vec!["Ubuntu".into()]);
+        page.init_path = r"C:\dev\new".into();
+        page.set_place(Place::Wsl("Ubuntu".into()));
+        assert_eq!(
+            (page.clone_parent.as_str(), page.init_path.as_str()),
+            ("~", "")
+        );
+        page.clone_parent = "~/src".into();
+        page.set_place(Place::Windows);
+        assert_eq!(page.clone_parent, r"C:\dev");
+        assert_eq!(page.init_path, r"C:\dev\new");
+        page.set_place(Place::Wsl("Ubuntu".into()));
+        assert_eq!(page.clone_parent, "~/src");
+        // Picking a Windows folder switches back.
+        page.picked_init_folder(Path::new(r"D:\x"));
+        assert_eq!(page.place, Place::Windows);
+        assert_eq!(page.init_path, r"D:\x");
+    }
+
+    #[test]
+    fn explains_folders_that_do_not_work_yet() {
+        let mut page = StartPage::new(PathBuf::from(PROJECTS));
+        page.set_distros(vec!["Ubuntu".into()]);
+        let _ = page.take_load();
+        let problem = |page: &StartPage, text: &str| page.folder_problem(text).unwrap_or_default();
+        assert_eq!(problem(&page, "~/x"), "Starting Ubuntu…");
+        assert!(problem(&page, "~bob/x").starts_with("Use a Linux path"));
+        assert!(problem(&page, "projects").starts_with("Use a Linux path"));
+        page.set_home("Ubuntu".into(), None);
+        assert!(problem(&page, "~/x").starts_with("Could not read your home folder"));
+        assert_eq!(problem(&page, "/srv/x"), "");
+        // While a stopped repo's place is unknown, the saved folder is kept.
+        assert_eq!(page.clone_parent_path(), PathBuf::from(PROJECTS));
+    }
+
+    #[test]
+    fn recent_wsl_entries_are_not_looked_up() {
+        // A stopped distro must not start just to draw the start page.
+        assert!(Recent::new(PathBuf::from(r"\\wsl.localhost\Gone\home\x")).exists);
+        assert!(!Recent::new(PathBuf::from(r"C:\graft-no-such-folder-x")).exists);
     }
 }

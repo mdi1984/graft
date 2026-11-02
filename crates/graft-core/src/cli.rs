@@ -63,10 +63,19 @@ impl Git {
     }
 
     /// `path` as git sees it: a Linux path for a repository inside WSL.
-    pub fn path_arg(&self, path: &Path) -> String {
-        Wsl::of(&self.cwd)
-            .and_then(|wsl| wsl.to_linux(path))
-            .unwrap_or_else(|| path.to_string_lossy().into_owned())
+    /// Fails for a path git there cannot reach (another distro, a network
+    /// share): Linux git would take it as a relative file name.
+    pub fn path_arg(&self, path: &Path) -> Result<String> {
+        match Wsl::of(&self.cwd) {
+            None => Ok(path.to_string_lossy().into_owned()),
+            Some(wsl) => wsl.to_linux(path).with_context(|| {
+                format!(
+                    "{} is not inside {}. Pick a folder there for this repository.",
+                    crate::wsl::display(path),
+                    wsl.distro()
+                )
+            }),
+        }
     }
 
     /// An absolute path git printed, as a Windows path.
@@ -125,7 +134,7 @@ impl Git {
         let started = Instant::now();
         let mut cmd = command(&self.cwd);
         if let Some(index) = &self.index_file {
-            cmd.env("GIT_INDEX_FILE", self.path_arg(index));
+            cmd.env("GIT_INDEX_FILE", self.path_arg(index)?);
         }
         // `stash push -u` stores untracked files but leaves them in place when
         // pathspecs are literal (git 2.5x). Graft never passes paths to stash.
@@ -334,12 +343,31 @@ pub(crate) fn share_env(cmd: &mut Command) {
         .filter(|user| !user.is_empty())
         .into_iter()
         .collect();
+    // Settings the user passes in the environment: ours are numbered after
+    // them, so Linux git needs theirs too.
+    names.extend(inherited_config(
+        std::env::var("GIT_CONFIG_COUNT").ok().as_deref(),
+    ));
     names.extend(
         cmd.get_envs()
             .filter(|(name, value)| value.is_some() && *name != "WSLENV")
             .map(|(name, _)| name.to_string_lossy().into_owned()),
     );
     cmd.env("WSLENV", names.join(":"));
+}
+
+/// Names of the `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` variables the
+/// user's own `GIT_CONFIG_COUNT` covers.
+fn inherited_config(count: Option<&str>) -> Vec<String> {
+    let count: usize = count.and_then(|n| n.trim().parse().ok()).unwrap_or(0);
+    (0..count)
+        .flat_map(|i| {
+            [
+                format!("GIT_CONFIG_KEY_{i}"),
+                format!("GIT_CONFIG_VALUE_{i}"),
+            ]
+        })
+        .collect()
 }
 
 /// Settings every git command Graft runs gets, added after any the user
@@ -395,7 +423,13 @@ fn keep_final_progress(stderr: &[u8]) -> Vec<u8> {
 pub fn failure_message(out: &Output) -> String {
     let stderr = crate::console::redact(&out.stderr_str());
     let text = if stderr.is_empty() {
-        crate::console::redact(out.stdout_str().trim())
+        // wsl.exe reports its own failures (e.g. a removed distro) in UTF-16.
+        let stdout = if out.stdout.contains(&0) {
+            crate::wsl::decode(&out.stdout)
+        } else {
+            out.stdout_str()
+        };
+        crate::console::redact(stdout.trim())
     } else {
         stderr
     };
@@ -446,6 +480,11 @@ mod tests {
         assert_eq!(env[0], ("GIT_CONFIG_COUNT".to_owned(), "1".to_owned()));
         assert_eq!(env[1].0, "GIT_CONFIG_KEY_0");
         // The user already passes two settings: ours come after them.
+        assert!(inherited_config(None).is_empty());
+        assert_eq!(
+            inherited_config(Some("1")),
+            ["GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"]
+        );
         let env = extra_config(Some("2"));
         assert_eq!(env[0].1, "3");
         assert_eq!(

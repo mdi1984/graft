@@ -125,7 +125,7 @@ pub fn clone(
     std::fs::create_dir_all(&parent)
         .with_context(|| format!("Could not create {}", crate::wsl::display(&parent)))?;
     let git = Git::new(&parent, console.clone());
-    let dest_arg = git.path_arg(dest);
+    let dest_arg = git.path_arg(dest)?;
     let result = git.run_with_progress(
         ["clone", "--progress", "--", url, &dest_arg],
         cancel.flag(),

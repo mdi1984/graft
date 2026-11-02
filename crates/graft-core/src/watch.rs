@@ -109,12 +109,16 @@ fn watch(
     Ok(debouncer)
 }
 
-/// Every [`POLL`], fingerprint each worktree inside WSL (status, refs and
-/// git's marker files like `MERGE_HEAD`) and call `on_change` when one
-/// differs from the last check. Runs until `stop` is dropped.
+/// Every [`POLL`], fingerprint each worktree inside WSL (status, size and
+/// time of changed files, refs and git's marker files like `MERGE_HEAD`)
+/// and call `on_change` when one differs from the last check. Runs until
+/// `stop` is dropped.
 fn poll(roots: &[PathBuf], stop: &mpsc::Receiver<()>, on_change: &dyn Fn()) {
+    // Status alone hides a second edit of an already changed file: it lists
+    // the HEAD and index versions, not what is on disk.
     const SCRIPT: &str = r#"git status --porcelain=v2 --branch -z --untracked-files=all \
-        && git for-each-ref --format='%(objectname) %(refname)' \
+        && git ls-files -z -m -o --exclude-standard | xargs -0 -r stat -c '%n %s %.9Y' -- \
+        ; git for-each-ref --format='%(objectname) %(refname)' \
         && ls -a "$(git rev-parse --git-dir)" | grep -v '\.lock$'"#;
     let fingerprint = |root: &Path| {
         let mut cmd = cli::program(root, "sh");
@@ -128,7 +132,9 @@ fn poll(roots: &[PathBuf], stop: &mpsc::Receiver<()>, on_change: &dyn Fn()) {
         out.status.code().hash(&mut hasher);
         Some(hasher.finish())
     };
-    let mut last: Vec<Option<u64>> = roots.iter().map(|r| fingerprint(r)).collect();
+    // No baseline: the first check refreshes once, so a change between the
+    // caller's last load and this thread starting is not missed.
+    let mut last: Vec<Option<u64>> = vec![None; roots.len()];
     loop {
         match stop.recv_timeout(POLL) {
             Err(RecvTimeoutError::Timeout) => {}

@@ -165,7 +165,7 @@ pub fn distros() -> Vec<String> {
 }
 
 /// wsl.exe answers in UTF-16 unless `WSL_UTF8` is set.
-fn decode(bytes: &[u8]) -> String {
+pub(crate) fn decode(bytes: &[u8]) -> String {
     let zeros = bytes.iter().skip(1).step_by(2).filter(|b| **b == 0).count();
     if bytes.len() >= 2 && zeros * 4 >= bytes.len() {
         let units: Vec<u16> = bytes
@@ -189,8 +189,10 @@ fn parse_list(text: &str) -> Vec<String> {
             Some(rest) => (true, rest.trim_start()),
             None => (false, line),
         };
+        // The state is translated and can be several words ("Wird
+        // ausgeführt"): the name comes first, the version last.
         let parts: Vec<&str> = line.split_whitespace().collect();
-        let [name, _state, version] = parts[..] else {
+        let (3.., Some(name), Some(version)) = (parts.len(), parts.first(), parts.last()) else {
             continue;
         };
         if !version.chars().all(|c| c.is_ascii_digit())
@@ -200,9 +202,9 @@ fn parse_list(text: &str) -> Vec<String> {
             continue;
         }
         if default {
-            list.insert(0, name.to_owned());
+            list.insert(0, name.to_string());
         } else {
-            list.push(name.to_owned());
+            list.push(name.to_string());
         }
     }
     list
@@ -286,6 +288,10 @@ mod tests {
                     rancher-desktop-data   Stopped         2\r\n  \
                     Debian                 Stopped         2\r\n";
         assert_eq!(parse_list(text), ["Ubuntu-24.04", "Debian"]);
+        let german = "  NAME            STATUS            VERSION\r\n\
+                      * Ubuntu          Wird ausgeführt   2\r\n  \
+                      Debian          Beendet           2\r\n";
+        assert_eq!(parse_list(german), ["Ubuntu", "Debian"]);
         let utf16: Vec<u8> = "NAME\r\n  Alpine Stopped 2\r\n* Arch Running 2\r\n"
             .encode_utf16()
             .flat_map(u16::to_le_bytes)
@@ -325,6 +331,18 @@ mod tests {
         let other = Path::new(r"\\WSL.LOCALHOST\ubuntu\home\mdi\app\");
         assert_eq!(wsl.to_linux(other).unwrap(), "/home/mdi/app");
         assert_eq!(wsl.to_windows("/"), Path::new(r"\\wsl.localhost\Ubuntu\"));
+    }
+
+    #[test]
+    fn both_names_are_the_same_folder() {
+        assert!(crate::model::same_path(
+            Path::new(r"\\wsl$\Ubuntu\home\app"),
+            Path::new(r"\\wsl.localhost\Ubuntu\home\app\")
+        ));
+        assert!(!crate::model::same_path(
+            Path::new(r"\\wsl$\Ubuntu\home\app"),
+            Path::new(r"\\wsl.localhost\Debian\home\app")
+        ));
     }
 
     #[test]

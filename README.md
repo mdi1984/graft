@@ -61,6 +61,16 @@ locked worktrees are never touched. Deleted branches can be restored from **Rece
 Stage or discard whole files, single hunks, or just the lines you tick. Then commit, amend, or
 commit and push in one go.
 
+### Repositories in WSL
+Keep your code in WSL and still manage it from Windows. On the start page, set **Location** to your
+distro (for example **WSL · Ubuntu-24.04**) and open, clone or create repositories with Linux paths
+like `~/projects`. No `\\wsl.localhost\...` paths to type.
+
+- Git runs inside the distro, with its own config, hooks and credentials. It is not Windows git
+  reaching across, which is slow there and reports scripts as changed because of their executable bit.
+- Worktrees, staging, review, Preview in main folder and conflicts work as for any other repository.
+- Changes made inside Linux show up within about two seconds.
+
 ### And also
 - **Branches grouped by prefix:** `feature/foo` and `feature/bar` sit in a foldable `feature` folder.
 - **Stashes remember their worktree.** Apply or pop a stash in a different worktree, or turn it into a branch.
@@ -80,7 +90,8 @@ commit and push in one go.
 
 ## Opinions
 - **Your git, your setup.** Graft runs your `git.exe` for everything that changes the repository, so
-  hooks, config and Git Credential Manager keep working.
+  hooks, config and Git Credential Manager keep working. For a repository in WSL it runs the
+  distro's `git` instead.
 - **Nothing destructive without asking.** Discard, reset --hard, delete and Slash ask first.
 - **Force push only as `--force-with-lease`.**
 - **No accounts, no cloud, no telemetry.** Graft talks to your remotes through git and nowhere else.
@@ -97,6 +108,15 @@ fetch · file history and blame · undo last commit · search everything with **
 ## Install
 
 You need [Git for Windows](https://git-scm.com/download/win).
+
+For repositories in WSL you also need `git` inside the distro (`sudo apt install git`). To push and
+pull over HTTPS from there, let WSL's git use Git Credential Manager from Git for Windows. Run this
+once inside WSL:
+
+```bash
+gcm="$(realpath "$(wslpath "$(git.exe --exec-path | tr -d '\r')")/../../bin/git-credential-manager.exe")"
+git config --global credential.helper "!\"$gcm\""
+```
 
 From [Releases](https://github.com/mdi1984/graft/releases), either run `Graft-<version>-x64-setup.exe`
 (installs for your user only, no admin rights) or unpack `Graft-<version>-x64.zip` anywhere you like
@@ -161,7 +181,8 @@ shortcut for each action.
 - Reads: the history walk uses gitoxide. Status, refs, worktrees and diffs come from git's
   machine-readable output, so they always match what git itself says.
 - Writes: `git.exe` for everything (commit, apply, push, pull, merge, rebase, stash, worktrees).
-- A file watcher per worktree refreshes what changed.
+- A file watcher per worktree refreshes what changed. Windows reports no changes for folders in WSL,
+  so those are checked every two seconds by asking git inside the distro.
 - Diffs use the histogram algorithm with word-level highlights; syntax colors come from
   [syntect](https://github.com/trishume/syntect).
 - Settings, review marks and comments are stored in `%APPDATA%\Graft`.

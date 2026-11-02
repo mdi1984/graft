@@ -1071,6 +1071,9 @@ impl eframe::App for GraftApp {
         match self.active {
             Some(index) => self.project_ui(ui, index),
             None => {
+                if let Some(load) = self.start.take_load() {
+                    self.on_start_action(load);
+                }
                 let action = CentralPanel::no_frame()
                     .frame(Frame::new().fill(color::app_bg()))
                     .show(ui, |ui| self.start.show(ui, &self.recent, &self.groups))

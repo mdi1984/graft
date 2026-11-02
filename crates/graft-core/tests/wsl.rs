@@ -163,6 +163,13 @@ fn worktrees_clone_and_conflicts() {
     worktree::remove(&git, &path, false).unwrap();
     assert!(!path.exists());
 
+    // A folder Linux git cannot reach is refused, not created as a file
+    // name with backslashes inside the repository.
+    let share = Path::new(r"\\server\share\wt");
+    let err = worktree::add(&git, share, &Start::Existing("main".into())).unwrap_err();
+    assert!(format!("{err:#}").contains("is not inside"), "{err:#}");
+    assert_eq!(d.sh("cd app && git status --porcelain"), "");
+
     // A merge stopped in the linked worktree is seen through its `.git` file,
     // which holds a Linux path.
     d.sh(
@@ -248,6 +255,13 @@ fn changes_inside_wsl_are_noticed() {
     wait("new file in the linked worktree");
     d.sh("cd app && git branch other");
     wait("new branch");
+    // Files that are already changed: every further edit counts too.
+    d.sh("printf 'two\\n' >> app/readme.md");
+    wait("first edit of a tracked file");
+    d.sh("printf 'three\\n' >> app/readme.md");
+    wait("second edit of the same file");
+    d.sh("printf 'y\\n' >> app.worktrees/feature/new.txt");
+    wait("second edit of an untracked file");
     // Nothing changed: no refresh.
     std::thread::sleep(Duration::from_secs(5));
     assert_eq!(changes.load(Ordering::SeqCst), 0);
