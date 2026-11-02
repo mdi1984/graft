@@ -12,7 +12,7 @@ use graft_core::status::{EntryKind, StatusEntry};
 use graft_core::{CancelToken, Git};
 use graft_core::{refs, remote};
 
-use super::comments::Pick;
+use super::comments::{Pick, Side};
 use super::{Action, Event, Project};
 
 /// One file in one of the File status lists.
@@ -66,17 +66,30 @@ pub struct Loaded {
     pub highlights: Highlights,
 }
 
+/// Line ranges on one side of a diff.
+pub type SideLines = Vec<(Side, Range<u32>)>;
+
+fn has(lines: &[(Side, Range<u32>)], old: u32, new: u32) -> bool {
+    lines.iter().any(|(side, r)| match side {
+        Side::Old => r.contains(&old),
+        Side::New => r.contains(&new),
+    })
+}
+
 /// Load a file's diff with the unchanged lines asked for (all of them with
-/// `whole`), and work out its highlights.
+/// `whole`) and the `kept` ones (review comments), and work out its
+/// highlights.
 fn load_shown(
     git: &Git,
     key: &FileKey,
     whole: bool,
-    revealed: &[Range<u32>],
+    revealed: &[(Side, Range<u32>)],
+    kept: &[(Side, Range<u32>)],
 ) -> Result<Loaded, String> {
-    let reveal = |n: u32| whole || revealed.iter().any(|r| r.contains(&n));
-    let (diff, gaps) =
-        diff::load_expanded(git, &key.source, &key.path, reveal).map_err(|e| format!("{e:#}"))?;
+    let reveal = |old, new| whole || has(revealed, old, new);
+    let keep = |old, new| has(kept, old, new);
+    let (diff, gaps) = diff::load_expanded(git, &key.source, &key.path, reveal, keep)
+        .map_err(|e| format!("{e:#}"))?;
     let highlights = Highlights::of(&diff);
     Ok(Loaded {
         diff,
@@ -128,8 +141,9 @@ pub struct DiffView {
     pub read_only: bool,
     /// Unchanged lines still hidden; `None` when they cannot be shown.
     pub gaps: Option<Vec<Gap>>,
-    /// Unchanged lines the user asked to see, by old line number.
-    pub revealed: Vec<Range<u32>>,
+    /// Unchanged lines the user asked to see, by the line numbers of the
+    /// side that stays put (the working tree's while staging).
+    pub revealed: SideLines,
     generation: u64,
 }
 
@@ -324,9 +338,10 @@ impl Project {
         view.loading = true;
         let key = view.key.clone();
         let revealed = view.revealed.clone();
+        let kept = self.comment_lines(&key);
         self.pool.spawn(&self.tx, move || Event::CommitDiff {
             generation,
-            result: load_shown(&git, &key, whole, &revealed),
+            result: load_shown(&git, &key, whole, &revealed, &kept),
         });
     }
 
@@ -340,16 +355,18 @@ impl Project {
         view.loading = false;
         match result {
             Ok(loaded) => {
-                // Lines picked to comment on stay picked when more show.
+                // Lines picked to comment on stay picked when more show;
+                // when the lines changed, the pick would point elsewhere.
                 if let (Some(old), Some(review)) = (&view.diff, &mut self.review)
                     && let Some(pick) = review.pick
-                    && let Some(at) = follow(old, &loaded.diff, [pick.anchor, pick.cursor])
+                    && *old != loaded.diff
                 {
-                    review.pick = Some(Pick {
-                        anchor: at[0],
-                        cursor: at[1],
-                        ..pick
-                    });
+                    review.pick =
+                        follow(old, &loaded.diff, [pick.anchor, pick.cursor]).map(|at| Pick {
+                            anchor: at[0],
+                            cursor: at[1],
+                            ..pick
+                        });
                 }
                 view.diff = Some(loaded.diff);
                 view.gaps = loaded.gaps;
@@ -361,16 +378,22 @@ impl Project {
         self.color_later(generation, true);
     }
 
-    /// Show more unchanged lines (old line numbers) in the File status diff
-    /// or, with `commit`, in the read-only one.
-    fn show_lines(&mut self, commit: bool, lines: Range<u32>) {
+    /// Show more unchanged lines, `old` and `new` being their numbers on
+    /// each side, in the File status diff or, with `commit`, in the
+    /// read-only one.
+    fn show_lines(&mut self, commit: bool, old: Range<u32>, new: Range<u32>) {
         let view = if commit {
             &mut self.commit_diff
         } else {
             &mut self.diff_view
         };
         let Some(view) = view else { return };
-        view.revealed.push(lines);
+        // Staging a hunk above moves the index's numbers, not the working
+        // tree's.
+        view.revealed.push(match view.key.source {
+            Source::Unstaged => (Side::New, new),
+            _ => (Side::Old, old),
+        });
         if commit {
             self.load_commit_diff();
         } else {
@@ -441,7 +464,7 @@ impl Project {
         let revealed = view.revealed.clone();
         self.pool.spawn(&self.tx, move || Event::Diff {
             generation,
-            result: load_shown(&git, &key, whole, &revealed),
+            result: load_shown(&git, &key, whole, &revealed, &[]),
         });
     }
 
@@ -536,7 +559,7 @@ impl Project {
                     v.anchor = None;
                 }
             }
-            Action::ShowLines { commit, lines } => self.show_lines(commit, lines),
+            Action::ShowLines { commit, old, new } => self.show_lines(commit, old, new),
             Action::HunkOp(hunk, op) => self.lines_op(op, Some(hunk)),
             Action::LinesOp(op) => self.lines_op(op, None),
             Action::StageFiles(paths) => self.run_op("Staging", Then::Nothing, move |git| {

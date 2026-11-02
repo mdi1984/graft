@@ -103,11 +103,13 @@ pub enum Action {
         line: usize,
     },
     ClearLines,
-    /// Show these unchanged lines (old line numbers) in the File status diff
-    /// or, with `commit`, in the read-only one (commit, stash, review).
+    /// Show these unchanged lines (their numbers in the old and the new
+    /// file) in the File status diff or, with `commit`, in the read-only
+    /// one (commit, stash, review).
     ShowLines {
         commit: bool,
-        lines: std::ops::Range<u32>,
+        old: std::ops::Range<u32>,
+        new: std::ops::Range<u32>,
     },
     /// Show whole files in diffs, or only the changes (an app setting).
     ToggleWholeFile,

@@ -1205,7 +1205,8 @@ fn gap_row(ui: &mut Ui, rect: Rect, view: &DiffView, g: usize, actions: &mut Vec
         {
             actions.push(Action::ShowLines {
                 commit: view.read_only,
-                lines,
+                new: gap.in_new(&lines),
+                old: lines,
             });
         }
     }

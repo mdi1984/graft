@@ -806,6 +806,10 @@ impl GraftApp {
             for p in &mut self.projects {
                 p.settings.wrap_lines = self.settings.wrap_lines;
             }
+            // An open Settings window saves what it shows: keep it current.
+            if let Some(form) = &mut self.settings_form {
+                form.draft.wrap_lines = self.settings.wrap_lines;
+            }
         }
         if pressed(Command::WholeFile) {
             self.toggle_whole_file();
@@ -816,6 +820,9 @@ impl GraftApp {
         self.settings.whole_file = !self.settings.whole_file;
         for p in &mut self.projects {
             p.set_whole_file(self.settings.whole_file);
+        }
+        if let Some(form) = &mut self.settings_form {
+            form.draft.whole_file = self.settings.whole_file;
         }
     }
 

@@ -4,6 +4,7 @@
 //! are remembered per worktree.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -12,8 +13,8 @@ use graft_core::review::{self, Review, ReviewFile};
 use graft_core::{conflicts, same_path};
 use serde::{Deserialize, Serialize};
 
-use super::changes::Then;
-use super::comments::{self, LineComment, Pick};
+use super::changes::{SideLines, Then};
+use super::comments::{self, LineComment, Pick, Side};
 use super::{Action, Event, FileKey, Project};
 
 /// What Graft remembers about reviewing one worktree.
@@ -211,6 +212,52 @@ impl Project {
         self.select_commit_file(key);
     }
 
+    /// The lines of the review comments on the file `key` shows, so they
+    /// never hide in a gap.
+    pub(super) fn comment_lines(&self, key: &FileKey) -> SideLines {
+        if !matches!(key.source, Source::Base(_)) {
+            return Vec::new();
+        }
+        self.review_state()
+            .map(|state| {
+                state
+                    .comments
+                    .iter()
+                    .filter(|c| c.path == key.path)
+                    .map(|c| (c.side, c.start..c.end + 1))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A pick across hidden lines shows them: a comment is about all of its
+    /// lines, and they will show with it from then on.
+    fn open_gaps_in_pick(&mut self) {
+        let Some(pick) = self.review.as_ref().and_then(|v| v.pick) else {
+            return;
+        };
+        let Some(view) = &mut self.commit_diff else {
+            return;
+        };
+        let (lo, hi) = (
+            pick.anchor.0.min(pick.cursor.0),
+            pick.anchor.0.max(pick.cursor.0),
+        );
+        let inside: Vec<Range<u32>> = view
+            .gaps
+            .iter()
+            .flatten()
+            .filter(|g| g.before.is_some_and(|h| lo < h && h <= hi))
+            .map(|g| g.lines.clone())
+            .collect();
+        if inside.is_empty() {
+            return;
+        }
+        view.revealed
+            .extend(inside.into_iter().map(|lines| (Side::Old, lines)));
+        self.load_commit_diff();
+    }
+
     /// Mark or unmark a file as viewed; marking the open file moves on to the
     /// next file not viewed yet.
     fn toggle_viewed(&mut self, path: String) {
@@ -322,6 +369,7 @@ impl Project {
                         view.focus_draft = true;
                     }
                 }
+                self.open_gaps_in_pick();
             }
             Action::SaveComment => self.save_comment(),
             Action::CancelComment => {
