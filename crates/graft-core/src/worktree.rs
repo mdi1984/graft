@@ -43,7 +43,7 @@ pub fn add(git: &Git, path: &Path, start: &Start) -> Result<()> {
             path.display()
         );
     }
-    let path = path.to_string_lossy();
+    let path = git.path_arg(path);
     match start {
         Start::NewBranch { name, base } => {
             git.run(["worktree", "add", "-b", name, &path, base])?;
@@ -60,7 +60,7 @@ pub fn add(git: &Git, path: &Path, start: &Start) -> Result<()> {
 
 /// Remove a linked worktree; `force` also throws away its uncommitted changes.
 pub fn remove(git: &Git, path: &Path, force: bool) -> Result<()> {
-    let path = path.to_string_lossy();
+    let path = git.path_arg(path);
     let mut args = vec!["worktree", "remove"];
     if force {
         args.push("--force");
@@ -71,7 +71,7 @@ pub fn remove(git: &Git, path: &Path, force: bool) -> Result<()> {
 }
 
 pub fn set_locked(git: &Git, path: &Path, locked: bool) -> Result<()> {
-    let path = path.to_string_lossy();
+    let path = git.path_arg(path);
     if locked {
         git.run(["worktree", "lock", "--reason", "Locked in Graft", &path])?;
     } else {

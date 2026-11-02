@@ -26,6 +26,11 @@ git worktree support (for parallel AI-agent work), pleasant code review.
 ## Windows rules
 - Treat file content as bytes, not String. Respect core.autocrlf.
 - Handle no-newline-at-EOF and binary files explicitly.
+- Repos inside WSL (`\\wsl.localhost\<distro>\...`, see `wsl.rs`): git runs
+  in the distro via `wsl.exe`; absolute paths go through `Git::path_arg` /
+  `Git::native_path`; changes are polled (Windows sends no file events there).
+  WSL's git can be older (Ubuntu 24.04: 2.43), e.g. `checkout`/`reset` reject
+  `--end-of-options`.
 
 ## Screens
 Always visible: title bar, project tabs (one per open repo, top of the window),

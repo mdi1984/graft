@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 
 use crate::console::{Console, Entry};
+use crate::wsl::Wsl;
 
 /// Output of a finished git command.
 #[derive(Debug)]
@@ -59,6 +60,21 @@ impl Git {
 
     pub fn console(&self) -> &Console {
         &self.console
+    }
+
+    /// `path` as git sees it: a Linux path for a repository inside WSL.
+    pub fn path_arg(&self, path: &Path) -> String {
+        Wsl::of(&self.cwd)
+            .and_then(|wsl| wsl.to_linux(path))
+            .unwrap_or_else(|| path.to_string_lossy().into_owned())
+    }
+
+    /// An absolute path git printed, as a Windows path.
+    pub fn native_path(&self, path: &str) -> PathBuf {
+        match Wsl::of(&self.cwd) {
+            Some(wsl) => wsl.to_windows(path),
+            None => crate::repo::native(path),
+        }
     }
 
     /// Same console, other directory (e.g. another worktree).
@@ -109,7 +125,7 @@ impl Git {
         let started = Instant::now();
         let mut cmd = command(&self.cwd);
         if let Some(index) = &self.index_file {
-            cmd.env("GIT_INDEX_FILE", index);
+            cmd.env("GIT_INDEX_FILE", self.path_arg(index));
         }
         // `stash push -u` stores untracked files but leaves them in place when
         // pathspecs are literal (git 2.5x). Graft never passes paths to stash.
@@ -123,6 +139,7 @@ impl Git {
             Stdio::null()
         });
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        share_env(&mut cmd);
         let mut child = cmd
             .spawn()
             .with_context(|| "could not start git — is Git for Windows installed?")?;
@@ -189,6 +206,7 @@ impl Git {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        share_env(&mut cmd);
         let mut child = cmd
             .spawn()
             .with_context(|| "could not start git — is Git for Windows installed?")?;
@@ -261,10 +279,24 @@ impl Git {
 
 /// Spawn a child process in the background without flashing a console window.
 pub(crate) fn command(cwd: &Path) -> Command {
-    let mut cmd = Command::new("git");
-    cmd.current_dir(cwd)
-        // Never block on a terminal prompt; Git Credential Manager still shows its own window.
-        .env("GIT_TERMINAL_PROMPT", "0")
+    program(cwd, "git")
+}
+
+/// `program` with the environment every git call gets. In a repository
+/// inside WSL it runs in the distro: Windows git over `\\wsl.localhost` takes
+/// seconds per status and misreads the files (see `wsl`).
+pub(crate) fn program(cwd: &Path, program: &str) -> Command {
+    let wsl = Wsl::of(cwd);
+    let mut cmd = match &wsl {
+        Some(wsl) => wsl.command(cwd, program),
+        None => {
+            let mut cmd = Command::new(program);
+            cmd.current_dir(cwd);
+            cmd
+        }
+    };
+    // Never block on a terminal prompt; Git Credential Manager still shows its own window.
+    cmd.env("GIT_TERMINAL_PROMPT", "0")
         // Stable, parseable English output.
         .env("LC_ALL", "C")
         .env("LANG", "C")
@@ -287,6 +319,27 @@ pub(crate) fn command(cwd: &Path) -> Command {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     cmd
+}
+
+/// Hand the variables set on `cmd` to Linux when it runs in WSL: Linux only
+/// sees the ones `WSLENV` names, and a named but unset one arrives empty
+/// (an empty `GIT_INDEX_FILE` breaks every command). Call right before
+/// spawning, after the last `env`/`env_remove`.
+pub(crate) fn share_env(cmd: &mut Command) {
+    if cmd.get_program() != "wsl.exe" {
+        return;
+    }
+    let mut names: Vec<String> = std::env::var("WSLENV")
+        .ok()
+        .filter(|user| !user.is_empty())
+        .into_iter()
+        .collect();
+    names.extend(
+        cmd.get_envs()
+            .filter(|(name, value)| value.is_some() && *name != "WSLENV")
+            .map(|(name, _)| name.to_string_lossy().into_owned()),
+    );
+    cmd.env("WSLENV", names.join(":"));
 }
 
 /// Settings every git command Graft runs gets, added after any the user

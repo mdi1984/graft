@@ -44,8 +44,8 @@ pub fn locate(path: &Path, console: &Console) -> Result<Location> {
     if lines.next() == Some("true") || toplevel.is_empty() {
         bail!("Bare repositories are not supported yet");
     }
-    let opened = native(toplevel);
-    let common_dir = native(common_dir);
+    let opened = git.native_path(toplevel);
+    let common_dir = git.native_path(common_dir);
     // The main worktree is the folder that contains the common `.git` dir.
     let root = match common_dir.file_name() {
         Some(name) if name == ".git" => common_dir
@@ -123,14 +123,9 @@ pub fn clone(
         .to_path_buf();
     std::fs::create_dir_all(&parent).with_context(|| format!("create {}", parent.display()))?;
     let git = Git::new(&parent, console.clone());
+    let dest_arg = git.path_arg(dest);
     let result = git.run_with_progress(
-        [
-            "clone".as_ref(),
-            "--progress".as_ref(),
-            "--".as_ref(),
-            url.as_ref(),
-            dest.as_os_str(),
-        ],
+        ["clone", "--progress", "--", url, &dest_arg],
         cancel.flag(),
         |line| on_progress(parse_progress(line)),
     );
