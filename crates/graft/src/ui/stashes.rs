@@ -75,13 +75,9 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
         .show(ui, |ui| details(ui, project, snap, stash, actions));
 
     match &project.commit_diff {
-        Some(view) => diff_view::show_view(
-            ui,
-            view,
-            project.is_operating(),
-            project.settings.wrap_lines,
-            actions,
-        ),
+        Some(view) => {
+            diff_view::show_view(ui, view, project.is_operating(), &project.settings, actions)
+        }
         None => empty_state(ui, "", "Pick a file above to see its changes."),
     }
 }

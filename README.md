@@ -77,6 +77,8 @@ like `~/projects`. No `\\wsl.localhost\...` paths to type.
 - **Conflict resolver:** ours, base and theirs for each conflict, a live result, take-ours/take-theirs
   for whole files (lock files).
 - **Syntax highlighting** in every diff, in a dark and a light theme (or match Windows).
+- **More context when you need it:** open up the unchanged lines between changes 20 at a time or all
+  at once, or switch any diff to the whole file (Alt+F). Staging hunks and lines still works.
 - **The toolbar tells you why.** Buttons that can't do anything right now are greyed out, with the
   reason on hover. Labels use your repository's real default branch (`main`, `master`, `develop`…).
 - **Git console:** every command Graft runs, with its output and how long it took.

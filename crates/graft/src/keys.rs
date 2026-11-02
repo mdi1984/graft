@@ -21,6 +21,7 @@ pub enum Command {
     Refresh,
     Console,
     WrapLines,
+    WholeFile,
     StageFile,
     StageAll,
     UnstageAll,
@@ -81,7 +82,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 }
 
 impl Command {
-    pub const ALL: [Command; 20] = [
+    pub const ALL: [Command; 21] = [
         Command::Search,
         Command::NewTab,
         Command::OpenFolder,
@@ -93,6 +94,7 @@ impl Command {
         Command::Refresh,
         Command::Console,
         Command::WrapLines,
+        Command::WholeFile,
         Command::StageFile,
         Command::StageAll,
         Command::UnstageAll,
@@ -118,6 +120,7 @@ impl Command {
             Command::Refresh => "refresh",
             Command::Console => "console",
             Command::WrapLines => "wrap-lines",
+            Command::WholeFile => "whole-file",
             Command::StageFile => "stage-file",
             Command::StageAll => "stage-all",
             Command::UnstageAll => "unstage-all",
@@ -143,6 +146,7 @@ impl Command {
             Command::Refresh => "Refresh",
             Command::Console => "Show or hide the git console",
             Command::WrapLines => "Wrap long lines in diffs",
+            Command::WholeFile => "Show whole files in diffs",
             Command::StageFile => "Stage or unstage the selected file",
             Command::StageAll => "Stage all",
             Command::UnstageAll => "Unstage all",
@@ -182,6 +186,7 @@ impl Command {
             Command::Refresh => plain(Key::F5),
             Command::Console => ctrl(Key::J),
             Command::WrapLines => alt(Key::Z),
+            Command::WholeFile => alt(Key::F),
             Command::StageFile => plain(Key::Space),
             Command::StageAll => ctrl(Key::S),
             Command::UnstageAll => ctrl_shift(Key::S),

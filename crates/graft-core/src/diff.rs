@@ -121,13 +121,7 @@ pub fn load(git: &Git, source: &Source, path: &str) -> Result<FileDiff> {
         Source::Untracked => args.push("--no-index".into()),
         Source::Commit(id) => {
             // Against the first parent; a root commit against the empty tree.
-            let parent = git.run_raw(["rev-parse", "-q", "--verify", &format!("{id}^1")])?;
-            let base = if parent.success() {
-                parent.stdout_str().trim().to_owned()
-            } else {
-                EMPTY_TREE.to_owned()
-            };
-            args.push(base);
+            args.push(parent(git, id)?.unwrap_or_else(|| EMPTY_TREE.to_owned()));
             args.push(id.to_string());
         }
         Source::Base(id) => args.push(id.to_string()),
@@ -155,6 +149,243 @@ pub fn load(git: &Git, source: &Source, path: &str) -> Result<FileDiff> {
 }
 
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// A commit's first parent, or `None` for a root commit.
+fn parent(git: &Git, id: &Oid) -> Result<Option<String>> {
+    let out = git.run_raw(["rev-parse", "-q", "--verify", &format!("{id}^1")])?;
+    Ok(out.success().then(|| out.stdout_str().trim().to_owned()))
+}
+
+/// The old version of the file as git stores it (line endings as in the
+/// diff), to fill in the unchanged lines between hunks. `None` when there
+/// is no old version.
+pub fn old_version(git: &Git, source: &Source, path: &str) -> Result<Option<Vec<u8>>> {
+    let rev = match source {
+        Source::Unstaged => format!(":0:{path}"),
+        Source::Staged => format!("HEAD:{path}"),
+        Source::Untracked => return Ok(None),
+        Source::Commit(id) => match parent(git, id)? {
+            Some(parent) => format!("{parent}:{path}"),
+            None => return Ok(None),
+        },
+        Source::Base(id) => format!("{id}:{path}"),
+    };
+    let out = git.run_expecting(["cat-file", "blob", &rev], None, |_| true)?;
+    Ok(out.success().then_some(out.stdout))
+}
+
+/// Unchanged lines the diff does not show, between two hunks or before the
+/// first or after the last one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Gap {
+    /// Line numbers in the old file, end exclusive.
+    pub lines: Range<u32>,
+    /// The new file's number of the first line.
+    pub new_start: u32,
+    /// The hunk right below the gap; `None` for the gap at the end.
+    pub before: Option<usize>,
+}
+
+impl Gap {
+    pub fn len(&self) -> u32 {
+        self.lines.end - self.lines.start
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    /// Above the first hunk: there is no hunk above to continue.
+    pub fn at_start(&self) -> bool {
+        self.before == Some(0)
+    }
+
+    pub fn at_end(&self) -> bool {
+        self.before.is_none()
+    }
+
+    /// Old line numbers `lines` (part of this gap) in the new file.
+    pub fn in_new(&self, lines: &Range<u32>) -> Range<u32> {
+        let shift = |n: u32| n - self.lines.start + self.new_start;
+        shift(lines.start)..shift(lines.end)
+    }
+}
+
+/// Load the diff of one file with more unchanged lines shown as context,
+/// and the gaps that stay hidden. `reveal` and `keep` pick lines by their
+/// (old, new) numbers, see [`expand`]. Gaps are `None` when unchanged lines
+/// cannot be shown: new, deleted or binary files, no old version to take
+/// them from, or one that does not match the diff (a textconv driver, or
+/// the index changed in between).
+pub fn load_expanded(
+    git: &Git,
+    source: &Source,
+    path: &str,
+    reveal: impl Fn(u32, u32) -> bool,
+    keep: impl Fn(u32, u32) -> bool,
+) -> Result<(FileDiff, Option<Vec<Gap>>)> {
+    let mut diff = load(git, source, path)?;
+    if diff.binary || diff.new_file || diff.deleted_file || diff.hunks.is_empty() {
+        return Ok((diff, None));
+    }
+    // Without the old version the diff still shows, just not expandable.
+    let Ok(Some(old)) = old_version(git, source, path) else {
+        return Ok((diff, None));
+    };
+    if !matches_old(&diff, &old) {
+        return Ok((diff, None));
+    }
+    let gaps = expand(&mut diff, &old, reveal, keep);
+    Ok((diff, Some(gaps)))
+}
+
+/// Whether every old line the diff shows is in `old` at its number.
+fn matches_old(diff: &FileDiff, old: &[u8]) -> bool {
+    let old_lines: Vec<&[u8]> = split_lines(old).collect();
+    diff.hunks.iter().flat_map(|h| &h.lines).all(|line| {
+        line.old_no.is_none_or(|n| {
+            (n as usize)
+                .checked_sub(1)
+                .and_then(|i| old_lines.get(i))
+                .is_some_and(|l| *l == line.content.as_slice())
+        })
+    })
+}
+
+/// Show more unchanged lines as context: the ones `reveal` picks, as far as
+/// they reach on from a hunk (lines right below a hunk join that hunk, lines
+/// right above one join the hunk below), and the ones `keep` picks wherever
+/// they are, with every line between them and the nearest hunk. Both get
+/// a line's (old, new) numbers. Hunks never merge, so Stage hunk still
+/// stages what it did. `old` is the old version of the file. Returns the
+/// gaps still hidden.
+pub fn expand(
+    diff: &mut FileDiff,
+    old: &[u8],
+    reveal: impl Fn(u32, u32) -> bool,
+    keep: impl Fn(u32, u32) -> bool,
+) -> Vec<Gap> {
+    let no_newline = !old.is_empty() && !old.ends_with(b"\n");
+    let old_lines: Vec<&[u8]> = split_lines(old).collect();
+    let total = old_lines.len() as u32;
+    let new_no = |n: u32, delta: i64| (i64::from(n) + delta) as u32;
+    let context = |n: u32, delta: i64| Line {
+        kind: Kind::Context,
+        old_no: Some(n),
+        new_no: Some(new_no(n, delta)),
+        content: old_lines[n as usize - 1].to_vec(),
+        no_newline: no_newline && n == total,
+    };
+
+    // The hidden stretch before each hunk and after the last one, with the
+    // shift from old to new line numbers there.
+    let mut stretches = Vec::new();
+    let (mut next, mut delta) = (1u32, 0i64);
+    for (h, hunk) in diff.hunks.iter().enumerate() {
+        // An empty side's start is the line before it.
+        let first = if hunk.old_count == 0 {
+            hunk.old_start + 1
+        } else {
+            hunk.old_start
+        };
+        stretches.push((next..first.max(next), delta, Some(h)));
+        next = first + hunk.old_count;
+        delta += i64::from(hunk.new_count) - i64::from(hunk.old_count);
+    }
+    stretches.push((next..(total + 1).max(next), delta, None));
+
+    let mut gaps = Vec::new();
+    for (range, delta, before) in stretches {
+        let (mut start, mut end) = (range.start, range.end.min(total + 1));
+        let above = match before {
+            Some(h) => h.checked_sub(1),
+            None => diff.hunks.len().checked_sub(1),
+        };
+        // Kept lines open up the stretch from the nearer hunk to them.
+        let kept: Vec<u32> = (start..end)
+            .filter(|&n| keep(n, new_no(n, delta)))
+            .collect();
+        let forced = match (kept.first(), kept.last()) {
+            (Some(&lo), Some(&hi)) => {
+                let down = start..hi + 1;
+                let up = lo..end;
+                match (above, before) {
+                    (None, _) => up,
+                    (_, None) => down,
+                    _ if down.len() <= up.len() => down,
+                    _ => up,
+                }
+            }
+            _ => 0..0,
+        };
+        let shown = |n: u32| forced.contains(&n) || reveal(n, new_no(n, delta));
+        if let Some(a) = above {
+            while start < end && shown(start) {
+                diff.hunks[a].lines.push(context(start, delta));
+                start += 1;
+            }
+        }
+        if let Some(b) = before {
+            let mut lines = Vec::new();
+            while start < end && shown(end - 1) {
+                end -= 1;
+                lines.push(context(end, delta));
+            }
+            lines.reverse();
+            diff.hunks[b].lines.splice(0..0, lines);
+        }
+        if start < end {
+            gaps.push(Gap {
+                lines: start..end,
+                new_start: new_no(start, delta),
+                before,
+            });
+        }
+    }
+    for hunk in &mut diff.hunks {
+        renumber(hunk);
+    }
+    gaps
+}
+
+/// Header numbers that match a hunk's lines again.
+fn renumber(hunk: &mut Hunk) {
+    let old: Vec<u32> = hunk.lines.iter().filter_map(|l| l.old_no).collect();
+    let new: Vec<u32> = hunk.lines.iter().filter_map(|l| l.new_no).collect();
+    if let Some(&first) = old.first() {
+        hunk.old_start = first;
+    }
+    if let Some(&first) = new.first() {
+        hunk.new_start = first;
+    }
+    hunk.old_count = old.len() as u32;
+    hunk.new_count = new.len() as u32;
+}
+
+/// Whether two diffs of a file have the same changed lines in the same
+/// hunks, so they differ only in how many unchanged lines show.
+pub fn same_changes(a: &FileDiff, b: &FileDiff) -> bool {
+    let changes = |d: &FileDiff| -> Vec<(usize, Line)> {
+        d.hunks
+            .iter()
+            .enumerate()
+            .flat_map(|(h, hunk)| hunk.lines.iter().map(move |l| (h, l)))
+            .filter(|(_, l)| l.is_change())
+            .map(|(h, l)| (h, l.clone()))
+            .collect()
+    };
+    a.hunks.len() == b.hunks.len() && changes(a) == changes(b)
+}
+
+/// Where the line at (hunk, line) of `from` is in `to`, a diff with the
+/// same changes and more or fewer unchanged lines.
+pub fn relocate(from: &FileDiff, to: &FileDiff, at: (usize, usize)) -> Option<(usize, usize)> {
+    let line = from.hunks.get(at.0)?.lines.get(at.1)?;
+    let l = to.hunks.get(at.0)?.lines.iter().position(|other| {
+        other.kind == line.kind && other.old_no == line.old_no && other.new_no == line.new_no
+    })?;
+    Some((at.0, l))
+}
 
 /// Parse `git diff` output for a single file.
 pub fn parse(bytes: &[u8]) -> FileDiff {
@@ -511,6 +742,146 @@ index 111..222 100644
     fn binary_and_new_files() {
         let d = parse(b"diff --git a/x.png b/x.png\nnew file mode 100644\nindex 0..1\nBinary files /dev/null and b/x.png differ\n");
         assert!(d.binary && d.new_file && d.hunks.is_empty());
+    }
+
+    /// Twelve lines; line 5 changed, line 9 replaced by two.
+    const OLD: &[u8] = b"1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12";
+    const TWO_HUNKS: &[u8] = b"diff --git a/n.txt b/n.txt
+--- a/n.txt
++++ b/n.txt
+@@ -4,3 +4,3 @@
+ 4
+-5
++five
+ 6
+@@ -8,3 +8,4 @@
+ 8
+-9
++nine
++nine and a bit
+ 10
+";
+
+    fn numbers(d: &FileDiff) -> Vec<(Option<u32>, Option<u32>, String)> {
+        d.hunks
+            .iter()
+            .flat_map(|h| &h.lines)
+            .map(|l| (l.old_no, l.new_no, l.text()))
+            .collect()
+    }
+
+    #[test]
+    fn gaps_without_expanding() {
+        let mut d = parse(TWO_HUNKS);
+        let before = d.clone();
+        let gaps = expand(&mut d, OLD, |_, _| false, |_, _| false);
+        assert_eq!(d, before);
+        let shape: Vec<_> = gaps.iter().map(|g| (g.lines.clone(), g.before)).collect();
+        assert_eq!(shape, [(1..4, Some(0)), (7..8, Some(1)), (11..13, None)]);
+        assert!(gaps[0].at_start() && gaps[2].at_end());
+    }
+
+    #[test]
+    fn expanding_joins_lines_to_the_nearest_hunk() {
+        let mut d = parse(TWO_HUNKS);
+        // Line 3 (above hunk 0), 7 (below hunk 0) and 11 (after hunk 1).
+        let gaps = expand(&mut d, OLD, |n, _| [3, 7, 11].contains(&n), |_, _| false);
+        let h0 = &d.hunks[0];
+        assert_eq!(
+            (h0.old_start, h0.old_count, h0.new_start, h0.new_count),
+            (3, 5, 3, 5)
+        );
+        assert_eq!(h0.lines[0].text(), "3");
+        assert_eq!(h0.lines.last().unwrap().text(), "7");
+        let h1 = &d.hunks[1];
+        assert_eq!(
+            (h1.old_start, h1.old_count, h1.new_start, h1.new_count),
+            (8, 4, 8, 5)
+        );
+        // After hunk 1 the new side is one line ahead.
+        assert_eq!(
+            h1.lines.last().map(|l| (l.old_no, l.new_no)),
+            Some((Some(11), Some(12)))
+        );
+        let shape: Vec<_> = gaps.iter().map(|g| (g.lines.clone(), g.before)).collect();
+        assert_eq!(shape, [(1..3, Some(0)), (12..13, None)]);
+    }
+
+    #[test]
+    fn whole_file_keeps_hunks_and_the_missing_newline() {
+        let mut d = parse(TWO_HUNKS);
+        let gaps = expand(&mut d, OLD, |_, _| true, |_, _| false);
+        assert!(gaps.is_empty());
+        assert_eq!(d.hunks.len(), 2);
+        let all = numbers(&d);
+        assert_eq!(all.len(), 15);
+        assert_eq!(all[0], (Some(1), Some(1), "1".to_owned()));
+        assert_eq!(all[14], (Some(12), Some(13), "12".to_owned()));
+        assert!(d.hunks[1].lines.last().unwrap().no_newline);
+        // A patch from the expanded diff still stages just the change.
+        let patch = build_patch(&d, Direction::Forward, |h, _| h == 0).unwrap();
+        let text = String::from_utf8(patch).unwrap();
+        assert!(text.contains("@@ -1,7 +1,7 @@\n 1\n 2\n 3\n 4\n-5\n+five\n 6\n 7\n"));
+    }
+
+    #[test]
+    fn insertion_at_the_top() {
+        // Two lines added before line 1.
+        let mut d = parse(
+            b"diff --git a/n.txt b/n.txt\n--- a/n.txt\n+++ b/n.txt\n@@ -0,0 +1,2 @@\n+a\n+b\n",
+        );
+        let gaps = expand(&mut d, b"1\n2\n3\n", |n, _| n == 1, |_, _| false);
+        let h = &d.hunks[0];
+        assert_eq!(
+            (h.old_start, h.old_count, h.new_start, h.new_count),
+            (1, 1, 1, 3)
+        );
+        assert_eq!(h.lines[2].new_no, Some(3));
+        assert_eq!(
+            gaps,
+            [Gap {
+                lines: 2..4,
+                new_start: 4,
+                before: None
+            }]
+        );
+    }
+
+    #[test]
+    fn kept_lines_show_with_the_way_from_the_nearer_hunk() {
+        // Old 10 is new 11 (after hunk 1); old 2 is above the first hunk.
+        let mut d = parse(TWO_HUNKS);
+        let gaps = expand(&mut d, OLD, |_, _| false, |old, new| old == 2 || new == 12);
+        let shape: Vec<_> = gaps.iter().map(|g| (g.lines.clone(), g.before)).collect();
+        // 2..4 joins hunk 0 from above, 11 joins hunk 1 from below.
+        assert_eq!(shape, [(1..2, Some(0)), (7..8, Some(1)), (12..13, None)]);
+        assert_eq!(gaps[2].new_start, 13);
+        assert_eq!(gaps[2].in_new(&(12..13)), 13..14);
+    }
+
+    #[test]
+    fn a_diff_that_does_not_match_the_old_file_is_not_expanded() {
+        let d = parse(TWO_HUNKS);
+        assert!(matches_old(&d, OLD));
+        assert!(!matches_old(
+            &d,
+            b"1\n2\n3\n4\nFIVE\n6\n7\n8\n9\n10\n11\n12"
+        ));
+        assert!(!matches_old(&d, b"1\n2\n3"));
+    }
+
+    #[test]
+    fn selections_follow_an_expansion() {
+        let small = parse(TWO_HUNKS);
+        let mut big = small.clone();
+        expand(&mut big, OLD, |_, _| true, |_, _| false);
+        assert!(same_changes(&small, &big));
+        // Line 7 joins hunk 0, so "+nine" stays put and "-5" moves down.
+        assert_eq!(relocate(&small, &big, (1, 2)), Some((1, 2)));
+        assert_eq!(relocate(&small, &big, (0, 1)), Some((0, 4)));
+        let mut other = small.clone();
+        other.hunks[0].lines[2].content = b"FIVE".to_vec();
+        assert!(!same_changes(&small, &other));
     }
 
     #[test]

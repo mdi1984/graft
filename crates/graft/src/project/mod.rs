@@ -22,7 +22,6 @@ use std::sync::Arc;
 use crossbeam_channel::{Receiver, Sender};
 use graft_core::conflicts::{ConflictFile, Kind};
 use graft_core::details::{self, CommitDetails};
-use graft_core::diff::FileDiff;
 use graft_core::history::{self, Commits, History};
 use graft_core::jobs::JobPool;
 use graft_core::ops::LineOp;
@@ -32,7 +31,7 @@ use graft_core::{
     CancelToken, Console, Git, Oid, RepoSnapshot, Worktree, null_oid, same_path, snapshot,
 };
 
-pub use changes::{CommitForm, Confirm, DiffView, FileKey, Highlights, Operation, RemoteOp};
+pub use changes::{CommitForm, Confirm, DiffView, FileKey, Operation, RemoteOp};
 pub use conflicts::{ConflictView, merge_dialog};
 pub use file_history::{FileHistoryMode, FileHistoryView};
 pub use refs::{Dialog, DialogKind};
@@ -104,6 +103,16 @@ pub enum Action {
         line: usize,
     },
     ClearLines,
+    /// Show these unchanged lines (their numbers in the old and the new
+    /// file) in the File status diff or, with `commit`, in the read-only
+    /// one (commit, stash, review).
+    ShowLines {
+        commit: bool,
+        old: std::ops::Range<u32>,
+        new: std::ops::Range<u32>,
+    },
+    /// Show whole files in diffs, or only the changes (an app setting).
+    ToggleWholeFile,
     HunkOp(usize, LineOp),
     LinesOp(LineOp),
     StageFiles(Vec<String>),
@@ -320,7 +329,7 @@ enum Event {
     Details(Oid, Result<CommitDetails, String>),
     Diff {
         generation: u64,
-        result: Result<(FileDiff, Highlights), String>,
+        result: Result<changes::Loaded, String>,
     },
     LastMessage(Option<String>),
     OpDone {
@@ -329,7 +338,7 @@ enum Event {
     },
     CommitDiff {
         generation: u64,
-        result: Result<(FileDiff, Highlights), String>,
+        result: Result<changes::Loaded, String>,
     },
     /// Syntax colors for a big diff, after the diff itself.
     Syntax {

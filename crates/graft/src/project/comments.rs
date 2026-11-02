@@ -313,6 +313,36 @@ mod tests {
         assert!(placed.is_empty() && outdated.len() == 1);
     }
 
+    /// A comment on a line that only showed because its gap was opened up
+    /// still finds its line when the diff loads afresh: its lines are kept.
+    #[test]
+    fn comments_on_opened_up_lines_stay_placed() {
+        let old = b"1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n";
+        let text =
+            b"diff --git a/n b/n\n--- a/n\n+++ b/n\n@@ -1,3 +1,4 @@\n 1\n+one and a half\n 2\n 3\n";
+        let mut whole = graft_core::diff::parse(text);
+        graft_core::diff::expand(&mut whole, old, |_, _| true, |_, _| false);
+        let c = LineComment {
+            id: 1,
+            path: "n".into(),
+            side: Side::New,
+            start: 10,
+            end: 11,
+            excerpt: excerpt(&whole, Side::New, 10, 11).unwrap(),
+            text: "why?".into(),
+        };
+        let kept = |_old: u32, new: u32| (10..12).contains(&new);
+        let mut fresh = graft_core::diff::parse(text);
+        graft_core::diff::expand(&mut fresh, old, |_, _| false, kept);
+        let (placed, outdated) = place(&fresh, [&c]);
+        assert_eq!(placed.len(), 1, "{outdated:?}");
+
+        let mut hidden = graft_core::diff::parse(text);
+        graft_core::diff::expand(&mut hidden, old, |_, _| false, |_, _| false);
+        let (_, outdated) = place(&hidden, [&c]);
+        assert_eq!(outdated.len(), 1, "without keeping, the lines hide");
+    }
+
     #[test]
     fn export_groups_by_file() {
         let c = LineComment {

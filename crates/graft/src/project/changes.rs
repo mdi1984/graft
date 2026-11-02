@@ -5,13 +5,14 @@ use std::collections::BTreeSet;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
-use graft_core::diff::{self, FileDiff, Source};
+use graft_core::diff::{self, FileDiff, Gap, Source};
 use graft_core::ops::{self, LineOp};
 use graft_core::repo::Progress;
 use graft_core::status::{EntryKind, StatusEntry};
 use graft_core::{CancelToken, Git};
 use graft_core::{refs, remote};
 
+use super::comments::{Pick, Side};
 use super::{Action, Event, Project};
 
 /// One file in one of the File status lists.
@@ -58,6 +59,60 @@ fn line_count(diff: &FileDiff) -> usize {
     diff.hunks.iter().map(|h| h.lines.len()).sum()
 }
 
+/// A diff as loaded in the background, ready to show.
+pub struct Loaded {
+    pub diff: FileDiff,
+    pub gaps: Option<Vec<Gap>>,
+    pub highlights: Highlights,
+}
+
+/// Line ranges on one side of a diff.
+pub type SideLines = Vec<(Side, Range<u32>)>;
+
+fn has(lines: &[(Side, Range<u32>)], old: u32, new: u32) -> bool {
+    lines.iter().any(|(side, r)| match side {
+        Side::Old => r.contains(&old),
+        Side::New => r.contains(&new),
+    })
+}
+
+/// Load a file's diff with the unchanged lines asked for (all of them with
+/// `whole`) and the `kept` ones (review comments), and work out its
+/// highlights.
+fn load_shown(
+    git: &Git,
+    key: &FileKey,
+    whole: bool,
+    revealed: &[(Side, Range<u32>)],
+    kept: &[(Side, Range<u32>)],
+) -> Result<Loaded, String> {
+    let reveal = |old, new| whole || has(revealed, old, new);
+    let keep = |old, new| has(kept, old, new);
+    let (diff, gaps) = diff::load_expanded(git, &key.source, &key.path, reveal, keep)
+        .map_err(|e| format!("{e:#}"))?;
+    let highlights = Highlights::of(&diff);
+    Ok(Loaded {
+        diff,
+        gaps,
+        highlights,
+    })
+}
+
+/// Lines of `from` at their place in `to`; `None` when `to` changed more
+/// than which unchanged lines show.
+fn follow(
+    from: &FileDiff,
+    to: &FileDiff,
+    at: impl IntoIterator<Item = (usize, usize)>,
+) -> Option<Vec<(usize, usize)>> {
+    if !diff::same_changes(from, to) {
+        return None;
+    }
+    at.into_iter()
+        .map(|at| diff::relocate(from, to, at))
+        .collect()
+}
+
 impl Highlights {
     pub fn of(diff: &FileDiff) -> Self {
         let small = line_count(diff) <= INLINE_SYNTAX_LINES;
@@ -84,7 +139,30 @@ pub struct DiffView {
     pub anchor: Option<(usize, usize)>,
     /// No staging, discarding or line selection (commits, stashes, review).
     pub read_only: bool,
+    /// Unchanged lines still hidden; `None` when they cannot be shown.
+    pub gaps: Option<Vec<Gap>>,
+    /// Unchanged lines the user asked to see, by the line numbers of the
+    /// side that stays put (the working tree's while staging).
+    pub revealed: SideLines,
     generation: u64,
+}
+
+impl DiffView {
+    fn new(key: FileKey, read_only: bool) -> Self {
+        Self {
+            key,
+            diff: None,
+            highlights: Highlights::default(),
+            error: None,
+            loading: true,
+            selection: BTreeSet::new(),
+            anchor: None,
+            read_only,
+            gaps: None,
+            revealed: Vec::new(),
+            generation: 0,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -229,17 +307,7 @@ impl Project {
         if self.diff_view.as_ref().is_some_and(|v| v.key == key) {
             return;
         }
-        self.diff_view = Some(DiffView {
-            key,
-            diff: None,
-            highlights: Highlights::default(),
-            error: None,
-            loading: true,
-            selection: BTreeSet::new(),
-            anchor: None,
-            read_only: false,
-            generation: 0,
-        });
+        self.diff_view = Some(DiffView::new(key, false));
         self.load_diff();
         self.sync_conflict();
     }
@@ -249,40 +317,35 @@ impl Project {
         if self.commit_diff.as_ref().is_some_and(|v| v.key == key) {
             return;
         }
+        self.commit_diff = Some(DiffView::new(key, true));
+        self.load_commit_diff();
+    }
+
+    /// (Re)load the read-only diff (commit, stash, review).
+    pub(super) fn load_commit_diff(&mut self) {
         self.diff_generation += 1;
         let generation = self.diff_generation;
-        self.commit_diff = Some(DiffView {
-            key: key.clone(),
-            diff: None,
-            highlights: Highlights::default(),
-            error: None,
-            loading: true,
-            selection: BTreeSet::new(),
-            anchor: None,
-            read_only: true,
-            generation,
-        });
+        let whole = self.settings.whole_file;
         // Commits are the same everywhere; the rest reads the worktree.
-        let git = match key.source {
-            Source::Commit(_) => self.git.clone(),
+        let git = match self.commit_diff.as_ref().map(|v| &v.key.source) {
+            Some(Source::Commit(_)) => self.git.clone(),
             _ => self.wt_git(),
         };
-        self.pool.spawn(&self.tx, move || {
-            let result = diff::load(&git, &key.source, &key.path)
-                .map(|d| {
-                    let highlights = Highlights::of(&d);
-                    (d, highlights)
-                })
-                .map_err(|e| format!("{e:#}"));
-            Event::CommitDiff { generation, result }
+        let Some(view) = &mut self.commit_diff else {
+            return;
+        };
+        view.generation = generation;
+        view.loading = true;
+        let key = view.key.clone();
+        let revealed = view.revealed.clone();
+        let kept = self.comment_lines(&key);
+        self.pool.spawn(&self.tx, move || Event::CommitDiff {
+            generation,
+            result: load_shown(&git, &key, whole, &revealed, &kept),
         });
     }
 
-    pub(super) fn on_commit_diff(
-        &mut self,
-        generation: u64,
-        result: Result<(FileDiff, Highlights), String>,
-    ) {
+    pub(super) fn on_commit_diff(&mut self, generation: u64, result: Result<Loaded, String>) {
         let Some(view) = &mut self.commit_diff else {
             return;
         };
@@ -291,13 +354,65 @@ impl Project {
         }
         view.loading = false;
         match result {
-            Ok((diff, words)) => {
-                view.diff = Some(diff);
-                view.highlights = words;
+            Ok(loaded) => {
+                // Lines picked to comment on stay picked when more show;
+                // when the lines changed, the pick would point elsewhere.
+                if let (Some(old), Some(review)) = (&view.diff, &mut self.review)
+                    && let Some(pick) = review.pick
+                    && *old != loaded.diff
+                {
+                    review.pick =
+                        follow(old, &loaded.diff, [pick.anchor, pick.cursor]).map(|at| Pick {
+                            anchor: at[0],
+                            cursor: at[1],
+                            ..pick
+                        });
+                }
+                view.diff = Some(loaded.diff);
+                view.gaps = loaded.gaps;
+                view.highlights = loaded.highlights;
+                view.error = None;
             }
             Err(e) => view.error = Some(e),
         }
         self.color_later(generation, true);
+    }
+
+    /// Show more unchanged lines, `old` and `new` being their numbers on
+    /// each side, in the File status diff or, with `commit`, in the
+    /// read-only one.
+    fn show_lines(&mut self, commit: bool, old: Range<u32>, new: Range<u32>) {
+        let view = if commit {
+            &mut self.commit_diff
+        } else {
+            &mut self.diff_view
+        };
+        let Some(view) = view else { return };
+        // Staging a hunk above moves the index's numbers, not the working
+        // tree's.
+        view.revealed.push(match view.key.source {
+            Source::Unstaged => (Side::New, new),
+            _ => (Side::Old, old),
+        });
+        if commit {
+            self.load_commit_diff();
+        } else {
+            self.load_diff();
+        }
+    }
+
+    /// Show whole files in diffs, or only the changes with some context.
+    pub fn set_whole_file(&mut self, whole: bool) {
+        if self.settings.whole_file == whole {
+            return;
+        }
+        self.settings.whole_file = whole;
+        if self.diff_view.is_some() {
+            self.load_diff();
+        }
+        if self.commit_diff.is_some() {
+            self.load_commit_diff();
+        }
     }
 
     /// Syntax colors for a diff too big to color with the diff itself.
@@ -339,28 +454,21 @@ impl Project {
         self.diff_generation += 1;
         let generation = self.diff_generation;
         let git = self.wt_git();
+        let whole = self.settings.whole_file;
         let Some(view) = &mut self.diff_view else {
             return;
         };
         view.generation = generation;
         view.loading = true;
         let key = view.key.clone();
-        self.pool.spawn(&self.tx, move || {
-            let result = diff::load(&git, &key.source, &key.path)
-                .map(|d| {
-                    let highlights = Highlights::of(&d);
-                    (d, highlights)
-                })
-                .map_err(|e| format!("{e:#}"));
-            Event::Diff { generation, result }
+        let revealed = view.revealed.clone();
+        self.pool.spawn(&self.tx, move || Event::Diff {
+            generation,
+            result: load_shown(&git, &key, whole, &revealed, &[]),
         });
     }
 
-    pub(super) fn on_diff(
-        &mut self,
-        generation: u64,
-        result: Result<(FileDiff, Highlights), String>,
-    ) {
+    pub(super) fn on_diff(&mut self, generation: u64, result: Result<Loaded, String>) {
         let Some(view) = &mut self.diff_view else {
             return;
         };
@@ -369,11 +477,25 @@ impl Project {
         }
         view.loading = false;
         match result {
-            Ok((diff, highlights)) => {
+            Ok(Loaded {
+                diff,
+                gaps,
+                highlights,
+            }) => {
                 let same = view.diff.as_ref() == Some(&diff);
                 if !same {
-                    view.selection.clear();
-                    view.anchor = None;
+                    // Selected lines stay selected when only more lines show.
+                    let moved = view.diff.as_ref().and_then(|old| {
+                        let selection = follow(old, &diff, view.selection.iter().copied())?;
+                        let anchor = match view.anchor {
+                            Some(a) => Some(follow(old, &diff, [a])?[0]),
+                            None => None,
+                        };
+                        Some((selection, anchor))
+                    });
+                    let (selection, anchor) = moved.unwrap_or_default();
+                    view.selection = selection.into_iter().collect();
+                    view.anchor = anchor;
                 }
                 // A big diff's colors come later; keep the old ones meanwhile.
                 let old = std::mem::replace(&mut view.highlights, highlights);
@@ -381,6 +503,7 @@ impl Project {
                     view.highlights.syntax = old.syntax;
                 }
                 view.diff = Some(diff);
+                view.gaps = gaps;
                 view.error = None;
             }
             Err(e) => {
@@ -436,6 +559,7 @@ impl Project {
                     v.anchor = None;
                 }
             }
+            Action::ShowLines { commit, old, new } => self.show_lines(commit, old, new),
             Action::HunkOp(hunk, op) => self.lines_op(op, Some(hunk)),
             Action::LinesOp(op) => self.lines_op(op, None),
             Action::StageFiles(paths) => self.run_op("Staging", Then::Nothing, move |git| {

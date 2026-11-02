@@ -130,6 +130,17 @@ pub fn show(
             ui,
             &format!("Long lines continue on the next row instead of scrolling sideways.{switch}"),
         );
+        ui.checkbox(&mut form.draft.whole_file, "Show whole files");
+        let switch = match form.draft.keys.get(Command::WholeFile) {
+            Some(shortcut) => format!(" {} switches it anywhere.", keys::format(shortcut)),
+            None => String::new(),
+        };
+        hint(
+            ui,
+            &format!(
+                "Diffs show every line, not just the changes and a few lines around them.{switch}"
+            ),
+        );
 
         section(ui, "Fetching");
         ui.horizontal(|ui| {

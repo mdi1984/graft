@@ -571,6 +571,9 @@ fn file_header(
                     if both_sides && button(ui, toggle, ButtonKind::Secondary, true).clicked() {
                         actions.push(Action::ToggleReviewSplit);
                     }
+                    if let Some(view) = &project.commit_diff {
+                        diff_view::whole_file_button(ui, view, &project.settings, actions);
+                    }
                 });
             });
         });

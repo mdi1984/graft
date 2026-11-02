@@ -200,3 +200,90 @@ fn discarding_a_file_with_glob_characters_touches_only_that_file() {
     assert_eq!(read("x[ab].txt").trim(), "one");
     assert_eq!(read("xa.txt").trim(), "keep me");
 }
+
+/// Unchanged lines shown between hunks (or the whole file) come from git's
+/// copy of the file, so staging, unstaging and discarding still apply with
+/// CRLF in the working tree.
+#[test]
+fn expanded_diffs_stage_unstage_and_discard() {
+    let (_tmp, git) = repo();
+    let dir = git.cwd().to_path_buf();
+    let lines = |changed: &[(usize, &str)]| -> String {
+        (1..=12)
+            .map(|n| {
+                let text = changed
+                    .iter()
+                    .find(|(c, _)| *c == n)
+                    .map_or(n.to_string(), |(_, t)| t.to_string());
+                format!("{text}\r\n")
+            })
+            .collect()
+    };
+    std::fs::write(dir.join("n.txt"), lines(&[])).unwrap();
+    sh(&dir, &["add", "n.txt"]);
+    sh(&dir, &["commit", "-q", "-m", "numbers"]);
+    std::fs::write(dir.join("n.txt"), lines(&[(2, "two"), (11, "eleven")])).unwrap();
+
+    // With 3 lines of context, lines 6..8 are hidden.
+    let (d, gaps) =
+        diff::load_expanded(&git, &Source::Unstaged, "n.txt", |_, _| false, |_, _| false).unwrap();
+    let gaps = gaps.expect("expandable");
+    assert_eq!(d.hunks.len(), 2);
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(gaps[0].lines, 6..8);
+
+    // The whole file: stage the second hunk only.
+    let (d, gaps) =
+        diff::load_expanded(&git, &Source::Unstaged, "n.txt", |_, _| true, |_, _| false).unwrap();
+    assert_eq!(gaps, Some(Vec::new()));
+    let shown: usize = d.hunks.iter().map(|h| h.lines.len()).sum();
+    assert_eq!(shown, 14);
+    ops::apply_lines(&git, &d, &Source::Unstaged, LineOp::Stage, |h, _| h == 1).unwrap();
+    let staged = sh(&dir, &["diff", "--cached"]);
+    assert!(
+        staged.contains("+eleven") && !staged.contains("+two"),
+        "{staged}"
+    );
+
+    // Unstage it again from the whole staged file.
+    let (d, _) =
+        diff::load_expanded(&git, &Source::Staged, "n.txt", |_, _| true, |_, _| false).unwrap();
+    assert_eq!(d.hunks[0].lines.len(), 13);
+    ops::apply_lines(&git, &d, &Source::Staged, LineOp::Unstage, |_, _| true).unwrap();
+    assert_eq!(sh(&dir, &["diff", "--cached"]), "");
+
+    // Discard "two" from the expanded unstaged diff; CRLF stays.
+    let (d, _) =
+        diff::load_expanded(&git, &Source::Unstaged, "n.txt", |_, _| true, |_, _| false).unwrap();
+    ops::apply_lines(&git, &d, &Source::Unstaged, LineOp::Discard, |h, _| h == 0).unwrap();
+    let now = std::fs::read(dir.join("n.txt")).unwrap();
+    assert_eq!(now, lines(&[(11, "eleven")]).into_bytes());
+
+    // Commits and new files.
+    sh(&dir, &["commit", "-q", "-am", "eleven"]);
+    let head = sh(&dir, &["rev-parse", "HEAD"]);
+    let id = graft_core::Oid::from_hex(head.trim().as_bytes()).unwrap();
+    let (d, gaps) = diff::load_expanded(
+        &git,
+        &Source::Commit(id),
+        "n.txt",
+        |_, _| false,
+        |_, _| false,
+    )
+    .unwrap();
+    assert_eq!(d.added(), 1);
+    assert_eq!(gaps.map(|g| g.len()), Some(1));
+    let (_, gaps) =
+        diff::load_expanded(&git, &Source::Base(id), "n.txt", |_, _| false, |_, _| false).unwrap();
+    assert_eq!(gaps, None, "no changes, nothing to expand");
+    std::fs::write(dir.join("new.txt"), "fresh\n").unwrap();
+    let (_, gaps) = diff::load_expanded(
+        &git,
+        &Source::Untracked,
+        "new.txt",
+        |_, _| false,
+        |_, _| false,
+    )
+    .unwrap();
+    assert_eq!(gaps, None);
+}

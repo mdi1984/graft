@@ -723,7 +723,11 @@ impl GraftApp {
                 self.settings_form = None;
                 self.settings = settings;
                 for p in &mut self.projects {
+                    // Whole files load differently: set it the long way.
+                    let whole = p.settings.whole_file;
                     p.settings = self.settings.clone();
+                    p.settings.whole_file = whole;
+                    p.set_whole_file(self.settings.whole_file);
                 }
                 if let (Some(identity), Some(i)) = (identity, self.active) {
                     self.projects[i].apply(Action::SaveIdentity(identity));
@@ -802,6 +806,23 @@ impl GraftApp {
             for p in &mut self.projects {
                 p.settings.wrap_lines = self.settings.wrap_lines;
             }
+            // An open Settings window saves what it shows: keep it current.
+            if let Some(form) = &mut self.settings_form {
+                form.draft.wrap_lines = self.settings.wrap_lines;
+            }
+        }
+        if pressed(Command::WholeFile) {
+            self.toggle_whole_file();
+        }
+    }
+
+    fn toggle_whole_file(&mut self) {
+        self.settings.whole_file = !self.settings.whole_file;
+        for p in &mut self.projects {
+            p.set_whole_file(self.settings.whole_file);
+        }
+        if let Some(form) = &mut self.settings_form {
+            form.draft.whole_file = self.settings.whole_file;
         }
     }
 
@@ -951,6 +972,7 @@ impl GraftApp {
                     self.close_project(index);
                     break;
                 }
+                Action::ToggleWholeFile => self.toggle_whole_file(),
                 Action::InProject { project, actions } if project < self.projects.len() => {
                     self.activate(Some(project));
                     for action in actions {
