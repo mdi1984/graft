@@ -22,6 +22,8 @@ pub struct Settings {
     pub check_updates: bool,
     /// Long lines in diffs wrap instead of scrolling sideways.
     pub wrap_lines: bool,
+    /// Diffs show every line of a file, not just the changes with context.
+    pub whole_file: bool,
     /// Keyboard shortcuts; only the ones changed from the defaults are saved.
     pub keys: Keymap,
 }
@@ -36,6 +38,7 @@ impl Default for Settings {
             copy_patterns: DEFAULT_COPY_PATTERNS.to_owned(),
             check_updates: true,
             wrap_lines: false,
+            whole_file: false,
             keys: Keymap::default(),
         }
     }

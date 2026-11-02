@@ -199,7 +199,13 @@ impl Project {
         }
         view.selected = Some(path.clone());
         let key = FileKey { source, path };
-        if reload || self.commit_diff.as_ref().is_some_and(|d| d.key != key) {
+        let same = self.commit_diff.as_ref().is_some_and(|d| d.key == key);
+        if same && reload {
+            // Keeps the lines shown and the unchanged lines opened up.
+            self.load_commit_diff();
+            return;
+        }
+        if !same {
             self.commit_diff = None;
         }
         self.select_commit_file(key);

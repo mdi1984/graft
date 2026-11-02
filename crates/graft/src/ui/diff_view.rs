@@ -3,6 +3,8 @@
 //! ("N lines selected → Stage lines"). In Review, lines are picked to comment
 //! on and comments show under the lines they are about. With wrapping on,
 //! a long line takes as many rows as it needs instead of scrolling sideways.
+//! Unchanged lines between hunks show as gap rows that open up on a click;
+//! with "Whole file" every line shows.
 
 use std::sync::Arc;
 
@@ -12,7 +14,7 @@ use egui::{
     Align, Align2, Color32, Frame, Galley, Key, Margin, Painter, Panel, Pos2, Rect, RichText,
     ScrollArea, Sense, Stroke, StrokeKind, Ui, pos2, vec2,
 };
-use graft_core::diff::{FileDiff, Kind, Source};
+use graft_core::diff::{FileDiff, Gap, Kind, Source};
 use graft_core::ops::LineOp;
 use graft_core::syntax::{Spans, Token};
 
@@ -21,13 +23,17 @@ use super::icons::Icon;
 use super::widgets::{
     ButtonKind, button, elided_path, empty_state, icon_button, paint_galley_left, spinner,
 };
+use crate::keys::Command;
 use crate::project::comments::{LineComment, Pick, Placed, Side};
 use crate::project::{Action, Confirm, DiffView, Project};
+use crate::settings::Settings;
 use crate::theme::{self, color};
 
 const ROW: f32 = 20.0;
 const GUTTER: f32 = 24.0;
 const NUM: f32 = 42.0;
+/// Unchanged lines a gap's ↑ / ↓ buttons show at a time.
+const STEP: u32 = 20;
 
 /// Lines longer than this (minified code) are cut on screen: laying out and
 /// drawing a 300k-character line takes longer than a frame.
@@ -358,21 +364,26 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
         );
         return;
     };
-    let wrap = project.settings.wrap_lines;
-    show_view(ui, view, project.is_operating(), wrap, actions);
+    show_view(ui, view, project.is_operating(), &project.settings, actions);
 }
 
 /// Any file diff: File status (with staging) or a commit or stash (read-only,
 /// with a close button).
-pub fn show_view(ui: &mut Ui, view: &DiffView, busy: bool, wrap: bool, actions: &mut Vec<Action>) {
+pub fn show_view(
+    ui: &mut Ui,
+    view: &DiffView,
+    busy: bool,
+    settings: &Settings,
+    actions: &mut Vec<Action>,
+) {
     if matches!(view.key.source, Source::Commit(_)) && ui.input(|i| i.key_pressed(Key::Escape)) {
         actions.push(Action::CloseCommitFile);
     }
-    header(ui, view, busy, actions);
+    header(ui, view, busy, settings, actions);
     if !view.selection.is_empty() {
         selection_bar(ui, view, busy, actions);
     }
-    body(ui, view, busy, false, wrap, None, actions);
+    body(ui, view, busy, false, settings.wrap_lines, None, actions);
 }
 
 /// The diff without its header: unified, or side by side with `split`;
@@ -428,6 +439,8 @@ pub fn body(
 /// A row of the side-by-side view: old line on the left, new on the right.
 #[derive(Clone, Copy)]
 enum Pair {
+    /// Hidden unchanged lines: gap `.0` of the view.
+    Gap(usize),
     Hunk(usize),
     /// Row `.2` of an old and a new line (more than one when they wrap).
     Lines(Option<(usize, usize)>, Option<(usize, usize)>, usize),
@@ -435,10 +448,37 @@ enum Pair {
     Comment(usize, usize),
 }
 
+/// Where the gap rows and hunk headers go: the gap above each hunk, the gap
+/// after the last one, and whether a hunk gets a header row. A hunk that
+/// carries on right where the lines above it end needs none, unless it
+/// has buttons (`editable`).
+struct Layout {
+    gap_above: Vec<Option<usize>>,
+    gap_after: Option<usize>,
+    header: Vec<bool>,
+}
+
+fn layout(diff: &FileDiff, gaps: Option<&[Gap]>, editable: bool) -> Layout {
+    let gap_above: Vec<Option<usize>> = (0..diff.hunks.len())
+        .map(|h| gaps?.iter().position(|g| g.before == Some(h)))
+        .collect();
+    // Without gaps (`None`) nothing says whether lines are hidden.
+    let header = gap_above
+        .iter()
+        .map(|above| editable || gaps.is_none() || above.is_some())
+        .collect();
+    Layout {
+        gap_above,
+        gap_after: gaps.and_then(|gaps| gaps.iter().position(Gap::at_end)),
+        header,
+    }
+}
+
 /// The rows of the side-by-side view; `rows_of` says how many rows a line
 /// takes.
 fn pair_rows(
     diff: &FileDiff,
+    layout: &Layout,
     blocks: &[Block],
     rows_of: impl Fn((usize, usize)) -> usize,
 ) -> Vec<Pair> {
@@ -457,7 +497,12 @@ fn pair_rows(
         }
     };
     for (h, hunk) in diff.hunks.iter().enumerate() {
-        rows.push(Pair::Hunk(h));
+        if let Some(g) = layout.gap_above[h] {
+            rows.push(Pair::Gap(g));
+        }
+        if layout.header[h] {
+            rows.push(Pair::Hunk(h));
+        }
         let mut l = 0;
         while l < hunk.lines.len() {
             if hunk.lines[l].kind == Kind::Context {
@@ -483,6 +528,9 @@ fn pair_rows(
             }
         }
     }
+    if let Some(g) = layout.gap_after {
+        rows.push(Pair::Gap(g));
+    }
     rows
 }
 
@@ -500,7 +548,8 @@ fn side_by_side(
     let wrap_width = wrap.then_some((width / 2.0 - 1.0 - NUM - 16.0).max(80.0));
     let char_width = char_width(ui);
     let painter = ui.painter().clone();
-    let rows = pair_rows(diff, &blocks, |at| {
+    let layout = layout(diff, view.gaps.as_deref(), !view.read_only);
+    let rows = pair_rows(diff, &layout, &blocks, |at| {
         line_rows(&painter, view, diff, at, wrap_width, char_width)
     });
     ui.spacing_mut().item_spacing.y = 0.0;
@@ -513,6 +562,7 @@ fn side_by_side(
                 let (rect, _) =
                     ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
                 match *row {
+                    Pair::Gap(g) => gap_row(ui, rect, view, g, actions),
                     Pair::Hunk(h) => {
                         let hunk = &diff.hunks[h];
                         let painter = ui.painter();
@@ -655,7 +705,13 @@ fn half(
     }
 }
 
-fn header(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Action>) {
+fn header(
+    ui: &mut Ui,
+    view: &DiffView,
+    busy: bool,
+    settings: &Settings,
+    actions: &mut Vec<Action>,
+) {
     Panel::top("diff-header")
         .frame(
             Frame::new()
@@ -685,7 +741,7 @@ fn header(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Action>) {
                     Source::Commit(_) => "Commit",
                     Source::Base(_) => "Review",
                 };
-                let right_width = 230.0;
+                let right_width = 330.0;
                 let room = (ui.available_width() - right_width - 140.0).max(80.0);
                 let galley = elided_path(
                     ui,
@@ -738,9 +794,37 @@ fn header(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Action>) {
                             }
                         }
                     }
+                    whole_file_button(ui, view, settings, actions);
                 });
             });
         });
+}
+
+/// "Whole file" / "Changes only", for diffs that have unchanged lines to
+/// show.
+pub fn whole_file_button(
+    ui: &mut Ui,
+    view: &DiffView,
+    settings: &Settings,
+    actions: &mut Vec<Action>,
+) {
+    if view.gaps.is_none() {
+        return;
+    }
+    let (label, tip) = if settings.whole_file {
+        (
+            "Changes only",
+            "Show only the changes and a few lines around them",
+        )
+    } else {
+        ("Whole file", "Show every line of the file")
+    };
+    if button(ui, label, ButtonKind::Secondary, true)
+        .on_hover_text(settings.keys.tip(tip, Command::WholeFile))
+        .clicked()
+    {
+        actions.push(Action::ToggleWholeFile);
+    }
 }
 
 /// Ask before discarding a whole file.
@@ -819,6 +903,8 @@ fn selection_bar(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Act
 
 #[derive(Clone, Copy)]
 enum Row {
+    /// Hidden unchanged lines: gap `.0` of the view.
+    Gap(usize),
     Hunk(usize),
     /// Row `.2` of a line (more than one when it wraps).
     Line(usize, usize, usize),
@@ -841,9 +927,15 @@ fn lines(
     let wrap_width = wrap.then_some((width - text_x - 8.0).max(80.0));
     let char_width = char_width(ui);
     let painter = ui.painter().clone();
+    let layout = layout(diff, view.gaps.as_deref(), !view.read_only);
     let mut rows = Vec::new();
     for (h, hunk) in diff.hunks.iter().enumerate() {
-        rows.push(Row::Hunk(h));
+        if let Some(g) = layout.gap_above[h] {
+            rows.push(Row::Gap(g));
+        }
+        if layout.header[h] {
+            rows.push(Row::Hunk(h));
+        }
         for l in 0..hunk.lines.len() {
             let parts = line_rows(&painter, view, diff, (h, l), wrap_width, char_width);
             rows.extend((0..parts).map(|part| Row::Line(h, l, part)));
@@ -853,6 +945,9 @@ fn lines(
                 }
             }
         }
+    }
+    if let Some(g) = layout.gap_after {
+        rows.push(Row::Gap(g));
     }
     let content_width = if wrap {
         width
@@ -881,6 +976,7 @@ fn lines(
             for row in &rows[range] {
                 let (rect, _) = ui.allocate_exact_size(vec2(content_width, ROW), Sense::hover());
                 match *row {
+                    Row::Gap(g) => gap_row(ui, rect, view, g, actions),
                     Row::Hunk(h) => hunk_row(ui, rect, view, diff, h, busy, actions),
                     Row::Comment(b, part) => comment_row(ui, rect, &blocks[b], part, actions),
                     Row::Line(h, l, part) if marks.is_some() => {
@@ -979,39 +1075,14 @@ fn hunk_row(
     let right = ui.clip_rect().right().min(rect.right()) - 8.0;
     let mut x = right;
     let mut small = |label: &str, action: Action, danger: bool| {
-        let text = ui
-            .painter()
-            .layout_no_wrap(label.to_owned(), theme::small(), color::text());
+        let text = small_galley(ui, label);
         let w = text.size().x + 16.0;
         x -= w;
         let r = Rect::from_min_size(pos2(x, rect.top() + 2.0), vec2(w, ROW - 4.0));
         x -= 6.0;
-        let response = ui.interact(
-            r,
-            ui.scope_id().with(("hunk-btn", h, label)),
-            Sense::click(),
-        );
+        let id = ui.scope_id().with(("hunk-btn", h, label));
         let enabled = !busy;
-        let fill = if response.hovered() && enabled {
-            color::control_hover_bg()
-        } else {
-            color::control_bg()
-        };
-        let fg = match (enabled, danger) {
-            (false, _) => color::text_faint(),
-            (true, true) => color::removed(),
-            (true, false) => color::text(),
-        };
-        ui.painter().rect(
-            r,
-            4,
-            fill,
-            Stroke::new(1.0, color::control_border()),
-            StrokeKind::Inside,
-        );
-        ui.painter()
-            .galley(r.center() - text.size() / 2.0, text, fg);
-        if response.clicked() && enabled {
+        if small_button(ui, r, id, text, enabled, danger).clicked() && enabled {
             actions.push(action);
         }
     };
@@ -1034,6 +1105,109 @@ fn hunk_row(
             );
         }
         Source::Commit(_) | Source::Base(_) => {}
+    }
+}
+
+fn small_galley(ui: &Ui, label: &str) -> Arc<Galley> {
+    ui.painter()
+        .layout_no_wrap(label.to_owned(), theme::small(), color::text())
+}
+
+/// A small button inside a diff row.
+fn small_button(
+    ui: &mut Ui,
+    r: Rect,
+    id: egui::Id,
+    text: Arc<Galley>,
+    enabled: bool,
+    danger: bool,
+) -> egui::Response {
+    let response = ui.interact(r, id, Sense::click());
+    let fill = if response.hovered() && enabled {
+        color::control_hover_bg()
+    } else {
+        color::control_bg()
+    };
+    let fg = match (enabled, danger) {
+        (false, _) => color::text_faint(),
+        (true, true) => color::removed(),
+        (true, false) => color::text(),
+    };
+    ui.painter().rect(
+        r,
+        4,
+        fill,
+        Stroke::new(1.0, color::control_border()),
+        StrokeKind::Inside,
+    );
+    ui.painter()
+        .galley(r.center() - text.size() / 2.0, text, fg);
+    if enabled {
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        response
+    }
+}
+
+/// Hidden unchanged lines: "42 unchanged lines" with buttons that show
+/// 20 more below the hunk above (↓), 20 more above the hunk below (↑), or
+/// all of them. The label and buttons stay at the visible left edge.
+fn gap_row(ui: &mut Ui, rect: Rect, view: &DiffView, g: usize, actions: &mut Vec<Action>) {
+    let Some(gap) = view.gaps.as_ref().and_then(|gaps| gaps.get(g)) else {
+        return;
+    };
+    let painter = ui.painter();
+    painter.rect_filled(
+        rect,
+        0,
+        color::sidebar_bg().lerp_to_gamma(color::app_bg(), 0.5),
+    );
+    let n = gap.len();
+    let label = format!("{n} unchanged line{}", if n == 1 { "" } else { "s" });
+    let galley = painter.layout_no_wrap(label, theme::small(), color::text_faint());
+    let left = ui.clip_rect().left().max(rect.left()) + GUTTER;
+    let mut x = left + galley.size().x + 12.0;
+    paint_galley_left(painter, left, rect.center().y, galley, color::text_faint());
+
+    let lines = gap.lines.clone();
+    let mut buttons = Vec::new();
+    if n > STEP {
+        if !gap.at_start() {
+            buttons.push((
+                format!("↓ {STEP}"),
+                lines.start..lines.start + STEP,
+                "Show more lines below the change above",
+            ));
+        }
+        if !gap.at_end() {
+            buttons.push((
+                format!("↑ {STEP}"),
+                lines.end - STEP..lines.end,
+                "Show more lines above the change below",
+            ));
+        }
+    }
+    let all = if n > STEP {
+        format!("Show all {n}")
+    } else {
+        "Show".to_owned()
+    };
+    buttons.push((all, lines, "Show all hidden lines here"));
+    for (label, lines, tip) in buttons {
+        let text = small_galley(ui, &label);
+        let w = text.size().x + 16.0;
+        let r = Rect::from_min_size(pos2(x, rect.top() + 2.0), vec2(w, ROW - 4.0));
+        x += w + 6.0;
+        let id = ui.scope_id().with(("gap-btn", g, &label));
+        if small_button(ui, r, id, text, true, false)
+            .on_hover_text(tip)
+            .clicked()
+        {
+            actions.push(Action::ShowLines {
+                commit: view.read_only,
+                lines,
+            });
+        }
     }
 }
 
@@ -1198,10 +1372,12 @@ mod tests {
             }],
             ..Default::default()
         };
-        let rows = pair_rows(&diff, &[], |(_, l)| if l == 1 { 3 } else { 1 });
+        let layout = layout(&diff, None, false);
+        let rows = pair_rows(&diff, &layout, &[], |(_, l)| if l == 1 { 3 } else { 1 });
         let shape: Vec<String> = rows
             .iter()
             .map(|row| match row {
+                Pair::Gap(g) => format!("gap {g}"),
                 Pair::Hunk(h) => format!("hunk {h}"),
                 Pair::Lines(old, new, part) => format!("{old:?} {new:?} {part}"),
                 Pair::Comment(b, part) => format!("comment {b} {part}"),
