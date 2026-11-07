@@ -5,9 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use egui::{
-    Align2, Color32, Rect, ScrollArea, Sense, Stroke, StrokeKind, TextureHandle, Ui, pos2, vec2,
-};
+use egui::{Align2, Color32, Rect, ScrollArea, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use graft_core::CancelToken;
 use graft_core::repo::{Progress, clone_folder_name, native};
 use graft_core::wsl::Wsl;
@@ -18,6 +16,7 @@ use super::widgets::{
     paint_placeholder_left, progress_bar, section_heading, text_field,
 };
 use crate::groups::{GroupId, TabGroup};
+use crate::keys::{Command, Keymap};
 use crate::theme::{self, RADIUS, color};
 
 const WIDTH: f32 = 600.0;
@@ -69,7 +68,6 @@ pub struct StartPage {
     pub init_path: String,
     pub busy: Option<Busy>,
     pub error: Option<String>,
-    logo: Option<TextureHandle>,
     pub place: Place,
     /// Installed WSL distros; `None` until asked for.
     distros: Option<Vec<String>>,
@@ -130,7 +128,6 @@ impl StartPage {
             init_path: String::new(),
             busy: None,
             error: None,
-            logo: None,
             place: place_of(&clone_parent),
             distros: None,
             homes: HashMap::new(),
@@ -200,7 +197,7 @@ impl StartPage {
                 .remove(&place)
                 .unwrap_or_else(|| match place {
                     Place::Windows => (
-                        self.show_path(&crate::app::default_clone_parent()),
+                        self.show_path(&crate::settings::default_clone_parent()),
                         String::new(),
                     ),
                     Place::Wsl(_) => ("~".to_owned(), String::new()),
@@ -327,6 +324,7 @@ impl StartPage {
         ui: &mut Ui,
         recent: &[Recent],
         groups: &[TabGroup],
+        keys: &Keymap,
     ) -> Option<StartAction> {
         let mut action = None;
         ScrollArea::vertical()
@@ -366,11 +364,9 @@ impl StartPage {
                         self.recent_list(ui, recent, width, &mut action);
                         ui.add_space(16.0);
                         ui.label(
-                            egui::RichText::new(
-                                "Tip: drop a folder onto this window to open it. Ctrl+O opens, Ctrl+T shows this page.",
-                            )
-                            .color(color::text_faint())
-                            .size(theme::SMALL_SIZE),
+                            egui::RichText::new(tip(keys))
+                                .color(color::text_faint())
+                                .size(theme::SMALL_SIZE),
                         );
                     });
                 });
@@ -379,21 +375,7 @@ impl StartPage {
     }
 
     fn header(&mut self, ui: &mut Ui) {
-        let logo = self
-            .logo
-            .get_or_insert_with(|| {
-                let icon = eframe::icon_data::from_png_bytes(include_bytes!(
-                    "../../assets/icon/graft-256.png"
-                ))
-                .expect("bundled icon is a valid PNG");
-                let image = egui::ColorImage::from_rgba_unmultiplied(
-                    [icon.width as usize, icon.height as usize],
-                    &icon.rgba,
-                );
-                ui.ctx()
-                    .load_texture("graft-logo", image, egui::TextureOptions::LINEAR)
-            })
-            .clone();
+        let logo = icons::app_logo(ui.ctx());
         ui.horizontal(|ui| {
             ui.add(egui::Image::new(&logo).fit_to_exact_size(vec2(52.0, 52.0)));
             ui.add_space(8.0);
@@ -890,6 +872,23 @@ fn group_list(ui: &mut Ui, groups: &[TabGroup], width: f32, action: &mut Option<
             }
         });
     }
+}
+
+/// "Tip: drop a folder onto this window to open it. Ctrl+O opens, Ctrl+T
+/// shows this page."
+fn tip(keys: &Keymap) -> String {
+    let mut tip = "Tip: drop a folder onto this window to open it.".to_owned();
+    if let Some(key) = keys.text(Command::OpenFolder) {
+        tip += &format!(" {key} opens");
+    }
+    if let Some(key) = keys.text(Command::NewTab) {
+        let and = if tip.ends_with("opens") { "," } else { "" };
+        tip += &format!("{and} {key} shows this page");
+    }
+    if !tip.ends_with('.') {
+        tip.push('.');
+    }
+    tip
 }
 
 #[cfg(test)]

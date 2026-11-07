@@ -56,147 +56,252 @@ impl Scope {
     }
 }
 
+const fn shortcut(modifiers: Modifiers, key: Key) -> KeyboardShortcut {
+    KeyboardShortcut::new(modifiers, key)
+}
+
+const CTRL: Modifiers = Modifiers::COMMAND;
+const CTRL_SHIFT: Modifiers = Modifiers {
+    alt: false,
+    ctrl: false,
+    shift: true,
+    mac_cmd: false,
+    command: true,
+};
+
 const fn ctrl(key: Key) -> Option<KeyboardShortcut> {
-    Some(KeyboardShortcut::new(Modifiers::COMMAND, key))
+    Some(shortcut(CTRL, key))
 }
 
 const fn ctrl_shift(key: Key) -> Option<KeyboardShortcut> {
-    Some(KeyboardShortcut::new(
-        Modifiers {
-            alt: false,
-            ctrl: false,
-            shift: true,
-            mac_cmd: false,
-            command: true,
-        },
-        key,
-    ))
+    Some(shortcut(CTRL_SHIFT, key))
 }
 
 const fn alt(key: Key) -> Option<KeyboardShortcut> {
-    Some(KeyboardShortcut::new(Modifiers::ALT, key))
+    Some(shortcut(Modifiers::ALT, key))
 }
 
 const fn plain(key: Key) -> Option<KeyboardShortcut> {
-    Some(KeyboardShortcut::new(Modifiers::NONE, key))
+    Some(shortcut(Modifiers::NONE, key))
 }
 
-impl Command {
-    pub const ALL: [Command; 21] = [
-        Command::Search,
-        Command::NewTab,
-        Command::OpenFolder,
-        Command::CloseTab,
-        Command::NextTab,
-        Command::PreviousTab,
-        Command::AllTabs,
-        Command::Settings,
-        Command::Refresh,
-        Command::Console,
-        Command::WrapLines,
-        Command::WholeFile,
-        Command::StageFile,
-        Command::StageAll,
-        Command::UnstageAll,
-        Command::DiscardFile,
-        Command::NextFile,
-        Command::PreviousFile,
-        Command::Commit,
-        Command::MarkViewed,
-        Command::SaveComment,
-    ];
-
+/// A command and everything about its shortcut.
+struct Spec {
+    command: Command,
     /// Stable name in the settings file.
-    pub fn id(self) -> &'static str {
-        match self {
-            Command::Search => "search",
-            Command::NewTab => "new-tab",
-            Command::OpenFolder => "open-folder",
-            Command::CloseTab => "close-tab",
-            Command::NextTab => "next-tab",
-            Command::PreviousTab => "previous-tab",
-            Command::AllTabs => "all-tabs",
-            Command::Settings => "settings",
-            Command::Refresh => "refresh",
-            Command::Console => "console",
-            Command::WrapLines => "wrap-lines",
-            Command::WholeFile => "whole-file",
-            Command::StageFile => "stage-file",
-            Command::StageAll => "stage-all",
-            Command::UnstageAll => "unstage-all",
-            Command::DiscardFile => "discard-file",
-            Command::NextFile => "next-file",
-            Command::PreviousFile => "previous-file",
-            Command::Commit => "commit",
-            Command::MarkViewed => "mark-viewed",
-            Command::SaveComment => "save-comment",
+    id: &'static str,
+    label: &'static str,
+    scope: Scope,
+    default: Option<KeyboardShortcut>,
+    /// Extra keys that always work too and can't be changed.
+    aliases: &'static [KeyboardShortcut],
+}
+
+const fn spec(
+    command: Command,
+    id: &'static str,
+    label: &'static str,
+    scope: Scope,
+    default: Option<KeyboardShortcut>,
+) -> Spec {
+    Spec {
+        command,
+        id,
+        label,
+        scope,
+        default,
+        aliases: &[],
+    }
+}
+
+const fn with_aliases(spec: Spec, aliases: &'static [KeyboardShortcut]) -> Spec {
+    Spec { aliases, ..spec }
+}
+
+use Command as C;
+use Scope::{FileStatus, General, Review};
+
+/// In the order of [`Command`].
+const COMMANDS: [Spec; 21] = [
+    spec(C::Search, "search", "Search", General, ctrl(Key::K)),
+    spec(
+        C::NewTab,
+        "new-tab",
+        "Open a repository (new tab)",
+        General,
+        ctrl(Key::T),
+    ),
+    spec(
+        C::OpenFolder,
+        "open-folder",
+        "Open a folder",
+        General,
+        ctrl(Key::O),
+    ),
+    spec(
+        C::CloseTab,
+        "close-tab",
+        "Close the tab",
+        General,
+        ctrl(Key::W),
+    ),
+    with_aliases(
+        spec(C::NextTab, "next-tab", "Next tab", General, ctrl(Key::Tab)),
+        &[shortcut(CTRL, Key::PageDown)],
+    ),
+    with_aliases(
+        spec(
+            C::PreviousTab,
+            "previous-tab",
+            "Previous tab",
+            General,
+            ctrl_shift(Key::Tab),
+        ),
+        &[shortcut(CTRL, Key::PageUp)],
+    ),
+    spec(
+        C::AllTabs,
+        "all-tabs",
+        "Find an open tab",
+        General,
+        ctrl_shift(Key::A),
+    ),
+    spec(
+        C::Settings,
+        "settings",
+        "Settings",
+        General,
+        ctrl(Key::Comma),
+    ),
+    with_aliases(
+        spec(C::Refresh, "refresh", "Refresh", General, plain(Key::F5)),
+        &[shortcut(CTRL, Key::R)],
+    ),
+    with_aliases(
+        spec(
+            C::Console,
+            "console",
+            "Show or hide the git console",
+            General,
+            ctrl(Key::J),
+        ),
+        &[shortcut(CTRL, Key::Backtick)],
+    ),
+    spec(
+        C::WrapLines,
+        "wrap-lines",
+        "Wrap long lines in diffs",
+        General,
+        alt(Key::Z),
+    ),
+    spec(
+        C::WholeFile,
+        "whole-file",
+        "Show whole files in diffs",
+        General,
+        alt(Key::F),
+    ),
+    spec(
+        C::StageFile,
+        "stage-file",
+        "Stage or unstage the selected file",
+        FileStatus,
+        plain(Key::Space),
+    ),
+    spec(
+        C::StageAll,
+        "stage-all",
+        "Stage all",
+        FileStatus,
+        ctrl(Key::S),
+    ),
+    spec(
+        C::UnstageAll,
+        "unstage-all",
+        "Unstage all",
+        FileStatus,
+        ctrl_shift(Key::S),
+    ),
+    spec(
+        C::DiscardFile,
+        "discard-file",
+        "Discard the selected file's changes",
+        FileStatus,
+        plain(Key::Delete),
+    ),
+    spec(
+        C::NextFile,
+        "next-file",
+        "Next file",
+        FileStatus,
+        plain(Key::ArrowDown),
+    ),
+    spec(
+        C::PreviousFile,
+        "previous-file",
+        "Previous file",
+        FileStatus,
+        plain(Key::ArrowUp),
+    ),
+    spec(C::Commit, "commit", "Commit", FileStatus, ctrl(Key::Enter)),
+    spec(
+        C::MarkViewed,
+        "mark-viewed",
+        "Mark the file viewed",
+        Review,
+        plain(Key::V),
+    ),
+    spec(
+        C::SaveComment,
+        "save-comment",
+        "Save a review comment",
+        Review,
+        ctrl(Key::Enter),
+    ),
+];
+
+/// Ctrl+1 to Ctrl+9: the first nine tabs. Fixed, like the aliases.
+const GO_TO_TAB: [(KeyboardShortcut, &str); 9] = [
+    (shortcut(CTRL, Key::Num1), "Go to tab 1"),
+    (shortcut(CTRL, Key::Num2), "Go to tab 2"),
+    (shortcut(CTRL, Key::Num3), "Go to tab 3"),
+    (shortcut(CTRL, Key::Num4), "Go to tab 4"),
+    (shortcut(CTRL, Key::Num5), "Go to tab 5"),
+    (shortcut(CTRL, Key::Num6), "Go to tab 6"),
+    (shortcut(CTRL, Key::Num7), "Go to tab 7"),
+    (shortcut(CTRL, Key::Num8), "Go to tab 8"),
+    (shortcut(CTRL, Key::Num9), "Go to tab 9"),
+];
+
+impl Command {
+    pub const ALL: [Command; COMMANDS.len()] = {
+        let mut all = [Command::Search; COMMANDS.len()];
+        let mut i = 0;
+        while i < all.len() {
+            all[i] = COMMANDS[i].command;
+            i += 1;
         }
+        all
+    };
+
+    fn spec(self) -> &'static Spec {
+        &COMMANDS[self as usize]
+    }
+
+    pub fn id(self) -> &'static str {
+        self.spec().id
     }
 
     pub fn label(self) -> &'static str {
-        match self {
-            Command::Search => "Search",
-            Command::NewTab => "Open a repository (new tab)",
-            Command::OpenFolder => "Open a folder",
-            Command::CloseTab => "Close the tab",
-            Command::NextTab => "Next tab",
-            Command::PreviousTab => "Previous tab",
-            Command::AllTabs => "Find an open tab",
-            Command::Settings => "Settings",
-            Command::Refresh => "Refresh",
-            Command::Console => "Show or hide the git console",
-            Command::WrapLines => "Wrap long lines in diffs",
-            Command::WholeFile => "Show whole files in diffs",
-            Command::StageFile => "Stage or unstage the selected file",
-            Command::StageAll => "Stage all",
-            Command::UnstageAll => "Unstage all",
-            Command::DiscardFile => "Discard the selected file's changes",
-            Command::NextFile => "Next file",
-            Command::PreviousFile => "Previous file",
-            Command::Commit => "Commit",
-            Command::MarkViewed => "Mark the file viewed",
-            Command::SaveComment => "Save a review comment",
-        }
+        self.spec().label
     }
 
     pub fn scope(self) -> Scope {
-        match self {
-            Command::StageFile
-            | Command::StageAll
-            | Command::UnstageAll
-            | Command::DiscardFile
-            | Command::NextFile
-            | Command::PreviousFile
-            | Command::Commit => Scope::FileStatus,
-            Command::MarkViewed | Command::SaveComment => Scope::Review,
-            _ => Scope::General,
-        }
+        self.spec().scope
     }
 
     pub fn default_shortcut(self) -> Option<KeyboardShortcut> {
-        match self {
-            Command::Search => ctrl(Key::K),
-            Command::NewTab => ctrl(Key::T),
-            Command::OpenFolder => ctrl(Key::O),
-            Command::CloseTab => ctrl(Key::W),
-            Command::NextTab => ctrl(Key::Tab),
-            Command::PreviousTab => ctrl_shift(Key::Tab),
-            Command::AllTabs => ctrl_shift(Key::A),
-            Command::Settings => ctrl(Key::Comma),
-            Command::Refresh => plain(Key::F5),
-            Command::Console => ctrl(Key::J),
-            Command::WrapLines => alt(Key::Z),
-            Command::WholeFile => alt(Key::F),
-            Command::StageFile => plain(Key::Space),
-            Command::StageAll => ctrl(Key::S),
-            Command::UnstageAll => ctrl_shift(Key::S),
-            Command::DiscardFile => plain(Key::Delete),
-            Command::NextFile => plain(Key::ArrowDown),
-            Command::PreviousFile => plain(Key::ArrowUp),
-            Command::Commit => ctrl(Key::Enter),
-            Command::MarkViewed => plain(Key::V),
-            Command::SaveComment => ctrl(Key::Enter),
-        }
+        self.spec().default
     }
 
     fn from_id(id: &str) -> Option<Command> {
@@ -218,64 +323,29 @@ impl Command {
     }
 }
 
-/// Shortcuts that can't be changed, next to the configurable ones.
-pub const FIXED: [(KeyboardShortcut, &str); 13] = [
-    (
-        KeyboardShortcut::new(Modifiers::COMMAND, Key::PageUp),
-        "Previous tab",
-    ),
-    (
-        KeyboardShortcut::new(Modifiers::COMMAND, Key::PageDown),
-        "Next tab",
-    ),
-    (
-        KeyboardShortcut::new(Modifiers::COMMAND, Key::Num1),
-        "Go to tab 1",
-    ),
-    (
-        KeyboardShortcut::new(Modifiers::COMMAND, Key::Num2),
-        "Go to tab 2",
-    ),
-    (
-        KeyboardShortcut::new(Modifiers::COMMAND, Key::Num3),
-        "Go to tab 3",
-    ),
-    (
-        KeyboardShortcut::new(Modifiers::COMMAND, Key::Num4),
-        "Go to tab 4",
-    ),
-    (
-        KeyboardShortcut::new(Modifiers::COMMAND, Key::Num5),
-        "Go to tab 5",
-    ),
-    (
-        KeyboardShortcut::new(Modifiers::COMMAND, Key::Num6),
-        "Go to tab 6",
-    ),
-    (
-        KeyboardShortcut::new(Modifiers::COMMAND, Key::Num7),
-        "Go to tab 7",
-    ),
-    (
-        KeyboardShortcut::new(Modifiers::COMMAND, Key::Num8),
-        "Go to tab 8",
-    ),
-    (
-        KeyboardShortcut::new(Modifiers::COMMAND, Key::Num9),
-        "Go to tab 9",
-    ),
-    (KeyboardShortcut::new(Modifiers::COMMAND, Key::R), "Refresh"),
-    (
-        KeyboardShortcut::new(Modifiers::COMMAND, Key::Backtick),
-        "Show or hide the git console",
-    ),
-];
+/// Shortcuts that can't be changed, next to the configurable ones: the
+/// aliases and Go to tab.
+fn fixed() -> impl Iterator<Item = (KeyboardShortcut, &'static str)> {
+    COMMANDS
+        .iter()
+        .flat_map(|spec| spec.aliases.iter().map(|alias| (*alias, spec.label)))
+        .chain(GO_TO_TAB)
+}
 
-/// Was the fixed shortcut `shortcut` pressed (see [`FIXED`])? Same rules as
-/// [`Keymap::pressed`].
-pub fn fixed_pressed(ctx: &egui::Context, shortcut: KeyboardShortcut) -> bool {
-    ctx.memory(|m| m.top_modal_layer()).is_none()
-        && ctx.input_mut(|i| consume_exact(i, shortcut, false))
+/// Nothing fires behind an open dialog.
+fn behind_dialog(ctx: &egui::Context) -> bool {
+    ctx.memory(|m| m.top_modal_layer()).is_some()
+}
+
+/// The tab whose Go to tab shortcut was pressed, among the first `count`.
+pub fn go_to_tab(ctx: &egui::Context, count: usize) -> Option<usize> {
+    if behind_dialog(ctx) {
+        return None;
+    }
+    GO_TO_TAB
+        .iter()
+        .take(count)
+        .position(|(shortcut, _)| ctx.input_mut(|i| consume_exact(i, *shortcut, false)))
 }
 
 /// The shortcuts in use: the defaults with the user's changes on top.
@@ -358,10 +428,9 @@ impl Keymap {
                 && self.get(*other) == Some(shortcut)
         });
         configurable.map(Command::label).or_else(|| {
-            FIXED
-                .iter()
+            fixed()
                 .find(|(fixed, _)| *fixed == shortcut)
-                .map(|(_, label)| *label)
+                .map(|(_, label)| label)
         })
     }
 
@@ -382,28 +451,36 @@ impl Keymap {
         })
     }
 
-    /// Was `command`'s shortcut pressed? Consumes the key press. Nothing
-    /// fires behind an open dialog. Shortcuts without Ctrl or Alt (except
-    /// F1, F2, …) never fire while a text field has the keyboard, and Space
-    /// and Enter go to a button that has it.
+    /// Was `command`'s shortcut, or one of its aliases, pressed? Consumes
+    /// the key press. Nothing fires behind an open dialog. Shortcuts without
+    /// Ctrl or Alt (except F1, F2, …) never fire while a text field has the
+    /// keyboard, and Space and Enter go to a button that has it.
     pub fn pressed(&self, ctx: &egui::Context, command: Command) -> bool {
-        let Some(shortcut) = self.get(command) else {
-            return false;
-        };
-        if ctx.memory(|m| m.top_modal_layer()).is_some() {
+        if behind_dialog(ctx) {
             return false;
         }
+        let repeat = command.repeats();
+        let alias = || {
+            command
+                .spec()
+                .aliases
+                .iter()
+                .any(|alias| ctx.input_mut(|i| consume_exact(i, *alias, repeat)))
+        };
+        let Some(shortcut) = self.get(command) else {
+            return alias();
+        };
         let m = shortcut.modifiers;
         if !(m.command || m.ctrl || m.alt) {
             let key = shortcut.logical_key;
-            if ctx.text_edit_focused() && !is_function_key(key) {
-                return false;
-            }
-            if matches!(key, Key::Space | Key::Enter) && ctx.memory(|m| m.focused()).is_some() {
-                return false;
+            let typing = ctx.text_edit_focused() && !is_function_key(key);
+            let on_button =
+                matches!(key, Key::Space | Key::Enter) && ctx.memory(|m| m.focused()).is_some();
+            if typing || on_button {
+                return alias();
             }
         }
-        ctx.input_mut(|i| consume_exact(i, shortcut, command.repeats()))
+        ctx.input_mut(|i| consume_exact(i, shortcut, repeat)) || alias()
     }
 
     /// The shortcut as the user reads it, e.g. "Ctrl+S".
@@ -583,7 +660,7 @@ mod tests {
             keys.conflict(Command::Search, ctrl(Key::Num1).unwrap()),
             Some("Go to tab 1")
         );
-        for (shortcut, label) in FIXED {
+        for (shortcut, label) in fixed() {
             assert!(
                 Command::ALL
                     .iter()
@@ -591,6 +668,17 @@ mod tests {
                 "{label}"
             );
         }
+    }
+
+    #[test]
+    fn the_table_is_in_command_order() {
+        for (i, spec) in COMMANDS.iter().enumerate() {
+            assert_eq!(spec.command as usize, i, "{}", spec.id);
+        }
+        assert_eq!(
+            Keymap::default().conflict(Command::Search, ctrl(Key::PageUp).unwrap()),
+            Some("Previous tab")
+        );
     }
 
     #[test]

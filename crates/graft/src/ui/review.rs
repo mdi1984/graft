@@ -676,8 +676,8 @@ fn comment_editor(ui: &mut Ui, project: &mut Project, title: &str, actions: &mut
                         .color(color::text()),
                 );
                 let save = keys
-                    .get(Command::SaveComment)
-                    .map(|s| format!(" · {} saves", crate::keys::format(s)))
+                    .text(Command::SaveComment)
+                    .map(|key| format!(" · {key} saves"))
                     .unwrap_or_default();
                 ui.label(
                     RichText::new(format!(

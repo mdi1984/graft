@@ -9,7 +9,7 @@ use super::widgets::dialog;
 use super::widgets::{
     ButtonKind, button, error_label, field_label, hint, inline_spinner, text_field, title,
 };
-use crate::keys::{self, Command, Scope};
+use crate::keys::{self, Command, Keymap, Scope};
 use crate::settings::{Settings, ThemeChoice};
 use crate::theme::{self, color};
 
@@ -113,19 +113,13 @@ pub fn show(
 
         section(ui, "Diffs");
         ui.checkbox(&mut form.draft.wrap_lines, "Wrap long lines");
-        let switch = match form.draft.keys.get(Command::WrapLines) {
-            Some(shortcut) => format!(" {} switches it anywhere.", keys::format(shortcut)),
-            None => String::new(),
-        };
+        let switch = switches(&form.draft.keys, Command::WrapLines);
         hint(
             ui,
             &format!("Long lines continue on the next row instead of scrolling sideways.{switch}"),
         );
         ui.checkbox(&mut form.draft.whole_file, "Show whole files");
-        let switch = match form.draft.keys.get(Command::WholeFile) {
-            Some(shortcut) => format!(" {} switches it anywhere.", keys::format(shortcut)),
-            None => String::new(),
-        };
+        let switch = switches(&form.draft.keys, Command::WholeFile);
         hint(
             ui,
             &format!(
@@ -317,4 +311,11 @@ fn section(ui: &mut Ui, title: &str) {
             .color(color::text_faint())
             .size(theme::SMALL_SIZE),
     );
+}
+
+/// " Alt+Z switches it anywhere.", if `command` has a shortcut.
+fn switches(keys: &Keymap, command: Command) -> String {
+    keys.text(command)
+        .map(|key| format!(" {key} switches it anywhere."))
+        .unwrap_or_default()
 }

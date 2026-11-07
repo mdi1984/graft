@@ -1,4 +1,4 @@
-//! The toolbar search (Ctrl+K): type to find worktrees, branches, tags,
+//! The toolbar search: type to find worktrees, branches, tags,
 //! commits and changed files in every open project; Enter or a click jumps
 //! there (switching to that project's tab).
 
