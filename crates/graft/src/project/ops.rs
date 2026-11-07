@@ -21,7 +21,7 @@ pub(super) enum At {
 
 impl Project {
     /// Git pointed at the selected worktree.
-    pub fn wt_git(&self) -> Git {
+    pub(super) fn wt_git(&self) -> Git {
         self.git.at(&self.nav.worktree)
     }
 
