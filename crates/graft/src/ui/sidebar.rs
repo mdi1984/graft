@@ -4,13 +4,14 @@
 use egui::{Id, Rect, Response, ScrollArea, Sense, Stroke, Ui, pos2, vec2};
 use graft_core::{Branch, RemoteBranch, RepoSnapshot, Upstream, Worktree, same_path};
 
+use super::branch_menu;
 use super::icons::Icon;
 use super::widgets::{
-    self, Badge, ICON_SIZE, elided, elided_path, paint_badges_right, paint_galley_left, paint_icon,
-    paint_row_bg, section_heading,
+    self, Badge, ICON_SIZE, checkout_color, elided, elided_path, menu_item, paint_badges_right,
+    paint_galley_left, paint_icon, paint_row_bg, section_heading,
 };
 use crate::project::{
-    Action, Confirm, DialogKind, Project, RemoteOp, Tab, WorkspaceView, merge_dialog,
+    Action, CheckedOut, Confirm, DialogKind, Project, RemoteOp, Tab, WorkspaceView, merge_dialog,
 };
 use crate::theme::{self, color};
 
@@ -308,10 +309,8 @@ fn worktree_row(ui: &mut Ui, wt: &Worktree, selected: bool) -> Response {
     // branch dots below); the row background shows which one is selected.
     let icon_color = if wt.prunable {
         color::text_faint()
-    } else if wt.is_main {
-        color::accent()
     } else {
-        color::branch_dot_agent()
+        checkout_color(CheckedOut::of(Some(wt)))
     };
     paint_icon(
         painter,
@@ -450,13 +449,6 @@ fn remove_confirm(wt: &Worktree) -> Confirm {
     }
 }
 
-fn menu_item(ui: &mut Ui, label: &str, enabled: bool, actions: &mut Vec<Action>, action: Action) {
-    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
-        actions.push(action);
-        ui.close();
-    }
-}
-
 fn branch_menu(
     ui: &mut Ui,
     project: &Project,
@@ -470,37 +462,7 @@ fn branch_menu(
     let busy = project.is_operating();
     let name = branch.name.as_str();
     let is_head = head == Some(name);
-    let elsewhere = repo.worktree_for_branch(name).filter(|_| !is_head);
-    match elsewhere {
-        Some(wt) => menu_item(
-            ui,
-            if wt.is_main {
-                "Go to the main folder"
-            } else {
-                "Open its worktree"
-            },
-            true,
-            actions,
-            Action::OpenWorktree(wt.path.clone()),
-        ),
-        None if !is_head => {
-            menu_item(
-                ui,
-                &format!("Check out {name}{}", project.in_main_suffix()),
-                !busy,
-                actions,
-                Action::Checkout(name.to_owned()),
-            );
-            menu_item(
-                ui,
-                "New worktree for this branch…",
-                !busy,
-                actions,
-                Action::NewWorktree(Some(name.to_owned())),
-            );
-        }
-        None => {}
-    }
+    branch_menu::local_items(ui, project, repo, name, false, actions);
     if !is_head {
         merge_items(ui, project, name, true, actions);
     }
@@ -509,12 +471,7 @@ fn branch_menu(
         "New branch from here…",
         !busy,
         actions,
-        Action::OpenDialog(DialogKind::NewBranch {
-            name: String::new(),
-            start: name.to_owned(),
-            start_label: name.to_owned(),
-            checkout: true,
-        }),
+        Action::OpenDialog(DialogKind::new_branch(name, name)),
     );
     menu_item(
         ui,
@@ -526,7 +483,7 @@ fn branch_menu(
             name: name.to_owned(),
         }),
     );
-    let deletable = !is_head && elsewhere.is_none();
+    let deletable = repo.worktree_for_branch(name).is_none();
     let delete = ui.add_enabled(!busy && deletable, egui::Button::new("Delete…"));
     let delete = if deletable {
         delete
@@ -623,37 +580,14 @@ fn remote_branch_menu(
             Action::Checkout(local.to_owned()),
         ),
         Some(_) => {}
-        None => {
-            menu_item(
-                ui,
-                &format!("Check out as {local}{}", project.in_main_suffix()),
-                !busy,
-                actions,
-                Action::CheckoutRemote {
-                    local: local.to_owned(),
-                    remote: branch.name.clone(),
-                },
-            );
-            menu_item(
-                ui,
-                "New worktree for this branch…",
-                !busy,
-                actions,
-                Action::NewWorktree(Some(branch.name.clone())),
-            );
-        }
+        None => branch_menu::tracking_items(ui, project, branch, false, actions),
     }
     menu_item(
         ui,
         "New branch from here…",
         !busy,
         actions,
-        Action::OpenDialog(DialogKind::NewBranch {
-            name: String::new(),
-            start: branch.name.clone(),
-            start_label: branch.name.clone(),
-            checkout: true,
-        }),
+        Action::OpenDialog(DialogKind::new_branch(&branch.name, &branch.name)),
     );
     menu_item(
         ui,
@@ -737,16 +671,10 @@ fn branch_row(
 
     let checked_out = repo.worktree_for_branch(&branch.name);
     let in_main = checked_out.is_some_and(|wt| wt.is_main);
-    let in_worktree = checked_out.is_some_and(|wt| !wt.is_main);
     let gone = matches!(branch.upstream, Upstream::Gone { .. });
-    let dot = if in_main {
-        color::accent()
-    } else if in_worktree {
-        color::branch_dot_agent()
-    } else if gone {
-        color::text_faint()
-    } else {
-        color::ahead_fg()
+    let dot = match CheckedOut::of(checked_out) {
+        CheckedOut::Nowhere if gone => color::text_faint(),
+        place => checkout_color(place),
     };
     painter.circle_filled(pos2(rect.left() + indent + 7.0, y), 3.0, dot);
 
@@ -815,16 +743,7 @@ fn remotes(
     busy: bool,
     actions: &mut Vec<Action>,
 ) {
-    let add = Action::OpenDialog(DialogKind::Remote {
-        original: None,
-        name: if repo.remotes.is_empty() {
-            "origin".to_owned()
-        } else {
-            String::new()
-        },
-        url: String::new(),
-        fetch: true,
-    });
+    let add = Action::OpenDialog(DialogKind::add_remote(repo.remotes.is_empty()));
     for remote in &repo.remotes {
         simple_row(ui, Icon::Cloud, &remote.name, color::text_mid(), 8.0)
             .on_hover_text(graft_core::console::redact(&remote.fetch_url))
@@ -834,12 +753,7 @@ fn remotes(
                     "Edit…",
                     !busy,
                     actions,
-                    Action::OpenDialog(DialogKind::Remote {
-                        original: Some(remote.name.clone()),
-                        name: remote.name.clone(),
-                        url: remote.fetch_url.clone(),
-                        fetch: false,
-                    }),
+                    Action::OpenDialog(DialogKind::edit_remote(&remote.name, &remote.fetch_url)),
                 );
                 if ui.button("Copy URL").clicked() {
                     ui.ctx().copy_text(remote.fetch_url.clone());

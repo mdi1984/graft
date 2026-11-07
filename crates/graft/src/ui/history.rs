@@ -10,15 +10,16 @@ use graft_core::details::{CommitDetails, FileChange};
 use graft_core::diff::Source;
 use graft_core::history::{Commit, GraphRow, History, LineKind};
 use graft_core::refs::ResetMode;
+use graft_core::short;
 use graft_core::status::Change;
-use graft_core::{same_path, short};
 
-use super::diff_view;
 use super::icons::Icon;
 use super::widgets::{
-    ButtonKind, button, chip, elided, empty_state, icon_button, paint_galley_left, spinner,
+    ButtonKind, button, checkout_color, chip, elided, empty_state, icon_button, loading, menu_item,
+    paint_galley_left,
 };
-use crate::project::{Action, CheckedOut, DialogKind, FileKey, Project, RefKind, RefLabel};
+use super::{branch_menu, diff_view};
+use crate::project::{Action, DialogKind, FileKey, Project, RefKind, RefLabel};
 use crate::theme::{self, color};
 use crate::time;
 
@@ -69,18 +70,6 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
             });
     }
     commit_list(ui, project, history, actions);
-}
-
-fn loading(ui: &mut Ui, text: &str) {
-    let rect = ui.available_rect_before_wrap();
-    spinner(ui, rect.center() - vec2(0.0, 16.0), 9.0, color::text_weak());
-    ui.painter().text(
-        rect.center() + vec2(0.0, 10.0),
-        Align2::CENTER_CENTER,
-        text,
-        theme::body(),
-        color::text_weak(),
-    );
 }
 
 /// Column widths; 0 hides a column.
@@ -430,21 +419,13 @@ fn paint_row(
 /// Like the sidebar: green is checked out in the main folder, orange in a
 /// linked worktree; the viewed worktree's HEAD is bold.
 pub fn label_style(label: &RefLabel) -> (Color32, egui::FontId) {
-    let branch_color = match label.checked_out {
-        CheckedOut::Main => color::accent(),
-        CheckedOut::Worktree => color::branch_dot_agent(),
-        CheckedOut::Nowhere => color::ahead_fg(),
-    };
+    let branch_color = checkout_color(label.checked_out);
     match label.kind {
         RefKind::Head => (branch_color, theme::semibold(theme::SMALL_SIZE + 0.5)),
         RefKind::Local => (branch_color, theme::small()),
         RefKind::Remote => (color::text_weak(), theme::small()),
         RefKind::Tag => (color::tag(), theme::small()),
     }
-}
-
-fn lane_color(index: u8) -> Color32 {
-    color::lanes()[index as usize % color::lanes().len()]
 }
 
 fn paint_graph(ui: &Ui, rect: Rect, row: &GraphRow, commit: &Commit, is_head: bool, bg: Color32) {
@@ -458,7 +439,7 @@ fn paint_graph(ui: &Ui, rect: Rect, row: &GraphRow, commit: &Commit, is_head: bo
         let color = if commit.is_worktree() {
             color::text_faint()
         } else {
-            lane_color(line.color)
+            color::lane(line.color.into())
         };
         let stroke = Stroke::new(width, color);
         let x = lane_x(line.lane);
@@ -475,7 +456,7 @@ fn paint_graph(ui: &Ui, rect: Rect, row: &GraphRow, commit: &Commit, is_head: bo
         }
     }
 
-    let color = lane_color(row.color);
+    let color = color::lane(row.color.into());
     if commit.is_worktree() {
         painter.circle(node, 4.5, bg, Stroke::new(1.6, color::dirty_fg()));
     } else if is_head {
@@ -516,46 +497,11 @@ fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Ve
     let short_id = short(&commit.id);
     let in_main = project.in_main_suffix();
     let main_head = project.main_worktree().and_then(|wt| wt.head);
-    let mut item = |ui: &mut Ui, label: &str, enabled: bool, action: Action| {
-        if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
-            actions.push(action);
-            ui.close();
-        }
-    };
-
     // The branches on this commit, like the sidebar offers them.
     if let Some(repo) = &project.snapshot {
         let mut offered = false;
         for b in repo.branches.iter().filter(|b| b.target == commit.id) {
-            let name = &b.name;
-            match repo.worktree_for_branch(name) {
-                Some(wt) if same_path(&wt.path, &project.nav.worktree) => continue,
-                Some(wt) => item(
-                    ui,
-                    &if wt.is_main {
-                        format!("Go to {name} in the main folder")
-                    } else {
-                        format!("Open the worktree of {name}")
-                    },
-                    true,
-                    Action::OpenWorktree(wt.path.clone()),
-                ),
-                None => {
-                    item(
-                        ui,
-                        &format!("Check out {name}{in_main}"),
-                        !busy,
-                        Action::Checkout(name.clone()),
-                    );
-                    item(
-                        ui,
-                        &format!("New worktree for {name}…"),
-                        !busy,
-                        Action::NewWorktree(Some(name.clone())),
-                    );
-                }
-            }
-            offered = true;
+            offered |= branch_menu::local_items(ui, project, repo, &b.name, true, actions);
         }
         let mut tracked: Vec<&str> = Vec::new();
         for r in repo
@@ -570,37 +516,24 @@ fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Ve
                 continue;
             }
             tracked.push(local);
-            item(
-                ui,
-                &format!("Check out {} as {local}{in_main}", r.name),
-                !busy,
-                Action::CheckoutRemote {
-                    local: local.to_owned(),
-                    remote: r.name.clone(),
-                },
-            );
-            item(
-                ui,
-                &format!("New worktree for {}…", r.name),
-                !busy,
-                Action::NewWorktree(Some(r.name.clone())),
-            );
+            branch_menu::tracking_items(ui, project, r, true, actions);
             offered = true;
         }
         if offered {
             ui.separator();
         }
     }
+    let mut item = |ui: &mut Ui, label: &str, enabled: bool, action: Action| {
+        menu_item(ui, label, enabled, actions, action);
+    };
     item(
         ui,
         "New branch here…",
         !busy,
-        Action::OpenDialog(DialogKind::NewBranch {
-            name: String::new(),
-            start: commit.id.to_string(),
-            start_label: format!("{short_id} {}", commit.summary),
-            checkout: true,
-        }),
+        Action::OpenDialog(DialogKind::new_branch(
+            commit.id.to_string(),
+            format!("{short_id} {}", commit.summary),
+        )),
     );
     item(
         ui,
@@ -695,7 +628,7 @@ fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &m
     ui.add(
         egui::Label::new(
             RichText::new(d.summary())
-                .font(theme::semibold(15.0))
+                .font(theme::title())
                 .color(color::text()),
         )
         .wrap(),
@@ -865,7 +798,7 @@ pub fn change_color(change: Change) -> Color32 {
     match change {
         Change::Added => color::added(),
         Change::Deleted | Change::Unmerged => color::removed(),
-        Change::Renamed | Change::Copied => color::lanes()[3],
+        Change::Renamed | Change::Copied => color::renamed(),
         Change::TypeChanged => color::text_weak(),
         Change::Modified | Change::None => color::dirty_fg(),
     }
@@ -941,7 +874,7 @@ fn uncommitted(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
     ui.spacing_mut().item_spacing.y = 6.0;
     ui.label(
         RichText::new("Uncommitted changes")
-            .font(theme::semibold(15.0))
+            .font(theme::title())
             .color(color::text()),
     );
     let Some(wt) = project.worktree() else { return };

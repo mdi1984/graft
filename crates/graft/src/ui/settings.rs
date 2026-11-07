@@ -2,10 +2,13 @@
 //! editor, background fetch, Slash's protected branches, the files copied
 //! into new worktrees, keyboard shortcuts and update checks.
 
-use egui::{Align, ComboBox, Id, Key, Layout, RichText, ScrollArea, Ui};
+use egui::{Align, ComboBox, Key, Layout, RichText, ScrollArea, Ui};
 use graft_core::identity::Identity;
 
-use super::widgets::{ButtonKind, button, spinner, text_field};
+use super::widgets::dialog;
+use super::widgets::{
+    ButtonKind, button, error_label, field_label, hint, inline_spinner, text_field, title,
+};
 use crate::keys::{self, Command, Scope};
 use crate::settings::{Settings, ThemeChoice};
 use crate::theme::{self, color};
@@ -59,14 +62,8 @@ pub fn show(
         form.identity = identity.clone();
     }
     let mut outcome = Outcome::Open;
-    let response = super::widgets::modal(ctx, Id::unique("settings-modal")).show(ctx, |ui| {
-        ui.set_width(WIDTH);
-        ui.spacing_mut().item_spacing.y = 6.0;
-        ui.label(
-            RichText::new("Settings")
-                .font(theme::semibold(15.0))
-                .color(color::text()),
-        );
+    let shown = dialog::show(ctx, "settings-modal", WIDTH, false, |ui| {
+        title(ui, "Settings");
 
         section(ui, "Appearance");
         ui.horizontal(|ui| {
@@ -83,14 +80,8 @@ pub fn show(
                 "Git records this name and email as the author of your commits.",
             );
             match identity {
-                None => {
-                    let (rect, _) =
-                        ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-                    spinner(ui, rect.center(), 5.0, color::text_weak());
-                }
-                Some(Err(error)) => {
-                    ui.label(RichText::new(error).color(color::removed()));
-                }
+                None => inline_spinner(ui),
+                Some(Err(error)) => error_label(ui, error),
                 Some(Ok(_)) => {
                     let half = (WIDTH - 8.0) / 2.0;
                     ui.horizontal(|ui| {
@@ -219,9 +210,7 @@ pub fn show(
             });
         });
     });
-    if matches!(outcome, Outcome::Open)
-        && (response.should_close() || ctx.input(|i| i.key_pressed(Key::Escape)))
-    {
+    if matches!(outcome, Outcome::Open) && shown.cancel {
         outcome = Outcome::Cancel;
     }
     outcome
@@ -253,7 +242,7 @@ fn shortcuts(ui: &mut Ui, form: &mut SettingsForm) {
          don't fire while you type.",
     );
     if let Some(error) = &form.key_error {
-        ui.label(RichText::new(error).color(color::removed()));
+        error_label(ui, error);
     }
     ScrollArea::vertical()
         .max_height(260.0)
@@ -327,24 +316,5 @@ fn section(ui: &mut Ui, title: &str) {
         RichText::new(title.to_uppercase())
             .color(color::text_faint())
             .size(theme::SMALL_SIZE),
-    );
-}
-
-fn field_label(ui: &mut Ui, text: &str) {
-    ui.label(
-        RichText::new(text)
-            .color(color::text_mid())
-            .size(theme::SMALL_SIZE),
-    );
-}
-
-fn hint(ui: &mut Ui, text: &str) {
-    ui.add(
-        egui::Label::new(
-            RichText::new(text)
-                .color(color::text_faint())
-                .size(theme::SMALL_SIZE),
-        )
-        .wrap(),
     );
 }

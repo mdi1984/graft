@@ -11,10 +11,9 @@ use graft_core::repo::{Progress, clone_folder_name, native};
 use graft_core::wsl::Wsl;
 
 use super::icons::{self, Icon};
-use super::project_tabs::group_color;
 use super::widgets::{
-    ButtonKind, button, elided, elided_path, paint_galley_left, paint_icon_button, progress_bar,
-    section_heading, text_field,
+    ButtonKind, button, elided, elided_path, field_label, paint_galley_left, paint_icon_button,
+    progress_bar, section_heading, text_field,
 };
 use crate::groups::{GroupId, TabGroup};
 use crate::theme::{self, RADIUS, color};
@@ -646,14 +645,6 @@ fn form_frame(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
         });
 }
 
-fn field_label(ui: &mut Ui, text: &str) {
-    ui.label(
-        egui::RichText::new(text)
-            .color(color::text_weak())
-            .size(theme::SMALL_SIZE),
-    );
-}
-
 fn card(
     ui: &mut Ui,
     width: f32,
@@ -665,10 +656,7 @@ fn card(
     let (rect, response) = ui.allocate_exact_size(vec2(width, 92.0), Sense::click());
     let painter = ui.painter();
     let (fill, border) = if active {
-        (
-            color::selected_row_bg(),
-            color::accent().gamma_multiply(0.6),
-        )
+        (color::selected_row_bg(), color::selected_outline())
     } else if response.hovered() {
         (color::control_hover_bg(), color::control_border())
     } else {
@@ -737,7 +725,7 @@ fn place_button(ui: &mut Ui, label: &str, selected: bool) -> egui::Response {
     let (fill, border, fg) = if selected {
         (
             color::selected_row_bg(),
-            color::accent().gamma_multiply(0.6),
+            color::selected_outline(),
             color::text(),
         )
     } else if response.hovered() {
@@ -855,7 +843,7 @@ fn group_list(ui: &mut Ui, groups: &[TabGroup], width: f32, action: &mut Option<
         if response.hovered() {
             painter.rect_filled(rect, RADIUS, color::hover_row_bg());
         }
-        let fg = group_color(group.color);
+        let fg = color::group(group.color);
         painter.circle_filled(pos2(rect.left() + 14.0, rect.top() + 14.0), 4.0, fg);
         let count = match group.repos.len() {
             0 => "no repositories yet".to_owned(),

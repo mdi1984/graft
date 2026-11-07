@@ -1,4 +1,6 @@
 pub mod about;
+mod branch_menu;
+mod can;
 pub mod confirm;
 pub mod conflicts;
 pub mod console;

@@ -10,7 +10,7 @@ use graft_core::{RepoSnapshot, short};
 use super::diff_view;
 use super::history::file_row;
 use super::widgets::{
-    ButtonKind, button, elided, empty_state, paint_galley_left, paint_row_bg, spinner,
+    ButtonKind, button, elided, empty_state, paint_galley_left, paint_row_bg, waiting,
 };
 use crate::project::{Action, Confirm, DialogKind, FileKey, Project};
 use crate::theme::{self, color};
@@ -18,8 +18,7 @@ use crate::time;
 
 pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
     let Some(stashes) = &project.stashes else {
-        let rect = ui.available_rect_before_wrap();
-        spinner(ui, rect.center(), 9.0, color::text_weak());
+        waiting(ui);
         return;
     };
     let stashes = match stashes {
@@ -181,7 +180,7 @@ fn details(
     ui.spacing_mut().item_spacing.y = 6.0;
     ui.label(
         RichText::new(&stash.message)
-            .font(theme::semibold(15.0))
+            .font(theme::title())
             .color(color::text()),
     );
     ui.label(

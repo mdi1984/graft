@@ -21,7 +21,7 @@ use graft_core::syntax::{Spans, Token};
 use super::history::paint_change_letter;
 use super::icons::Icon;
 use super::widgets::{
-    ButtonKind, button, elided_path, empty_state, icon_button, paint_galley_left, spinner,
+    ButtonKind, button, elided_path, empty_state, icon_button, paint_galley_left, waiting,
 };
 use crate::keys::Command;
 use crate::project::comments::{LineComment, Pick, Placed, Side};
@@ -402,8 +402,7 @@ pub fn body(
         if let Some(error) = &view.error {
             empty_state(ui, "Could not load the diff", error);
         } else {
-            let rect = ui.available_rect_before_wrap();
-            spinner(ui, rect.center(), 9.0, color::text_weak());
+            waiting(ui);
         }
         return;
     };
@@ -633,11 +632,7 @@ fn half(
 ) {
     let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
     let Some((h, l)) = at else {
-        painter.rect_filled(
-            rect,
-            0,
-            color::sidebar_bg().lerp_to_gamma(color::app_bg(), 0.4),
-        );
+        painter.rect_filled(rect, 0, color::muted_bg());
         return;
     };
     let line = &diff.hunks[h].lines[l];
@@ -1157,11 +1152,7 @@ fn gap_row(ui: &mut Ui, rect: Rect, view: &DiffView, g: usize, actions: &mut Vec
         return;
     };
     let painter = ui.painter();
-    painter.rect_filled(
-        rect,
-        0,
-        color::sidebar_bg().lerp_to_gamma(color::app_bg(), 0.5),
-    );
+    painter.rect_filled(rect, 0, color::muted_bg());
     let n = gap.len();
     let label = format!("{n} unchanged line{}", if n == 1 { "" } else { "s" });
     let galley = painter.layout_no_wrap(label, theme::small(), color::text_faint());

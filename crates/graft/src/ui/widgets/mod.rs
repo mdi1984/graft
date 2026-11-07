@@ -1,4 +1,7 @@
-//! Custom-painted building blocks shared by the toolbar, tabs and sidebar.
+//! Custom-painted building blocks shared by every screen.
+
+pub mod dialog;
+mod form;
 
 use std::sync::Arc;
 
@@ -8,7 +11,10 @@ use egui::{
     pos2, vec2,
 };
 
+pub use form::*;
+
 use super::icons::{self, Icon};
+use crate::project::{Action, CheckedOut};
 use crate::theme::{self, RADIUS, color};
 
 pub const ICON_SIZE: f32 = 14.0;
@@ -311,7 +317,7 @@ pub fn empty_state(ui: &mut Ui, title: &str, detail: &str) {
         center - vec2(0.0, 12.0),
         Align2::CENTER_CENTER,
         title,
-        theme::semibold(15.0),
+        theme::title(),
         color::text_mid(),
     );
     painter.text(
@@ -513,14 +519,47 @@ pub fn progress_bar(ui: &mut Ui, fraction: Option<f32>, width: f32) {
     }
 }
 
-/// A modal dialog with Graft's frame. egui's default frame uses the tight
-/// menu padding; dialogs get more room.
-pub fn modal(ctx: &egui::Context, id: egui::Id) -> egui::Modal {
-    let frame = egui::Frame::popup(&ctx.global_style()).inner_margin(egui::Margin {
-        left: 22,
-        right: 22,
-        top: 18,
-        bottom: 20,
+/// A row of the group colors; returns the one clicked.
+pub fn color_swatches(ui: &mut Ui, current: usize) -> Option<usize> {
+    let mut picked = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        for c in 0..color::GROUP_COUNT {
+            let fill = color::group(c);
+            let (rect, response) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
+            let painter = ui.painter();
+            painter.circle_filled(rect.center(), 6.0, fill);
+            if c == current || response.hovered() {
+                painter.circle_stroke(rect.center(), 8.5, Stroke::new(1.5, color::text_mid()));
+            }
+            if response.clicked() {
+                picked = Some(c);
+            }
+        }
     });
-    egui::Modal::new(id).frame(frame)
+    picked
+}
+
+/// Where a branch is checked out, as the sidebar and the graph color it:
+/// green in the main folder, orange in a linked worktree.
+pub fn checkout_color(checked_out: CheckedOut) -> Color32 {
+    match checked_out {
+        CheckedOut::Main => color::accent(),
+        CheckedOut::Worktree => color::branch_dot_agent(),
+        CheckedOut::Nowhere => color::ahead_fg(),
+    }
+}
+
+/// A context menu entry that sends `action` and closes the menu.
+pub fn menu_item(
+    ui: &mut Ui,
+    label: &str,
+    enabled: bool,
+    actions: &mut Vec<Action>,
+    action: Action,
+) {
+    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+        actions.push(action);
+        ui.close();
+    }
 }

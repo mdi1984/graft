@@ -10,7 +10,7 @@ use graft_core::file_log::Blame;
 
 use super::diff_view;
 use super::widgets::{
-    ButtonKind, button, elided, empty_state, paint_galley_left, paint_row_bg, spinner,
+    ButtonKind, button, elided, empty_state, paint_galley_left, paint_row_bg, waiting,
 };
 use crate::project::{Action, FileHistoryMode, FileHistoryView, Project};
 use crate::theme::{self, color};
@@ -26,8 +26,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
     toolbar(ui, view, actions);
     let commits = match &view.commits {
         None => {
-            let rect = ui.available_rect_before_wrap();
-            spinner(ui, rect.center(), 9.0, color::text_weak());
+            waiting(ui);
             return;
         }
         Some(Err(e)) => {
@@ -58,14 +57,12 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
         FileHistoryMode::Changes => match &project.commit_diff {
             Some(diff) => diff_view::body(ui, diff, busy, false, wrap, None, actions),
             None => {
-                let rect = ui.available_rect_before_wrap();
-                spinner(ui, rect.center(), 9.0, color::text_weak());
+                waiting(ui);
             }
         },
         FileHistoryMode::Blame => match &view.blame {
             None => {
-                let rect = ui.available_rect_before_wrap();
-                spinner(ui, rect.center(), 9.0, color::text_weak());
+                waiting(ui);
             }
             Some(Err(e)) => empty_state(ui, "Could not annotate the file", e),
             Some(Ok(blame)) if blame.binary => {

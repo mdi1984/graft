@@ -311,7 +311,7 @@ pub enum CheckedOut {
 }
 
 impl CheckedOut {
-    fn of(wt: Option<&graft_core::Worktree>) -> Self {
+    pub fn of(wt: Option<&graft_core::Worktree>) -> Self {
         match wt {
             None => Self::Nowhere,
             Some(wt) if wt.is_main => Self::Main,

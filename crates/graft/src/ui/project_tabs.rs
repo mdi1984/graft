@@ -15,7 +15,7 @@ use egui::{
 
 use super::icons::Icon;
 use super::widgets::{
-    elided, elided_path, paint_galley_left, paint_icon_button, spinner, text_field,
+    color_swatches, elided, elided_path, paint_galley_left, paint_icon_button, spinner, text_field,
 };
 use super::window_frame;
 use crate::groups::{self, GroupId, Item};
@@ -54,7 +54,7 @@ pub struct TabInfo {
 pub struct GroupInfo {
     pub id: GroupId,
     pub name: String,
-    /// Index into `color::lanes()`.
+    /// Index into the group colors (`color::group`).
     pub color: usize,
     pub collapsed: bool,
 }
@@ -252,7 +252,7 @@ pub fn show(
             tab_ui.painter().hline(
                 rect.x_range(),
                 rect.bottom() - 1.0,
-                Stroke::new(2.0, group_color(g.color)),
+                Stroke::new(2.0, color::group(g.color)),
             );
         }
         let y = rect.center().y;
@@ -643,7 +643,7 @@ fn list_row(
     // The group's name, in its color, at the right end.
     let mut name_right = rect.right() - 10.0;
     if let Some(g) = group {
-        let fg = group_color(g.color);
+        let fg = color::group(g.color);
         let galley = elided(ui, &g.name, theme::small(), fg, 120.0);
         let x = name_right - galley.size().x;
         paint_galley_left(painter, x, top_y, galley, fg);
@@ -688,17 +688,11 @@ fn paint_tab(ui: &Ui, rect: Rect, selected: bool, hovered: bool) {
         painter.hline(
             rect.x_range(),
             rect.top() + 0.5,
-            Stroke::new(1.0, color::accent().gamma_multiply(0.6)),
+            Stroke::new(1.0, color::selected_outline()),
         );
     } else if hovered {
         painter.rect_filled(rect, radius, color::hover_row_bg());
     }
-}
-
-/// A group's color.
-pub fn group_color(index: usize) -> Color32 {
-    let lanes = color::lanes();
-    lanes[index % lanes.len()]
 }
 
 /// A group's label in the strip: its name on a tint of its color. Click to
@@ -715,7 +709,7 @@ struct Label {
 
 impl Label {
     fn new(ui: &Ui, group: &GroupInfo, tabs: &[TabInfo]) -> Self {
-        let color = group_color(group.color);
+        let color = color::group(group.color);
         let members = || tabs.iter().filter(|t| t.group == Some(group.id));
         // Collapsed, the label says how many tabs it hides.
         let text = if group.collapsed {
@@ -790,7 +784,7 @@ fn tab_menu(ui: &mut Ui, i: usize, tab: &TabInfo, groups: &[GroupInfo]) -> Optio
             ui.separator();
         }
         for g in others {
-            let name = RichText::new(&g.name).color(group_color(g.color));
+            let name = RichText::new(&g.name).color(color::group(g.color));
             if ui.button(name).clicked() {
                 action = Some(TabAction::SetGroup {
                     tab: i,
@@ -836,24 +830,4 @@ fn group_menu(ui: &mut Ui, id: GroupId, groups: &[GroupInfo]) -> Option<TabActio
         ui.close();
     }
     action
-}
-
-/// A row of the group colors; returns the one clicked.
-pub fn color_swatches(ui: &mut Ui, current: usize) -> Option<usize> {
-    let mut picked = None;
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        for (c, fill) in color::lanes().into_iter().enumerate() {
-            let (rect, response) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
-            let painter = ui.painter();
-            painter.circle_filled(rect.center(), 6.0, fill);
-            if c == current || response.hovered() {
-                painter.circle_stroke(rect.center(), 8.5, Stroke::new(1.5, color::text_mid()));
-            }
-            if response.clicked() {
-                picked = Some(c);
-            }
-        }
-    });
-    picked
 }

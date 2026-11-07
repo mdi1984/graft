@@ -413,7 +413,7 @@ impl GraftApp {
         let name = form.name.trim().to_owned();
         match form.target {
             GroupTarget::New(root) => {
-                let (id, _) = groups::next_id_and_color(&self.groups, color::lanes().len());
+                let (id, _) = groups::next_id_and_color(&self.groups, color::GROUP_COUNT);
                 self.groups.push(TabGroup {
                     id,
                     name,
@@ -538,7 +538,7 @@ impl GraftApp {
             TabAction::ToggleGroup(id) => self.toggle_group(id),
             TabAction::NewGroup(i) => {
                 if let Some(p) = self.projects.get(i) {
-                    let (_, color) = groups::next_id_and_color(&self.groups, color::lanes().len());
+                    let (_, color) = groups::next_id_and_color(&self.groups, color::GROUP_COUNT);
                     self.group_form = Some(GroupForm::new(
                         GroupTarget::New(p.root.clone()),
                         String::new(),

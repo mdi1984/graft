@@ -11,9 +11,10 @@ use graft_core::review::{Review, ReviewFile};
 use graft_core::status::Change;
 use graft_core::{RepoSnapshot, Worktree, same_path};
 
+use super::can;
 use super::diff_view::{self, Marks};
 use super::history::{paint_change_letter, paint_path};
-use super::widgets::{Badge, ButtonKind, ahead, button, empty_state, progress_bar, spinner};
+use super::widgets::{Badge, ButtonKind, ahead, button, empty_state, progress_bar, waiting};
 use crate::keys::Command;
 use crate::project::comments::{self, LineComment};
 use crate::project::{Action, Confirm, Project};
@@ -32,22 +33,12 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
         return;
     };
     let Some(view) = &project.review else {
-        spinner(
-            ui,
-            ui.available_rect_before_wrap().center(),
-            9.0,
-            color::text_weak(),
-        );
+        waiting(ui);
         return;
     };
     let review = match &view.data {
         None => {
-            spinner(
-                ui,
-                ui.available_rect_before_wrap().center(),
-                9.0,
-                color::text_weak(),
-            );
+            waiting(ui);
             return;
         }
         Some(Err(e)) => {
@@ -146,12 +137,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
             Some(&marks),
             actions,
         ),
-        None => spinner(
-            ui,
-            ui.available_rect_before_wrap().center(),
-            9.0,
-            color::text_weak(),
-        ),
+        None => waiting(ui),
     }
 }
 
@@ -190,34 +176,22 @@ fn header(
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             merge_button(ui, snap, wt, review, busy, actions);
             if button(ui, "Open in IDE", ButtonKind::Secondary, true)
-                .on_hover_text("Open this worktree in VS Code")
+                .on_hover_text(ide_tip(project, "this worktree"))
                 .clicked()
             {
                 actions.push(Action::OpenInIde(wt.path.clone()));
             }
-            let previewing = snap.preview.as_ref();
-            let showing_this =
-                previewing.is_some_and(|p| graft_core::same_path(&p.source, &wt.path));
-            let can_preview = !wt.is_main && (previewing.is_none() || showing_this) && !busy;
-            let label = if showing_this {
-                "Update preview"
-            } else {
-                "Preview in main folder"
+            let (can, preview) = can::preview(snap, Some(wt));
+            let label = match preview {
+                Some(Action::UpdatePreview) => "Update preview",
+                _ => "Preview in main folder",
             };
-            if button(ui, label, ButtonKind::Secondary, can_preview)
-                .on_hover_text(if previewing.is_some() && !showing_this {
-                    "The main folder already shows another preview. Restore it first."
-                } else {
-                    "Check out this worktree's state (uncommitted changes included) in the \
-                     main folder, e.g. to run it from there"
-                })
+            if button(ui, label, ButtonKind::Secondary, can.ok && !busy)
+                .on_hover_text(can.hint)
                 .clicked()
+                && let Some(action) = preview
             {
-                actions.push(if showing_this {
-                    Action::UpdatePreview
-                } else {
-                    Action::PreviewInMain(wt.path.clone())
-                });
+                actions.push(action);
             }
             if one_line {
                 progress(ui, review, viewed);
@@ -231,6 +205,14 @@ fn header(
                 progress(ui, review, viewed);
             });
         });
+    }
+}
+
+/// What "Open in IDE" runs, from the settings.
+fn ide_tip(project: &Project, what: &str) -> String {
+    match project.settings.ide_command.trim() {
+        "" => format!("Open {what} with its default program"),
+        command => format!("Open {what} with {command}"),
     }
 }
 
@@ -562,7 +544,9 @@ fn file_header(
                         actions.push(Action::ToggleViewed(path.clone()));
                     }
                     if file.change.change != Change::Deleted
-                        && button(ui, "Open in IDE", ButtonKind::Secondary, true).clicked()
+                        && button(ui, "Open in IDE", ButtonKind::Secondary, true)
+                            .on_hover_text(ide_tip(project, "this file"))
+                            .clicked()
                     {
                         actions.push(Action::OpenInIde(wt.path.join(&path)));
                     }

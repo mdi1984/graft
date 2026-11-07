@@ -8,17 +8,9 @@ use egui::{Color32, Frame, Margin, Panel, RichText, ScrollArea, Stroke, TextEdit
 use graft_core::Worktree;
 use graft_core::conflicts::{ConflictFile, InProgress, Kind, Resolution, Segment};
 
-use super::widgets::{ButtonKind, button, empty_state, spinner};
+use super::widgets::{ButtonKind, button, empty_state, waiting};
 use crate::project::{Action, ConflictView, Project};
 use crate::theme::{self, RADIUS, color};
-
-fn ours_color() -> Color32 {
-    color::ahead_fg()
-}
-
-fn theirs_color() -> Color32 {
-    color::lanes()[3]
-}
 
 /// Lines of clean context shown around each conflict.
 const CONTEXT: usize = 3;
@@ -104,8 +96,7 @@ pub fn resolver(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
     };
     let file = match &view.file {
         None => {
-            let rect = ui.available_rect_before_wrap();
-            spinner(ui, rect.center(), 9.0, color::text_weak());
+            waiting(ui);
             return;
         }
         Some(Err(e)) => {
@@ -256,7 +247,7 @@ fn whole_file(
     ui.vertical_centered(|ui| {
         ui.label(
             RichText::new("Whole-file conflict")
-                .font(theme::semibold(15.0))
+                .font(theme::title())
                 .color(color::text_mid()),
         );
         ui.add_space(4.0);
@@ -370,18 +361,18 @@ fn cards(
                 // Side by side when each column has room for a line of code,
                 // stacked otherwise.
                 if ui.available_width() < columns as f32 * 300.0 {
-                    side(ui, ours_name, ours, ours_color());
+                    side(ui, ours_name, ours, color::ours());
                     if columns == 3 {
                         side(ui, "Base", base, color::text_faint());
                     }
-                    side(ui, theirs_name, theirs, theirs_color());
+                    side(ui, theirs_name, theirs, color::theirs());
                 } else {
                     ui.columns(columns, |cols| {
-                        side(&mut cols[0], ours_name, ours, ours_color());
+                        side(&mut cols[0], ours_name, ours, color::ours());
                         if columns == 3 {
                             side(&mut cols[1], "Base", base, color::text_faint());
                         }
-                        side(&mut cols[columns - 1], theirs_name, theirs, theirs_color());
+                        side(&mut cols[columns - 1], theirs_name, theirs, color::theirs());
                     });
                 }
                 if !after.is_empty() {

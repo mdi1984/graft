@@ -1,9 +1,10 @@
 //! Small dialogs: new branch, rename branch, new tag, reset.
 
-use egui::{Align, Id, Key, Layout, RichText, Ui};
+use egui::{RichText, Ui};
 use graft_core::refs::ResetMode;
 
-use super::widgets::{ButtonKind, button, spinner, text_field};
+use super::widgets::dialog::{self, footer};
+use super::widgets::{error_label, field_label, note, text_field, title};
 use crate::project::{Action, Dialog, DialogKind};
 use crate::theme::{self, color};
 
@@ -11,9 +12,7 @@ const WIDTH: f32 = 440.0;
 
 pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Vec<Action>) {
     let busy = dialog.submitting;
-    let response = super::widgets::modal(ctx, Id::unique("ref-dialog")).show(ctx, |ui| {
-        ui.set_width(WIDTH);
-        ui.spacing_mut().item_spacing.y = 6.0;
+    let shown = dialog::show(ctx, "ref-dialog", WIDTH, busy, |ui| {
         let focus = std::mem::take(&mut dialog.focus);
         let before = format!("{:?}", dialog.kind);
         let confirm_label = match &mut dialog.kind {
@@ -242,52 +241,16 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Vec<Action>)
             dialog.error = None;
         }
         if let Some(error) = &dialog.error {
-            ui.add(egui::Label::new(RichText::new(error).color(color::removed())).wrap());
+            error_label(ui, error);
         }
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let enter = ui.input(|i| i.key_pressed(Key::Enter));
-                if (button(ui, confirm_label, ButtonKind::Primary, !busy).clicked() || enter)
-                    && !busy
-                {
-                    actions.push(Action::SubmitDialog);
-                }
-                if button(ui, "Cancel", ButtonKind::Secondary, !busy).clicked() {
-                    actions.push(Action::CloseDialog);
-                }
-                if busy {
-                    let (rect, _) =
-                        ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-                    spinner(ui, rect.center(), 5.0, color::text_weak());
-                }
-            });
-        });
+        footer(ui, confirm_label, true, busy, None)
     });
-    if !busy && (response.should_close() || ctx.input(|i| i.key_pressed(Key::Escape))) {
+    if shown.inner.primary || shown.enter {
+        actions.push(Action::SubmitDialog);
+    }
+    if shown.inner.cancel || shown.cancel {
         actions.push(Action::CloseDialog);
     }
-}
-
-fn title(ui: &mut Ui, text: &str) {
-    ui.label(
-        RichText::new(text)
-            .font(theme::semibold(15.0))
-            .color(color::text()),
-    );
-}
-
-fn note(ui: &mut Ui, text: &str) {
-    ui.add(egui::Label::new(RichText::new(text).color(color::text_weak())).wrap());
-}
-
-fn field_label(ui: &mut Ui, text: &str) {
-    ui.add_space(2.0);
-    ui.label(
-        RichText::new(text)
-            .color(color::text_mid())
-            .size(theme::SMALL_SIZE),
-    );
 }
 
 fn choice(ui: &mut Ui, value: &mut ResetMode, option: ResetMode, label: &str, detail: &str) {

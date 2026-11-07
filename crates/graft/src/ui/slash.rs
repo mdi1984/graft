@@ -1,11 +1,12 @@
 //! The Slash dialog: a preview of the branches and worktrees that can go,
 //! with checkboxes. Nothing is deleted until "Slash N" is clicked.
 
-use egui::{Align, Id, Key, Layout, RichText, ScrollArea, Ui};
+use egui::{Align, Layout, RichText, ScrollArea, Ui};
 use graft_core::repo::Progress;
 use graft_core::slash::{Candidate, Plan, Reason};
 
-use super::widgets::{ButtonKind, button, elided_path, progress_bar, spinner};
+use super::widgets::dialog;
+use super::widgets::{ButtonKind, button, elided_path, inline_spinner, note, progress_bar, title};
 use crate::project::{Action, SlashView, SlashedBranch};
 use crate::theme::{self, color};
 
@@ -18,27 +19,18 @@ pub fn show(
     progress: Option<Progress>,
     actions: &mut Vec<Action>,
 ) {
-    let response = super::widgets::modal(ctx, Id::unique("slash-modal")).show(ctx, |ui| {
-        ui.set_width(WIDTH);
-        ui.spacing_mut().item_spacing.y = 6.0;
-        ui.label(
-            RichText::new("Slash")
-                .font(theme::semibold(15.0))
-                .color(color::text()),
-        );
-        wrapped(
+    let shown = dialog::show(ctx, "slash-modal", WIDTH, view.running, |ui| {
+        title(ui, "Slash");
+        note(
             ui,
             "Clean up branches and worktrees you are done with. Nothing is deleted until you confirm.",
-            color::text_weak(),
         );
         ui.add_space(4.0);
 
         match &view.plan {
             None => {
                 ui.horizontal(|ui| {
-                    let (rect, _) =
-                        ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-                    spinner(ui, rect.center(), 5.0, color::text_weak());
+                    inline_spinner(ui);
                     let line = progress
                         .as_ref()
                         .map(|p| p.line.clone())
@@ -64,8 +56,7 @@ pub fn show(
             Some(Ok(plan)) => plan_ui(ui, view, plan, slashed, progress.as_ref(), actions),
         }
     });
-    let running = view.running;
-    if !running && (response.should_close() || ctx.input(|i| i.key_pressed(Key::Escape))) {
+    if shown.cancel {
         actions.push(Action::CloseSlash);
     }
 }
