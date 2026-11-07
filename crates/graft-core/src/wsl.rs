@@ -256,6 +256,7 @@ mod tests {
         let text = "  NAME                   STATE           VERSION\r\n\
                     * Ubuntu-24.04           Running         2\r\n  \
                     rancher-desktop-data   Stopped         2\r\n  \
+                    docker-desktop         Stopped         2\r\n  \
                     Debian                 Stopped         2\r\n";
         assert_eq!(parse_list(text), ["Ubuntu-24.04", "Debian"]);
         let german = "  NAME            STATUS            VERSION\r\n\
@@ -270,13 +271,6 @@ mod tests {
         let none = "Windows Subsystem for Linux has no installed distributions.\r\n\
                     Use 'wsl.exe --list --online' to list available distributions.";
         assert!(parse_list(none).is_empty());
-    }
-
-    #[test]
-    fn real_distros() {
-        // Whatever is installed here: never Docker's or Rancher's own.
-        let list = distros();
-        assert!(!list.iter().any(|d| d.starts_with("rancher-desktop")));
     }
 
     #[test]

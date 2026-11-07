@@ -168,6 +168,30 @@ mod tests {
         assert_eq!(entries[0].seq, 3);
         assert_eq!(entries.last().unwrap().seq, MAX_ENTRIES as u64 + 2);
         assert_eq!(console.next_seq(), MAX_ENTRIES as u64 + 3);
+
+        // A failure after the log is full is still found by the UI's
+        // "failed since I last looked" check.
+        let seen = console.next_seq();
+        let failed = Output {
+            status: 128,
+            stdout: Vec::new(),
+            stderr: b"fatal: boom".to_vec(),
+        };
+        console.push(Entry::finished(
+            Path::new("."),
+            &[],
+            128,
+            Duration::ZERO,
+            &failed,
+        ));
+        let new_failures: Vec<Entry> = console
+            .snapshot()
+            .into_iter()
+            .filter(|e| e.seq >= seen && e.failed())
+            .collect();
+        assert_eq!(new_failures.len(), 1);
+        assert_eq!(new_failures[0].stderr, "fatal: boom");
+        assert_eq!(console.snapshot().len(), MAX_ENTRIES);
     }
 
     #[test]

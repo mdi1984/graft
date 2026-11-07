@@ -2,6 +2,7 @@
 //! against real throwaway repositories in the default distro. Skipped where
 //! no distro with git is installed (e.g. CI).
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -16,11 +17,30 @@ use graft_core::{CancelToken, Console, Git, conflicts, history, ops, preview, re
 /// A temporary folder inside the distro, removed on drop.
 struct Distro {
     name: String,
+    wsl: Wsl,
     tmp: String,
 }
 
+/// Say that `test` did not run, past the test harness's output capture (so
+/// it shows in a normal `cargo test` run), and let it pass.
+fn skipped(test: &str) {
+    let _ = writeln!(
+        std::io::stderr(),
+        "skipped: {test} needs a WSL distro with git, none found"
+    );
+}
+
 impl Distro {
-    fn start() -> Option<Self> {
+    /// The default distro, or `None` (and a visible skip) without one.
+    fn start(test: &str) -> Option<Self> {
+        let distro = Self::find();
+        if distro.is_none() {
+            skipped(test);
+        }
+        distro
+    }
+
+    fn find() -> Option<Self> {
         let out = Command::new("wsl.exe")
             .args([
                 "--exec",
@@ -32,10 +52,10 @@ impl Distro {
             .ok()?;
         let name = String::from_utf8_lossy(&out.stdout).trim().to_owned();
         if !out.status.success() || name.is_empty() {
-            eprintln!("no WSL distro with git; skipping");
             return None;
         }
         let mut distro = Self {
+            wsl: Wsl::new(&name),
             name,
             tmp: String::new(),
         };
@@ -60,8 +80,7 @@ impl Distro {
 
     /// The Windows path of `rel` inside the temporary folder.
     fn path(&self, rel: &str) -> PathBuf {
-        let wsl = Wsl::of(Path::new(&format!(r"\\wsl.localhost\{}\", self.name))).unwrap();
-        wsl.to_windows(&format!("{}/{rel}", self.tmp))
+        self.wsl.to_windows(&format!("{}/{rel}", self.tmp))
     }
 }
 
@@ -87,7 +106,9 @@ fn repo_with_worktree(d: &Distro) {
 
 #[test]
 fn open_status_worktrees_and_history() {
-    let Some(d) = Distro::start() else { return };
+    let Some(d) = Distro::start("open_status_worktrees_and_history") else {
+        return;
+    };
     repo_with_worktree(&d);
     let app = d.path("app");
     let feature = d.path("app.worktrees/feature");
@@ -134,7 +155,9 @@ fn open_status_worktrees_and_history() {
 
 #[test]
 fn worktrees_clone_and_conflicts() {
-    let Some(d) = Distro::start() else { return };
+    let Some(d) = Distro::start("worktrees_clone_and_conflicts") else {
+        return;
+    };
     repo_with_worktree(&d);
     let app = d.path("app");
     let feature = d.path("app.worktrees/feature");
@@ -151,15 +174,18 @@ fn worktrees_clone_and_conflicts() {
     assert!(path.join("readme.md").exists());
     let snap = snapshot::load(&git).unwrap();
     assert!(snap.worktrees.iter().any(|w| w.path == path));
-    worktree::set_locked(&git, &path, true).unwrap();
-    assert!(
-        snapshot::load(&git)
-            .unwrap()
-            .worktrees
+    let locked = || {
+        let snap = snapshot::load(&git).unwrap();
+        snap.worktrees
             .iter()
-            .any(|w| w.locked)
-    );
+            .find(|w| w.path == path)
+            .unwrap()
+            .locked
+    };
+    worktree::set_locked(&git, &path, true).unwrap();
+    assert!(locked());
     worktree::set_locked(&git, &path, false).unwrap();
+    assert!(!locked());
     worktree::remove(&git, &path, false).unwrap();
     assert!(!path.exists());
 
@@ -195,7 +221,9 @@ fn worktrees_clone_and_conflicts() {
 
 #[test]
 fn preview_in_main() {
-    let Some(d) = Distro::start() else { return };
+    let Some(d) = Distro::start("preview_in_main") else {
+        return;
+    };
     repo_with_worktree(&d);
     let app = d.path("app");
     let feature = d.path("app.worktrees/feature");
@@ -216,9 +244,11 @@ fn preview_in_main() {
 
 #[test]
 fn distros_and_home_folders() {
-    let Some(d) = Distro::start() else { return };
+    let Some(d) = Distro::start("distros_and_home_folders") else {
+        return;
+    };
     assert!(graft_core::wsl::distros().contains(&d.name));
-    let wsl = Wsl::new(&d.name);
+    let wsl = &d.wsl;
     let home = wsl.home().expect("home folder");
     assert_eq!(home, d.sh("echo $HOME"));
     // `~/x` typed on the start page is the folder git sees as `$HOME/x`.
@@ -228,7 +258,9 @@ fn distros_and_home_folders() {
 
 #[test]
 fn changes_inside_wsl_are_noticed() {
-    let Some(d) = Distro::start() else { return };
+    let Some(d) = Distro::start("changes_inside_wsl_are_noticed") else {
+        return;
+    };
     repo_with_worktree(&d);
     let changes = Arc::new(AtomicUsize::new(0));
     let seen = changes.clone();
@@ -249,8 +281,9 @@ fn changes_inside_wsl_are_noticed() {
             std::thread::sleep(Duration::from_millis(200));
         }
     };
-    std::thread::sleep(Duration::from_secs(3));
-    changes.store(0, Ordering::SeqCst);
+    // The first check always refreshes once (it has nothing to compare
+    // with yet); every change after it must be noticed on its own.
+    wait("first check");
     d.sh("printf 'x\\n' > app.worktrees/feature/new.txt");
     wait("new file in the linked worktree");
     d.sh("cd app && git branch other");

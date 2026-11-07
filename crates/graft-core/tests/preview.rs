@@ -1,40 +1,24 @@
 //! Preview in main against a real repository with a second worktree.
 
-use std::path::Path;
-use std::process::Command;
+mod common;
 
+use std::path::{Path, PathBuf};
+
+use common::sh;
+use graft_core::Git;
 use graft_core::preview::{self, Restore};
 use graft_core::worktree::{self, Start};
-use graft_core::{Console, Git};
-
-fn sh(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("git runs");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_owned()
-}
 
 #[test]
 fn start_update_and_restore() {
     let tmp = tempfile::tempdir().unwrap();
-    let main = tmp.path().join("app");
-    std::fs::create_dir(&main).unwrap();
-    sh(&main, &["init", "-q", "-b", "main"]);
-    sh(&main, &["config", "user.name", "Ada"]);
-    sh(&main, &["config", "user.email", "ada@example.com"]);
+    let main = common::init(&tmp.path().join("app"));
     sh(&main, &["config", "core.autocrlf", "true"]);
     std::fs::write(main.join("a.txt"), "one\r\ntwo\r\n").unwrap();
     sh(&main, &["add", "."]);
     sh(&main, &["commit", "-q", "-m", "a"]);
 
-    let git = Git::new(&main, Console::default());
+    let git = common::git(&main);
     let agent = tmp.path().join("agent");
     worktree::add(
         &git,
@@ -91,4 +75,92 @@ fn start_update_and_restore() {
     assert!(!main.join("d.txt").exists());
     assert!(!main.join("b.txt").exists());
     assert_eq!(preview::active(&main), None);
+}
+
+/// Main with one commit and a worktree `agent` on its own branch.
+fn main_and_agent(tmp: &Path, gitignore: &str) -> (Git, PathBuf) {
+    let main = common::init(&tmp.join("app"));
+    common::commit(&main, ".gitignore", gitignore, "init");
+    let git = common::git(&main);
+    let agent = tmp.join("agent");
+    worktree::add(
+        &git,
+        &agent,
+        &Start::NewBranch {
+            name: "agent/x".into(),
+            base: "main".into(),
+        },
+    )
+    .unwrap();
+    (git, agent)
+}
+
+/// The marker lives in `.git`, where a repository's tooling can write: paths
+/// in it that point outside main are never deleted by Restore main.
+#[test]
+fn restore_never_deletes_files_outside_main() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (git, agent) = main_and_agent(tmp.path(), "");
+    std::fs::write(agent.join("new.txt"), "agent work\n").unwrap();
+    preview::start(&git, &git.at(&agent)).unwrap();
+
+    let victim = tmp.path().join("victim.txt");
+    std::fs::write(&victim, "keep\n").unwrap();
+    let marker = git.cwd().join(".git").join("graft-preview");
+    let mut text = std::fs::read_to_string(&marker).unwrap();
+    text.push_str("added ../victim.txt\n");
+    text.push_str(&format!("added {}\n", victim.display()));
+    std::fs::write(&marker, text).unwrap();
+    let shown = preview::active(git.cwd()).expect("still a preview");
+    assert_eq!(shown.added, ["new.txt"]);
+
+    preview::restore_main(&git).unwrap();
+    assert!(victim.exists());
+    assert!(!git.cwd().join("new.txt").exists());
+    assert_eq!(sh(git.cwd(), &["status", "--porcelain"]), "");
+}
+
+/// A preview whose changes cannot be applied in main: main has an ignored
+/// `local.cfg`; the agent un-ignores it and makes its own, so applying that
+/// new file in main fails. Returns main's path.
+fn failed_preview(tmp: &Path) -> PathBuf {
+    let (git, agent) = main_and_agent(tmp, "local.cfg\n");
+    let main = git.cwd().to_path_buf();
+    std::fs::write(main.join("local.cfg"), "mine\n").unwrap();
+    std::fs::write(agent.join(".gitignore"), "").unwrap();
+    std::fs::write(agent.join("local.cfg"), "agent\n").unwrap();
+
+    let err = preview::start(&git, &git.at(&agent)).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("could not be applied"),
+        "{err:#}"
+    );
+    main
+}
+
+/// When the worktree's changes cannot be applied, main goes back to its
+/// branch and shows no preview.
+#[test]
+fn a_failed_apply_puts_main_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main = failed_preview(tmp.path());
+    assert_eq!(preview::active(&main), None);
+    assert_eq!(sh(&main, &["symbolic-ref", "--short", "HEAD"]), "main");
+    assert_eq!(sh(&main, &["status", "--porcelain"]), "");
+}
+
+/// Going back must not delete the user's own ignored file that was in the
+/// way: the rollback removes every file the preview meant to add, also
+/// ones it never wrote.
+#[test]
+#[ignore = "known bug: a failed preview's rollback deletes main's ignored file in the way"]
+fn a_failed_apply_keeps_main_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main = failed_preview(tmp.path());
+    assert_eq!(
+        std::fs::read_to_string(main.join("local.cfg"))
+            .ok()
+            .as_deref(),
+        Some("mine\n")
+    );
 }

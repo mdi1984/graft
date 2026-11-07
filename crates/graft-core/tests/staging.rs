@@ -1,44 +1,29 @@
 //! Staging, unstaging and discarding lines, committing and pushing, against
 //! real throwaway repositories (with core.autocrlf=true, as on Windows).
 
-use std::path::Path;
-use std::process::Command;
+mod common;
 
+use common::{rev, sh};
 use graft_core::diff::{self, Kind, Source};
 use graft_core::ops::{self, LineOp};
-use graft_core::{CancelToken, Console, Git, remote, status};
-
-fn sh(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .env("GIT_AUTHOR_NAME", "Ada")
-        .env("GIT_AUTHOR_EMAIL", "ada@example.com")
-        .env("GIT_COMMITTER_NAME", "Ada")
-        .env("GIT_COMMITTER_EMAIL", "ada@example.com")
-        .output()
-        .expect("git runs");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
+use graft_core::{CancelToken, Git, remote, status};
 
 fn repo() -> (tempfile::TempDir, Git) {
     let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path().join("r");
-    std::fs::create_dir(&dir).unwrap();
-    sh(&dir, &["init", "-q", "-b", "main"]);
+    let dir = common::init(&tmp.path().join("r"));
     sh(&dir, &["config", "core.autocrlf", "true"]);
-    sh(&dir, &["config", "user.name", "Ada"]);
-    sh(&dir, &["config", "user.email", "ada@example.com"]);
-    std::fs::write(dir.join("a.txt"), "one\r\ntwo\r\nthree\r\nfour\r\nfive\r\n").unwrap();
-    sh(&dir, &["add", "a.txt"]);
-    sh(&dir, &["commit", "-q", "-m", "init"]);
-    let git = Git::new(&dir, Console::default());
-    (tmp, git)
+    common::commit(
+        &dir,
+        "a.txt",
+        "one
+two
+three
+four
+five
+",
+        "init",
+    );
+    (tmp, common::git(&dir))
 }
 
 /// Indices of the changed lines whose text is in `texts`.
@@ -110,7 +95,7 @@ fn untracked_partial_stage_and_whole_files() {
     )
     .unwrap();
     let blob = sh(&dir, &["show", ":new.txt"]);
-    assert_eq!(blob, "l1\nl3\n");
+    assert_eq!(blob, "l1\nl3", "only the picked lines, stored with LF");
 
     // Whole-file unstage, stage and discard.
     ops::unstage_paths(&git, &["new.txt".into()]).unwrap();
@@ -144,29 +129,44 @@ fn commit_amend_and_push() {
         Some("Add b\n\nWith a body.")
     );
     ops::commit(&git, "Add b, reworded", true).unwrap();
-    assert_eq!(sh(&dir, &["log", "--format=%s"]), "Add b, reworded\ninit\n");
+    assert_eq!(sh(&dir, &["log", "--format=%s"]), "Add b, reworded\ninit");
 
     // Push a branch without upstream to a bare "origin".
-    let bare = tmp.path().join("origin.git");
-    sh(
-        tmp.path(),
-        &["init", "-q", "--bare", bare.to_str().unwrap()],
-    );
+    let bare = common::init_bare(&tmp.path().join("origin.git"));
     sh(&dir, &["remote", "add", "origin", bare.to_str().unwrap()]);
     remote::push(&git, &CancelToken::default(), |_| {}).unwrap();
     assert_eq!(
-        sh(&dir, &["rev-parse", "--abbrev-ref", "@{u}"]).trim(),
+        sh(&dir, &["rev-parse", "--abbrev-ref", "@{u}"]),
         "origin/main"
     );
+    assert_eq!(rev(&bare, "main"), rev(&dir, "HEAD"));
+
+    // Someone else pushes a commit: fetch brings it to origin/main only,
+    // pull then moves main to it.
+    let other = common::clone(&bare, &tmp.path().join("other"));
+    common::commit(
+        &other,
+        "c.txt",
+        "c
+",
+        "Add c elsewhere",
+    );
+    sh(&other, &["push", "-q", "origin", "main"]);
+    let theirs = rev(&other, "HEAD");
+    let ours = rev(&dir, "HEAD");
     remote::fetch(&git, false, &CancelToken::default(), |_| {}).unwrap();
+    assert_eq!(rev(&dir, "origin/main"), theirs);
+    assert_eq!(rev(&dir, "HEAD"), ours);
     remote::pull(&git, &CancelToken::default(), |_| {}).unwrap();
+    assert_eq!(rev(&dir, "HEAD"), theirs);
+    assert!(dir.join("c.txt").exists());
 }
 
 #[test]
 fn commit_diff_and_root_commit() {
     let (_tmp, git) = repo();
-    let head = sh(git.cwd(), &["rev-parse", "HEAD"]);
-    let id = graft_core::Oid::from_hex(head.trim().as_bytes()).unwrap();
+    let head = rev(git.cwd(), "HEAD");
+    let id = graft_core::Oid::from_hex(head.as_bytes()).unwrap();
     let d = diff::load(&git, &Source::Commit(id), "a.txt").unwrap();
     assert!(d.new_file);
     assert_eq!(d.added(), 5);
@@ -261,8 +261,8 @@ fn expanded_diffs_stage_unstage_and_discard() {
 
     // Commits and new files.
     sh(&dir, &["commit", "-q", "-am", "eleven"]);
-    let head = sh(&dir, &["rev-parse", "HEAD"]);
-    let id = graft_core::Oid::from_hex(head.trim().as_bytes()).unwrap();
+    let head = rev(&dir, "HEAD");
+    let id = graft_core::Oid::from_hex(head.as_bytes()).unwrap();
     let (d, gaps) = diff::load_expanded(
         &git,
         &Source::Commit(id),

@@ -1,44 +1,24 @@
 //! Slash against a real repository with a remote.
 
-use std::path::Path;
-use std::process::Command;
+mod common;
 
+use std::path::Path;
+
+use common::sh;
 use graft_core::slash::{self, Reason, default_protected};
 use graft_core::worktree::{self, Start};
-use graft_core::{CancelToken, Console, Git, snapshot};
-
-fn sh(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("git runs");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
+use graft_core::{CancelToken, Git, snapshot};
 
 fn commit(dir: &Path, file: &str, text: &str) {
-    std::fs::write(dir.join(file), text).unwrap();
-    sh(dir, &["add", "."]);
-    sh(dir, &["commit", "-q", "-m", file]);
+    common::commit(dir, file, text, file);
 }
 
 #[test]
 fn scan_execute_and_restore() {
     let tmp = tempfile::tempdir().unwrap();
     let remote = tmp.path().join("remote.git");
-    let main = tmp.path().join("app");
-    std::fs::create_dir(&main).unwrap();
-    sh(
-        tmp.path(),
-        &["init", "-q", "--bare", "-b", "main", "remote.git"],
-    );
-    sh(&main, &["init", "-q", "-b", "main"]);
-    sh(&main, &["config", "user.name", "Ada"]);
-    sh(&main, &["config", "user.email", "ada@example.com"]);
+    common::init_bare(&remote);
+    let main = common::init(&tmp.path().join("app"));
     sh(
         &main,
         &["remote", "add", "origin", remote.to_str().unwrap()],
@@ -59,7 +39,7 @@ fn scan_execute_and_restore() {
     sh(&main, &["branch", "merged-clean"]);
     sh(&main, &["branch", "merged-dirty"]);
     sh(&main, &["branch", "release/1"]);
-    let git = Git::new(&main, Console::default());
+    let git = common::git(&main);
     let clean = tmp.path().join("wt-clean");
     let dirty = tmp.path().join("wt-dirty");
     let gone_folder = tmp.path().join("wt-missing");
@@ -153,14 +133,10 @@ fn deep_ignored_files(worktree: &Path) {
 }
 
 fn repo_with_merged_branch(tmp: &Path) -> (Git, std::path::PathBuf) {
-    let main = tmp.join("app");
-    std::fs::create_dir(&main).unwrap();
-    sh(&main, &["init", "-q", "-b", "main"]);
-    sh(&main, &["config", "user.name", "Ada"]);
-    sh(&main, &["config", "user.email", "ada@example.com"]);
+    let main = common::init(&tmp.join("app"));
     commit(&main, ".gitignore", "node_modules/\n");
     sh(&main, &["branch", "merged-deep"]);
-    let git = Git::new(&main, Console::default());
+    let git = common::git(&main);
     let wt = tmp.join("wt-deep");
     worktree::add(&git, &wt, &Start::Existing("merged-deep".into())).unwrap();
     deep_ignored_files(&wt);
@@ -220,16 +196,12 @@ fn a_worktree_that_cannot_be_removed_keeps_its_branch() {
 }
 
 fn repo_with_merged_branches(tmp: &Path, count: usize) -> (Git, Vec<slash::Candidate>) {
-    let main = tmp.join("app");
-    std::fs::create_dir(&main).unwrap();
-    sh(&main, &["init", "-q", "-b", "main"]);
-    sh(&main, &["config", "user.name", "Ada"]);
-    sh(&main, &["config", "user.email", "ada@example.com"]);
+    let main = common::init(&tmp.join("app"));
     commit(&main, "a.txt", "a\n");
     for i in 0..count {
         sh(&main, &["branch", &format!("done/{i}")]);
     }
-    let git = Git::new(&main, Console::default());
+    let git = common::git(&main);
     let snap = snapshot::load(&git).unwrap();
     let mut chosen = slash::plan(&git, &snap, &default_protected())
         .unwrap()

@@ -1,32 +1,16 @@
 //! Review against the merge-base, with uncommitted and untracked files.
 
-use std::path::Path;
-use std::process::Command;
+mod common;
 
+use common::sh;
 use graft_core::diff::{self, Source};
+use graft_core::review;
 use graft_core::status::Change;
-use graft_core::{Console, Git, review};
-
-fn sh(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("git runs");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
 
 #[test]
 fn branch_changes_since_fork_including_uncommitted() {
     let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path();
-    sh(dir, &["init", "-q", "-b", "main"]);
-    sh(dir, &["config", "user.name", "Ada"]);
-    sh(dir, &["config", "user.email", "ada@example.com"]);
+    let dir = &common::init(&tmp.path().join("r"));
     std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
     std::fs::write(dir.join("c.txt"), "keep\n").unwrap();
     std::fs::write(dir.join("gone.txt"), "bye\n").unwrap();
@@ -48,7 +32,7 @@ fn branch_changes_since_fork_including_uncommitted() {
     std::fs::write(dir.join("c.txt"), "keep\nmore\n").unwrap();
     std::fs::write(dir.join("d.txt"), "draft\nnotes\n").unwrap();
 
-    let git = Git::new(dir, Console::default());
+    let git = common::git(dir);
     let r = review::load(&git, "main").unwrap();
     assert_eq!(r.commits, 1);
     let paths: Vec<&str> = r.files.iter().map(|f| f.change.path.as_str()).collect();
@@ -81,14 +65,11 @@ fn branch_changes_since_fork_including_uncommitted() {
 #[test]
 fn review_base_follows_the_remote_default_branch() {
     let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path();
-    sh(dir, &["init", "-q", "-b", "main"]);
-    sh(dir, &["config", "user.name", "Ada"]);
-    sh(dir, &["config", "user.email", "ada@example.com"]);
+    let dir = &common::init(&tmp.path().join("r"));
     sh(dir, &["commit", "-q", "--allow-empty", "-m", "base"]);
     sh(dir, &["branch", "development"]);
     sh(dir, &["switch", "-q", "-c", "feature"]);
-    let git = Git::new(dir, Console::default());
+    let git = common::git(dir);
     let base = |current: &str| {
         let snap = graft_core::snapshot::load(&git).unwrap();
         review::default_base(&snap, Some(current))

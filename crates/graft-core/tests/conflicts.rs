@@ -1,31 +1,17 @@
 //! Merging with conflicts and resolving them, against a real throwaway repository.
 
+mod common;
+
 use std::path::Path;
-use std::process::Command;
 
+use common::sh;
 use graft_core::conflicts::{self, Kind, Resolution};
-use graft_core::{Console, Git, refs, status};
-
-fn sh(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("git runs");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
+use graft_core::{refs, status};
 
 /// main and topic both change line 2 of f.txt; topic also deletes gone.txt
 /// which main changes.
 fn diverged_repo(dir: &Path) {
-    sh(dir, &["init", "-q", "-b", "main"]);
-    sh(dir, &["config", "user.name", "Ada"]);
-    sh(dir, &["config", "user.email", "ada@example.com"]);
-    sh(dir, &["config", "core.autocrlf", "false"]);
+    common::init(dir);
     std::fs::write(dir.join("f.txt"), "a\nb\nc\n").unwrap();
     std::fs::write(dir.join("gone.txt"), "x\n").unwrap();
     std::fs::write(dir.join("lock.json"), "{\"v\": 1}\n").unwrap();
@@ -48,7 +34,7 @@ fn merge_resolve_and_continue() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     diverged_repo(dir);
-    let git = Git::new(dir, Console::default());
+    let git = common::git(dir);
 
     assert_eq!(conflicts::in_progress(dir), None);
     assert!(conflicts::merge(&git, "topic", false).unwrap());
@@ -97,7 +83,7 @@ fn markers_block_mark_resolved_and_abort_restores() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     diverged_repo(dir);
-    let git = Git::new(dir, Console::default());
+    let git = common::git(dir);
     let before = git.read(["rev-parse", "HEAD"]).unwrap();
 
     assert!(conflicts::merge(&git, "topic", true).unwrap());
@@ -120,12 +106,12 @@ fn cherry_pick_stops_on_conflict() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     diverged_repo(dir);
-    let git = Git::new(dir, Console::default());
+    let git = common::git(dir);
 
     assert!(refs::cherry_pick(&git, "topic").unwrap());
     let progress = conflicts::in_progress(dir).unwrap();
     assert_eq!(progress.kind, Kind::CherryPick);
-    assert!(progress.title.contains("topic work"), "{}", progress.title);
+    assert_eq!(progress.title, "Cherry-picking: topic work");
     conflicts::abort(&git, Kind::CherryPick).unwrap();
     assert_eq!(conflicts::in_progress(dir), None);
 
@@ -133,4 +119,56 @@ fn cherry_pick_stops_on_conflict() {
     assert!(!conflicts::merge(&git, "main", false).unwrap());
     // An unknown branch is an error, not a conflict.
     assert!(conflicts::merge(&git, "nope", false).is_err());
+}
+
+/// A rebase stops at the conflicting commit; once resolved, continue
+/// finishes it and the branch sits on top of the other one.
+#[test]
+fn rebase_stops_resolve_and_continue() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    diverged_repo(dir);
+    let git = common::git(dir);
+    sh(dir, &["switch", "-q", "topic"]);
+    let main = common::rev(dir, "main");
+
+    assert!(conflicts::rebase(&git, "main").unwrap());
+    let progress = conflicts::in_progress(dir).expect("rebase in progress");
+    assert_eq!(progress.kind, Kind::Rebase);
+    assert_eq!(progress.title, "Rebasing topic");
+    // Continuing with conflicts left is refused and the rebase stays.
+    assert!(conflicts::continue_op(&git, Kind::Rebase).is_err());
+    assert!(conflicts::in_progress(dir).is_some());
+
+    for path in ["f.txt", "gone.txt", "lock.json"] {
+        let file = conflicts::load(&git, path).unwrap();
+        // In a rebase "theirs" is the commit being replayed (topic's).
+        conflicts::take_side(&git, &file, false).unwrap();
+    }
+    assert!(!conflicts::continue_op(&git, Kind::Rebase).unwrap());
+    assert_eq!(conflicts::in_progress(dir), None);
+    assert_eq!(sh(dir, &["symbolic-ref", "--short", "HEAD"]), "topic");
+    assert_eq!(common::rev(dir, "HEAD~1"), main);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+        "a\nB-topic\nc\n"
+    );
+    assert!(!dir.join("gone.txt").exists());
+}
+
+#[test]
+fn rebase_abort_puts_the_branch_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    diverged_repo(dir);
+    let git = common::git(dir);
+    sh(dir, &["switch", "-q", "topic"]);
+    let before = common::rev(dir, "HEAD");
+
+    assert!(conflicts::rebase(&git, "main").unwrap());
+    conflicts::abort(&git, Kind::Rebase).unwrap();
+    assert_eq!(conflicts::in_progress(dir), None);
+    assert_eq!(sh(dir, &["symbolic-ref", "--short", "HEAD"]), "topic");
+    assert_eq!(common::rev(dir, "HEAD"), before);
+    assert_eq!(sh(dir, &["status", "--porcelain"]), "");
 }
