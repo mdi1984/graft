@@ -9,6 +9,7 @@ mod keys;
 mod launch;
 mod native;
 mod project;
+mod running;
 mod settings;
 mod single;
 mod text;

@@ -14,6 +14,7 @@ use super::icons::{self, Icon};
 use crate::keys::Command;
 use crate::project::{Action, FileKey, Project};
 use crate::theme::{self, RADIUS, color};
+use crate::ui::{Actions, AppAction};
 
 /// One search result.
 struct Hit {
@@ -23,6 +24,7 @@ struct Hit {
     /// The other project's tab index and name, for a hit outside the
     /// active project.
     project: Option<(usize, String)>,
+    /// What choosing it does, in its project.
     actions: Vec<Action>,
 }
 
@@ -72,10 +74,6 @@ fn hits(projects: &[Project], active: usize, text: &str) -> Vec<Hit> {
             project_hits(project, text).into_iter().map(move |mut hit| {
                 if i != active {
                     hit.project = Some((i, project.name.clone()));
-                    hit.actions = vec![Action::InProject {
-                        project: i,
-                        actions: hit.actions,
-                    }];
                 }
                 hit
             })
@@ -229,12 +227,12 @@ pub fn show(
     projects: &[Project],
     active: usize,
     text: &mut String,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let id = Id::unique("toolbar-search");
     let selected_id = id.with("selected");
     let popup_id = id.with("popup-rect");
-    let keys = &projects[active].settings.keys;
+    let keys = &projects[active].settings().keys;
     if keys.pressed(ui.ctx(), Command::Search) {
         ui.memory_mut(|m| m.request_focus(id));
         // Select the old query so typing replaces it.
@@ -411,7 +409,13 @@ pub fn show(
     if let Some(i) = chosen
         && let Some(hit) = results.get(i)
     {
-        actions.extend(hit.actions.iter().cloned());
+        match &hit.project {
+            Some((project, _)) => actions.app(AppAction::InProject {
+                project: *project,
+                actions: hit.actions.clone(),
+            }),
+            None => actions.extend(hit.actions.iter().cloned()),
+        }
         text.clear();
         ui.memory_mut(|m| m.surrender_focus(id));
         ui.data_mut(|d| d.remove::<Rect>(popup_id));
@@ -517,6 +521,8 @@ mod tests {
         let mut project = Project::new(
             root.to_path_buf(),
             root.to_path_buf(),
+            Default::default(),
+            Default::default(),
             Console::default(),
             pool.clone(),
         );
@@ -552,17 +558,7 @@ mod tests {
 
         assert_eq!(found[1].title, "feature-here");
         assert_eq!(found[1].project, Some((0, projects[0].name.clone())));
-        match &found[1].actions[..] {
-            [
-                Action::InProject {
-                    project: 0,
-                    actions,
-                },
-            ] => {
-                assert!(matches!(actions[..], [Action::Reveal(_)]));
-            }
-            other => panic!("unexpected actions {other:?}"),
-        }
+        assert!(matches!(found[1].actions[..], [Action::Reveal(_)]));
     }
 
     #[test]

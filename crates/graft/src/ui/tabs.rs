@@ -4,8 +4,9 @@ use egui::Ui;
 
 use super::widgets::{self, Badge};
 use crate::project::{Action, Project, Tab};
+use crate::ui::Actions;
 
-pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
+pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
     let stash_count = project.snapshot.as_ref().map_or(0, |s| s.stash_count);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;

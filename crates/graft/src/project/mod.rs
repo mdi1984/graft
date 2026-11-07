@@ -1,13 +1,19 @@
 //! One open repository (a project tab): its snapshot, history, selection, and
 //! the background jobs that load them. The UI reads this state and sends
 //! [`Action`]s; nothing here blocks on git.
+//!
+//! Each feature starts its jobs and handles their results in one place: a
+//! job's result comes back as a closure that updates the project, applied on
+//! the UI thread by [`Project::poll`].
 
 mod changes;
 pub mod comments;
 mod conflicts;
 mod file_history;
+mod ops;
 mod preview;
 mod refs;
+mod remote;
 mod review;
 mod settings;
 mod slash;
@@ -18,28 +24,32 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
-use graft_core::conflicts::ConflictFile;
 use graft_core::details::{self, CommitDetails};
 use graft_core::history::{self, Commits, History};
-use graft_core::jobs::JobPool;
+use graft_core::jobs::{JobPool, Waker};
 use graft_core::model::Kind;
 use graft_core::ops::LineOp;
 use graft_core::stash::{Stash, StashFile};
 use graft_core::watch::Watcher;
 use graft_core::{
-    CancelToken, Console, Git, JobError, Oid, Panicked, RepoSnapshot, Worktree, null_oid,
+    CancelToken, Console, Git, Oid, Panicked, RepoSnapshot, Worktree, is_cancelled, null_oid,
     same_path, snapshot,
 };
 
-pub use changes::{CommitForm, Confirm, DiffView, FileKey, Operation, RemoteOp};
+pub use changes::{CommitForm, DiffView, FileKey};
 pub use conflicts::{ConflictView, merge_dialog};
 pub use file_history::{FileHistoryMode, FileHistoryView};
 pub use refs::{Dialog, DialogKind};
+pub use remote::RemoteOp;
 pub use review::{ReviewState, ReviewView};
 pub use slash::{SlashView, SlashedBranch};
 pub use worktrees::{BranchMode, NewWorktreeForm, checkout_choices};
+
+use crate::running::Running;
+use crate::settings::Settings;
 
 /// Commits loaded into the graph. Enough for years of history in big repos.
 const HISTORY_LIMIT: usize = 100_000;
@@ -79,7 +89,7 @@ pub struct Nav {
     pub worktree: PathBuf,
 }
 
-/// Something the user did in the UI.
+/// Something the user did in this project.
 #[derive(Clone, Debug)]
 pub enum Action {
     /// A dirty worktree opens File status, a clean one opens History.
@@ -92,14 +102,6 @@ pub enum Action {
     /// Show a commit in History, scrolled into view.
     Reveal(Oid),
     Refresh,
-    /// Close this project's tab. Handled by the app.
-    Close,
-    /// Switch to another open project and apply `actions` there (a search
-    /// hit in another project). Handled by the app.
-    InProject {
-        project: usize,
-        actions: Vec<Action>,
-    },
 
     // File status
     SelectFile(FileKey),
@@ -116,15 +118,12 @@ pub enum Action {
     },
     ClearLines,
     /// Show these unchanged lines (their numbers in the old and the new
-    /// file) in the File status diff or, with `commit`, in the read-only
-    /// one (commit, stash, review).
+    /// file) in the diff that shows `key`.
     ShowLines {
-        commit: bool,
+        key: FileKey,
         old: std::ops::Range<u32>,
         new: std::ops::Range<u32>,
     },
-    /// Show whole files in diffs, or only the changes (an app setting).
-    ToggleWholeFile,
     HunkOp(usize, LineOp),
     LinesOp(LineOp),
     StageFiles(Vec<String>),
@@ -208,13 +207,7 @@ pub enum Action {
     /// Undo the selected worktree's last commit, keeping its changes staged.
     UndoCommit,
 
-    // Merges and conflicts
-    /// Merge `rev` into the selected worktree's branch (`into`, for messages).
-    Merge {
-        rev: String,
-        no_ff: bool,
-        into: String,
-    },
+    // Merges (the Merge dialog) and conflicts
     /// Rebase the selected worktree's branch onto this.
     Rebase(String),
     /// Pick (or clear) the resolution of one conflict of the open file.
@@ -295,6 +288,15 @@ pub enum Action {
     SaveIdentity(graft_core::identity::Identity),
 }
 
+/// A question to confirm before doing something destructive.
+#[derive(Clone, Debug)]
+pub struct Confirm {
+    pub title: String,
+    pub body: String,
+    pub confirm_label: String,
+    pub action: Action,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RefKind {
     /// The branch (or detached HEAD) of the selected worktree.
@@ -332,64 +334,49 @@ impl CheckedOut {
     }
 }
 
-enum Event {
-    Snapshot(Result<RepoSnapshot, String>),
-    History {
-        generation: u64,
-        result: Result<(Arc<Commits>, History), JobError>,
-    },
-    Details(Oid, Result<CommitDetails, String>),
-    Diff {
-        generation: u64,
-        result: Result<changes::Loaded, String>,
-    },
-    LastMessage(Option<String>),
-    OpDone {
-        then: changes::Then,
-        result: Result<Option<String>, JobError>,
-    },
-    CommitDiff {
-        generation: u64,
-        result: Result<changes::Loaded, String>,
-    },
-    /// Syntax colors for a big diff, after the diff itself.
-    Syntax {
-        generation: u64,
-        syntax: graft_core::syntax::Syntax,
-    },
-    Stashes(Result<Vec<Stash>, String>),
-    StashFiles(Oid, Result<Vec<StashFile>, String>),
-    Conflict {
-        generation: u64,
-        result: Result<ConflictFile, String>,
-    },
-    Review {
-        generation: u64,
-        result: Result<graft_core::review::Review, String>,
-    },
-    SlashPlan(Result<graft_core::slash::Plan, JobError>),
-    SlashDone(graft_core::slash::Outcome),
-    Identity(Result<graft_core::identity::Identity, String>),
-    AutoFetched(Result<(), String>),
-    FileLog(
-        String,
-        Result<Vec<graft_core::file_log::FileCommit>, String>,
-    ),
-    Blame {
-        generation: u64,
-        result: Result<graft_core::file_log::Blame, String>,
-    },
-    /// The file watcher saw a change that matters.
-    Changed,
-    PickedFolder(Option<PathBuf>),
-    /// A job panicked instead of answering.
-    Panicked(String),
+/// What Graft remembers about a repository between runs.
+#[derive(Clone, Debug, Default)]
+pub struct RepoMemory {
+    /// Viewed marks, notes, comments and base branch per worktree.
+    pub reviews: HashMap<PathBuf, ReviewState>,
+    /// Deleted branches, newest first.
+    pub slashed: Vec<SlashedBranch>,
 }
 
-impl From<Panicked> for Event {
-    fn from(p: Panicked) -> Self {
-        Event::Panicked(p.0)
+impl RepoMemory {
+    /// Without the reviews that remember nothing.
+    pub fn pruned(mut self) -> Self {
+        self.reviews.retain(|_, state| !state.is_empty());
+        self
     }
+}
+
+/// What to select once the snapshot or history being loaded arrives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pending {
+    /// The project just opened: show the view its worktree calls for.
+    Open,
+    /// HEAD of the selected worktree moved: select it in the new history.
+    Head,
+    /// A search hit revealed a commit while a refresh ran: keep it selected.
+    Revealed,
+}
+
+/// A finished job's result, applied to the project on the UI thread.
+struct Done(Box<dyn FnOnce(&mut Project) + Send>);
+
+impl From<Panicked> for Done {
+    fn from(panic: Panicked) -> Self {
+        Done(Box::new(move |project| {
+            project.op = None;
+            project.notices.push(panic.0);
+        }))
+    }
+}
+
+/// A job's error as text for the screen.
+fn readable<T>(result: anyhow::Result<T>) -> Result<T, String> {
+    result.map_err(|e| format!("{e:#}"))
 }
 
 pub struct Project {
@@ -397,8 +384,8 @@ pub struct Project {
     pub name: String,
     git: Git,
     pool: JobPool,
-    tx: Sender<Event>,
-    rx: Receiver<Event>,
+    tx: Sender<Done>,
+    rx: Receiver<Done>,
 
     pub nav: Nav,
     /// Shared, so screens can hold it without copying it every frame.
@@ -407,7 +394,10 @@ pub struct Project {
     pub error: Option<String>,
     pub loading: bool,
     refresh_queued: bool,
-    first_load: bool,
+    pending: Option<Pending>,
+    /// Numbers loads, so a result that arrives after a newer load of the
+    /// same view started is dropped.
+    tickets: u64,
 
     commits: Option<Arc<Commits>>,
     tips: Vec<Oid>,
@@ -417,11 +407,6 @@ pub struct Project {
     history_cancel: CancelToken,
     /// The commit the "Uncommitted changes" row sits on in the current history.
     history_parent: Option<Oid>,
-    /// HEAD of the selected worktree moved: select it once history is rebuilt.
-    reselect_head: bool,
-    /// A search hit revealed this commit while a refresh was running: that
-    /// refresh must not move the selection to HEAD.
-    revealed: bool,
     /// Bumped whenever a new snapshot or history arrives.
     data_generation: u64,
     pub labels: HashMap<Oid, Vec<RefLabel>>,
@@ -443,26 +428,19 @@ pub struct Project {
     pub conflict: Option<ConflictView>,
     /// The Review tab, once opened.
     pub review: Option<ReviewView>,
-    /// Viewed marks, notes and base branch per worktree. Saved by the app.
-    pub reviews: HashMap<PathBuf, ReviewState>,
-    /// A merge runs in this other worktree: show its conflicts if it stops.
-    pending_conflicts: Option<PathBuf>,
+    memory: RepoMemory,
     /// The Slash dialog while open.
     pub slash: Option<SlashView>,
-    /// Deleted branches, newest first. Saved by the app.
-    pub slashed: Vec<SlashedBranch>,
     /// File history, while WorkspaceView::FileHistory shows it.
     pub file_history: Option<FileHistoryView>,
-    /// The app's settings; the app keeps this copy current.
-    pub settings: crate::settings::Settings,
+    settings: Settings,
     /// The commit identity, loaded for the Settings dialog.
     pub identity: Option<Result<graft_core::identity::Identity, String>>,
-    last_fetch: std::time::Instant,
+    last_fetch: Instant,
     auto_fetching: bool,
-    diff_generation: u64,
     pub commit_form: CommitForm,
     /// A git command that changes things, while it runs.
-    pub op: Option<Operation>,
+    op: Option<Running>,
     /// A destructive action waiting for the user's OK.
     pub confirm: Option<Confirm>,
 
@@ -482,13 +460,19 @@ pub struct Project {
 
 impl Project {
     /// `opened` is the worktree to select first (the folder the user picked).
-    pub fn new(root: PathBuf, opened: PathBuf, console: Console, pool: JobPool) -> Self {
+    pub fn new(
+        root: PathBuf,
+        opened: PathBuf,
+        settings: Settings,
+        memory: RepoMemory,
+        console: Console,
+        pool: JobPool,
+    ) -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
-        let name = graft_core::paths::folder_name(&root);
         let mut project = Self {
             git: Git::new(&root, console),
+            name: graft_core::paths::folder_name(&root),
             root,
-            name,
             pool,
             tx,
             rx,
@@ -501,7 +485,8 @@ impl Project {
             error: None,
             loading: false,
             refresh_queued: false,
-            first_load: true,
+            pending: Some(Pending::Open),
+            tickets: 0,
             commits: None,
             tips: Vec::new(),
             history: None,
@@ -509,8 +494,6 @@ impl Project {
             history_generation: 0,
             history_cancel: CancelToken::default(),
             history_parent: None,
-            reselect_head: false,
-            revealed: false,
             data_generation: 0,
             labels: HashMap::new(),
             selected: None,
@@ -524,16 +507,13 @@ impl Project {
             stash_files: None,
             conflict: None,
             review: None,
-            reviews: HashMap::new(),
-            pending_conflicts: None,
+            memory,
             slash: None,
-            slashed: Vec::new(),
             file_history: None,
-            settings: crate::settings::Settings::default(),
+            settings,
             identity: None,
-            last_fetch: std::time::Instant::now(),
+            last_fetch: Instant::now(),
             auto_fetching: false,
-            diff_generation: 0,
             commit_form: CommitForm::default(),
             op: None,
             confirm: None,
@@ -549,6 +529,63 @@ impl Project {
         project
     }
 
+    /// Run `job` on the pool; `done` gets its result on the UI thread.
+    fn spawn<T: Send + 'static>(
+        &self,
+        job: impl FnOnce() -> T + Send + 'static,
+        done: impl FnOnce(&mut Project, T) + Send + 'static,
+    ) {
+        self.pool.spawn(&self.tx, move || {
+            let result = job();
+            Done(Box::new(move |project| done(project, result)))
+        });
+    }
+
+    /// Like [`Self::spawn`], on a thread of its own: for jobs that wait on
+    /// the network or the user, so they cannot hold up the pool.
+    fn spawn_long<T: Send + 'static>(
+        &self,
+        job: impl FnOnce(Waker) -> T + Send + 'static,
+        done: impl FnOnce(&mut Project, T) + Send + 'static,
+    ) {
+        self.pool.spawn_long(&self.tx, move |waker| {
+            let result = job(waker);
+            Done(Box::new(move |project| done(project, result)))
+        });
+    }
+
+    fn ticket(&mut self) -> u64 {
+        self.tickets += 1;
+        self.tickets
+    }
+
+    /// Apply results of finished jobs. Call once per frame.
+    pub fn poll(&mut self) {
+        self.maybe_auto_fetch();
+        while let Ok(Done(apply)) = self.rx.try_recv() {
+            apply(self);
+        }
+    }
+
+    /// What Graft remembers about this repository.
+    pub fn memory(&self) -> &RepoMemory {
+        &self.memory
+    }
+
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    /// Take on changed app settings.
+    pub fn set_settings(&mut self, settings: &Settings) {
+        let reload = settings.whole_file != self.settings.whole_file;
+        self.settings = settings.clone();
+        if reload {
+            self.load_view(changes::Slot::Status);
+            self.load_view(changes::Slot::ReadOnly);
+        }
+    }
+
     /// Reload refs, worktrees and status; the history follows if refs moved.
     pub fn refresh(&mut self) {
         if self.loading {
@@ -557,13 +594,40 @@ impl Project {
         }
         self.loading = true;
         let git = self.git.clone();
-        self.pool.spawn(&self.tx, move || {
-            Event::Snapshot(snapshot::load(&git).map_err(|e| format!("{e:#}")))
-        });
+        self.spawn(
+            move || snapshot::load(&git),
+            |p, result| p.on_snapshot(readable(result)),
+        );
     }
 
     pub fn is_dirty(&self) -> bool {
         self.snapshot.as_ref().is_some_and(|s| s.is_dirty())
+    }
+
+    /// Opened, but nothing loaded yet.
+    pub fn is_starting(&self) -> bool {
+        self.snapshot.is_none() && self.error.is_none()
+    }
+
+    /// The window title while this project is shown.
+    pub fn title(&self) -> String {
+        match self.worktree() {
+            Some(wt) if !wt.is_main => format!("{} · {} — Graft", self.name, wt.label()),
+            _ => format!("{} — Graft", self.name),
+        }
+    }
+
+    /// What the status bar shows as running, and whether it can be cancelled.
+    pub fn activity(&self) -> Option<(String, bool)> {
+        if let Some(op) = &self.op {
+            Some((op.status(), op.can_cancel()))
+        } else if self.loading {
+            Some((format!("Refreshing {}…", self.name), false))
+        } else if self.history_loading {
+            Some(("Loading history…".to_owned(), false))
+        } else {
+            None
+        }
     }
 
     /// Changes whenever what a search finds in this project can change.
@@ -579,132 +643,78 @@ impl Project {
             .find(|wt| same_path(&wt.path, &self.nav.worktree))
     }
 
-    /// Apply results of finished jobs. Call once per frame.
-    pub fn poll(&mut self) {
-        self.maybe_auto_fetch();
-        while let Ok(event) = self.rx.try_recv() {
-            match event {
-                Event::Snapshot(result) => self.on_snapshot(result),
-                Event::History { generation, result } => self.on_history(generation, result),
-                Event::Diff { generation, result } => self.on_diff(generation, result),
-                Event::LastMessage(message) => self.on_last_message(message),
-                Event::OpDone { then, result } => self.on_op_done(then, result),
-                Event::CommitDiff { generation, result } => self.on_commit_diff(generation, result),
-                Event::Syntax { generation, syntax } => self.on_syntax(generation, syntax),
-                Event::Stashes(result) => self.on_stashes(result),
-                Event::Conflict { generation, result } => self.on_conflict(generation, result),
-                Event::Review { generation, result } => self.on_review(generation, result),
-                Event::SlashPlan(result) => self.on_slash_plan(result),
-                Event::SlashDone(outcome) => self.on_slash_done(outcome),
-                Event::Identity(result) => self.on_identity(result),
-                Event::AutoFetched(result) => self.on_auto_fetched(result),
-                Event::FileLog(path, result) => self.on_file_log(path, result),
-                Event::Blame { generation, result } => self.on_blame(generation, result),
-                Event::StashFiles(id, result) => {
-                    if self.selected_stash == Some(id) {
-                        self.stash_files = Some(result);
-                    }
-                }
-                Event::Changed => {
-                    if !self.is_operating() {
-                        self.refresh();
-                    }
-                }
-                Event::PickedFolder(folder) => self.on_picked_folder(folder),
-                Event::Panicked(error) => {
-                    self.op = None;
-                    self.notices.push(error);
-                }
-                Event::Details(id, result) => {
-                    if self.selected == Some(id) {
-                        match result {
-                            Ok(d) => self.details = Some(d),
-                            Err(e) => self.details_error = Some(e),
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     fn on_snapshot(&mut self, result: Result<RepoSnapshot, String>) {
         self.loading = false;
         match result {
-            Ok(snap) => {
-                self.error = None;
-                if !snap
-                    .worktrees
-                    .iter()
-                    .any(|wt| same_path(&wt.path, &self.nav.worktree))
-                    && let Some(main) = snap.main_worktree()
-                {
-                    self.nav.worktree = main.path.clone();
-                }
-                let tips = snap.tips();
-                let had_snapshot = self.snapshot.is_some();
-                let old_head = self.worktree().and_then(|wt| wt.head);
-                self.snapshot = Some(Arc::new(snap));
-                self.data_generation += 1;
-                let head_moved = had_snapshot && self.worktree().and_then(|wt| wt.head) != old_head;
-                if self.first_load {
-                    self.first_load = false;
-                    if self.worktree().is_some_and(|wt| wt.is_dirty()) {
-                        self.nav.view = WorkspaceView::FileStatus;
-                    }
-                }
-                self.labels = build_labels(
-                    self.snapshot.as_ref().expect("just set"),
-                    &self.nav.worktree,
-                );
-                let reload = if tips != self.tips || self.commits.is_none() {
-                    self.tips = tips;
-                    self.load_history(true);
-                    true
-                } else if self.worktree_parent() != self.history_parent {
-                    self.load_history(false);
-                    true
-                } else {
-                    false
-                };
-                let revealed = std::mem::take(&mut self.revealed);
-                if head_moved && !revealed {
-                    if reload {
-                        self.reselect_head = true;
-                    } else {
-                        self.select_head();
-                    }
-                }
-                self.sync_file_selection();
-                self.sync_watcher();
-                if self.stashes.is_some() || self.nav.tab == Tab::Stashes {
-                    self.load_stashes();
-                }
-                if self.nav.tab == Tab::Review {
-                    self.load_review();
-                }
-                if let Some(path) = self.pending_open.take() {
-                    if self
-                        .snapshot
-                        .as_ref()
-                        .is_some_and(|s| s.worktrees.iter().any(|wt| same_path(&wt.path, &path)))
-                    {
-                        self.open_worktree(path);
-                    } else {
-                        self.pending_open = Some(path);
-                    }
-                }
-            }
-            Err(e) => {
-                if self.snapshot.is_none() {
-                    self.error = Some(e);
-                } else {
-                    self.notices.push(e);
-                }
-            }
+            Ok(snap) => self.take_snapshot(snap),
+            Err(e) if self.snapshot.is_none() => self.error = Some(e),
+            Err(e) => self.notices.push(e),
         }
         if self.refresh_queued {
             self.refresh_queued = false;
             self.refresh();
+        }
+    }
+
+    fn take_snapshot(&mut self, snap: RepoSnapshot) {
+        self.error = None;
+        let tips = snap.tips();
+        let had_snapshot = self.snapshot.is_some();
+        let old_head = self.worktree().and_then(|wt| wt.head);
+        self.snapshot = Some(Arc::new(snap));
+        self.data_generation += 1;
+        if self.worktree().is_none()
+            && let Some(main) = self.main_worktree()
+        {
+            let main = main.path.clone();
+            self.set_worktree(main);
+        }
+        let head_moved = had_snapshot && self.worktree().and_then(|wt| wt.head) != old_head;
+        let pending = self.pending.take();
+        if pending == Some(Pending::Open) {
+            self.nav.view = self.default_view();
+        }
+        self.labels = build_labels(
+            self.snapshot.as_ref().expect("just set"),
+            &self.nav.worktree,
+        );
+        let reload = if tips != self.tips || self.commits.is_none() {
+            self.tips = tips;
+            self.load_history(true);
+            true
+        } else if self.worktree_parent() != self.history_parent {
+            self.load_history(false);
+            true
+        } else {
+            false
+        };
+        // A HEAD to select waits for the history that is loading.
+        let head = pending == Some(Pending::Head);
+        if head || (head_moved && pending != Some(Pending::Revealed)) {
+            if reload || head {
+                self.pending = Some(Pending::Head);
+            } else {
+                self.select_head();
+            }
+        }
+        self.sync_file_selection();
+        self.sync_watcher();
+        if self.stashes.is_some() || self.nav.tab == Tab::Stashes {
+            self.load_stashes();
+        }
+        if self.nav.tab == Tab::Review {
+            self.load_review();
+        }
+        if let Some(path) = self.pending_open.take() {
+            let there = self
+                .snapshot
+                .as_ref()
+                .is_some_and(|s| s.worktrees.iter().any(|wt| same_path(&wt.path, &path)));
+            if there {
+                self.open_worktree(path);
+            } else {
+                self.pending_open = Some(path);
+            }
         }
     }
 
@@ -728,27 +738,28 @@ impl Project {
         let root = self.root.clone();
         let tips = self.tips.clone();
         let cancel = self.history_cancel.clone();
-        self.pool.spawn(&self.tx, move || {
-            let result = (|| {
+        self.spawn(
+            move || -> anyhow::Result<_> {
                 let commits = match cached {
                     Some(c) => c,
-                    None => Arc::new(
-                        history::walk(&root, &tips, HISTORY_LIMIT, &cancel)
-                            .map_err(JobError::from)?,
-                    ),
+                    None => Arc::new(history::walk(&root, &tips, HISTORY_LIMIT, &cancel)?),
                 };
                 let history = History::build(&commits, parent);
                 Ok((commits, history))
-            })();
-            Event::History { generation, result }
-        });
+            },
+            move |p, result| p.on_history(generation, result),
+        );
     }
 
-    fn on_history(&mut self, generation: u64, result: Result<(Arc<Commits>, History), JobError>) {
+    fn on_history(&mut self, generation: u64, result: anyhow::Result<(Arc<Commits>, History)>) {
         if generation != self.history_generation {
             return;
         }
         self.history_loading = false;
+        let head = self.pending == Some(Pending::Head);
+        if head {
+            self.pending = None;
+        }
         match result {
             Ok((commits, history)) => {
                 self.commits = Some(commits);
@@ -757,14 +768,12 @@ impl Project {
                     .is_some_and(|id| history.index.contains_key(&id));
                 self.history = Some(history);
                 self.data_generation += 1;
-                if !keep || std::mem::take(&mut self.reselect_head) {
+                if !keep || head {
                     self.select_head();
                 }
             }
-            Err(JobError::Cancelled) => {}
-            Err(JobError::Failed(e)) => {
-                self.notices.push(format!("Could not load history: {e}"));
-            }
+            Err(e) if is_cancelled(&e) => {}
+            Err(e) => self.notices.push(format!("Could not load history: {e:#}")),
         }
     }
 
@@ -796,151 +805,208 @@ impl Project {
             return;
         }
         let git = self.git.clone();
-        self.pool.spawn(&self.tx, move || {
-            Event::Details(id, details::load(&git, id).map_err(|e| format!("{e:#}")))
-        });
+        self.spawn(
+            move || details::load(&git, id),
+            move |p, result| {
+                if p.selected == Some(id) {
+                    match readable(result) {
+                        Ok(d) => p.details = Some(d),
+                        Err(e) => p.details_error = Some(e),
+                    }
+                }
+            },
+        );
     }
 
-    /// Select a worktree: a dirty one opens File status, a clean one History.
-    fn open_worktree(&mut self, path: PathBuf) {
-        self.nav.worktree = path;
-        if self.nav.tab == Tab::Review {
-            // Stay in Review: review the worktree that was clicked.
-            if let Some(snap) = &self.snapshot {
-                self.labels = build_labels(snap, &self.nav.worktree);
-            }
-            self.load_review();
-            return;
-        }
-        self.nav.tab = Tab::Workspace;
-        let dirty = self.worktree().is_some_and(|wt| wt.is_dirty());
-        self.nav.view = if dirty {
+    fn reveal(&mut self, id: Oid) {
+        self.pending = self.loading.then_some(Pending::Revealed);
+        self.show_view(WorkspaceView::History);
+        self.select(id);
+        self.scroll_to_selected.set(true);
+    }
+
+    /// File status for a worktree with changes, else History.
+    fn default_view(&self) -> WorkspaceView {
+        if self.worktree().is_some_and(Worktree::is_dirty) {
             WorkspaceView::FileStatus
         } else {
             WorkspaceView::History
-        };
+        }
+    }
+
+    /// Make `path` the selected worktree: what was shown for the old one
+    /// (its diff, conflict, commit message, ref chips) goes.
+    fn set_worktree(&mut self, path: PathBuf) {
+        self.nav.worktree = path;
+        self.diff_view = None;
+        self.conflict = None;
+        self.commit_form = CommitForm::default();
         if let Some(snap) = &self.snapshot {
             self.labels = build_labels(snap, &self.nav.worktree);
         }
+        self.sync_file_selection();
+    }
+
+    /// Select a worktree and its HEAD: a dirty one opens File status, a
+    /// clean one History. On the Review tab, review it instead.
+    fn open_worktree(&mut self, path: PathBuf) {
+        self.set_worktree(path);
+        if self.nav.tab == Tab::Review {
+            self.load_review();
+        } else {
+            self.show_view(self.default_view());
+        }
         if self.history.is_some() && self.worktree_parent() != self.history_parent {
+            self.pending = Some(Pending::Head);
             self.load_history(false);
         } else {
             self.select_head();
         }
-        self.diff_view = None;
-        self.conflict = None;
-        self.commit_form = CommitForm::default();
-        self.sync_file_selection();
+    }
+
+    fn set_tab(&mut self, tab: Tab) {
+        self.nav.tab = tab;
+        self.commit_diff = None;
+        match tab {
+            Tab::Workspace => {}
+            Tab::Stashes => self.load_stashes(),
+            Tab::Review => {
+                if let Some(view) = &mut self.review {
+                    view.selected = None;
+                }
+                self.load_review();
+            }
+        }
+    }
+
+    fn show_view(&mut self, view: WorkspaceView) {
+        self.nav.tab = Tab::Workspace;
+        self.nav.view = view;
+    }
+
+    fn open_folder(&mut self, dir: &Path) {
+        if let Err(e) = crate::launch::open_folder(dir) {
+            self.notices
+                .push(format!("Could not open {}: {e}", dir.display()));
+        }
     }
 
     pub fn apply(&mut self, action: Action) {
         match action {
             Action::OpenWorktree(path) => self.open_worktree(path),
-            Action::NewWorktree(branch) => self.open_worktree_form(branch),
-            Action::CloseNewWorktree => {
-                if !self.new_worktree.as_ref().is_some_and(|f| f.creating) {
-                    self.new_worktree = None;
+            Action::ShowFileStatus => self.show_view(WorkspaceView::FileStatus),
+            Action::ShowHistory => self.show_view(WorkspaceView::History),
+            Action::SetTab(tab) => self.set_tab(tab),
+            Action::Select(id) => self.select(id),
+            Action::Reveal(id) => self.reveal(id),
+            Action::Refresh => self.refresh(),
+
+            Action::SelectFile(key) => self.select_file(key),
+            Action::ClickLine { hunk, line, shift } => self.click_line(hunk, line, shift),
+            Action::DragLine { hunk, line } => self.drag_line(hunk, line),
+            Action::ClearLines => self.clear_lines(),
+            Action::ShowLines { key, old, new } => self.show_lines(&key, old, new),
+            Action::HunkOp(hunk, op) => self.lines_op(op, Some(hunk)),
+            Action::LinesOp(op) => self.lines_op(op, None),
+            Action::StageFiles(paths) => self.stage_files(paths),
+            Action::UnstageFiles(paths) => self.unstage_files(paths),
+            Action::Discard { tracked, untracked } => self.discard(tracked, untracked),
+            Action::Commit => self.commit(),
+            Action::ToggleAmend => self.toggle_amend(),
+            Action::Remote(op) => {
+                self.remote(op);
+            }
+            Action::CancelOperation => self.cancel_op(),
+            Action::Ask(confirm) => self.confirm = Some(*confirm),
+            Action::ConfirmYes => {
+                if let Some(confirm) = self.confirm.take() {
+                    self.apply(confirm.action);
                 }
             }
+            Action::ConfirmNo => self.confirm = None,
+            Action::OpenPath(path) => self.open_path(&path),
+            Action::RevealPath(path) => self.reveal_path(&path),
+
+            Action::NewWorktree(branch) => self.open_worktree_form(branch),
+            Action::CloseNewWorktree => self.close_worktree_form(),
             Action::BrowseWorktreeFolder => self.browse_worktree_folder(),
             Action::CreateWorktree => self.create_worktree(),
             Action::RemoveWorktree { path, force } => self.remove_worktree(path, force),
             Action::LockWorktree { path, locked } => self.lock_worktree(path, locked),
             Action::PruneWorktrees => self.prune_worktrees(),
             Action::OpenTerminal(dir) => crate::launch::open_terminal(&dir),
-            Action::OpenFolder(dir) => {
-                if let Err(e) = crate::launch::open_folder(&dir) {
-                    self.notices
-                        .push(format!("Could not open {}: {e}", dir.display()));
-                }
-            }
-            Action::ShowFileStatus => {
-                self.nav.tab = Tab::Workspace;
-                self.nav.view = WorkspaceView::FileStatus;
-            }
-            Action::ShowHistory => {
-                self.nav.tab = Tab::Workspace;
-                self.nav.view = WorkspaceView::History;
-            }
-            Action::SetTab(tab) => {
-                self.nav.tab = tab;
-                self.commit_diff = None;
-                if tab == Tab::Stashes {
-                    self.load_stashes();
-                }
-                if tab == Tab::Review {
-                    if let Some(view) = &mut self.review {
-                        view.selected = None;
-                    }
-                    self.load_review();
-                }
-            }
+            Action::OpenFolder(dir) => self.open_folder(&dir),
+
             Action::SelectCommitFile(key) => self.select_commit_file(key),
             Action::CloseCommitFile => self.commit_diff = None,
+
             Action::SelectStash(id) => self.select_stash(id),
             Action::ApplyStash { id, worktree, pop } => self.apply_stash(id, worktree, pop),
             Action::DropStash(id) => self.drop_stash(id),
-            Action::Select(id) => self.select(id),
-            Action::Reveal(id) => {
-                self.revealed = self.loading;
-                self.reselect_head = false;
-                self.nav.tab = Tab::Workspace;
-                self.nav.view = WorkspaceView::History;
-                self.select(id);
-                self.scroll_to_selected.set(true);
+
+            Action::OpenDialog(kind) => self.open_dialog(kind),
+            Action::CloseDialog => self.close_dialog(),
+            Action::SubmitDialog => self.submit_dialog(),
+            Action::Checkout(branch) => self.switch(branch),
+            Action::StashAndCheckout { branch, untracked } => {
+                self.stash_and_switch(branch, untracked)
             }
-            Action::Refresh => self.refresh(),
-            Action::Close | Action::InProject { .. } => {}
-            Action::OpenDialog(_)
-            | Action::CloseDialog
-            | Action::SubmitDialog
-            | Action::Checkout(_)
-            | Action::StashAndCheckout { .. }
-            | Action::CheckoutRemote { .. }
-            | Action::CheckoutDetached(_)
-            | Action::DeleteBranch { .. }
-            | Action::DeleteTag(_)
-            | Action::RemoveRemote(_)
-            | Action::CherryPick(_)
-            | Action::Revert(_)
-            | Action::UndoCommit => self.apply_ref_action(action),
-            Action::Merge { .. }
-            | Action::Rebase(_)
-            | Action::ResolveConflict { .. }
-            | Action::EditConflict(_)
-            | Action::SaveResolution
-            | Action::TakeSide { .. }
-            | Action::MarkResolved(_)
-            | Action::ContinueOp(_)
-            | Action::AbortOp { .. } => self.apply_conflict_action(action),
+            Action::CheckoutRemote { local, remote } => self.switch_tracking(local, remote),
+            Action::CheckoutDetached(id) => self.switch_detached(id),
+            Action::DeleteBranch { name, force } => self.delete_branch(name, force),
+            Action::DeleteTag(name) => self.delete_tag(name),
+            Action::RemoveRemote(name) => self.remove_remote(name),
+            Action::CherryPick(id) => self.cherry_pick(id),
+            Action::Revert(id) => self.revert(id),
+            Action::UndoCommit => self.undo_commit(),
+
+            Action::Rebase(onto) => self.rebase(onto),
+            Action::ResolveConflict { index, resolution } => {
+                self.resolve_conflict(index, resolution)
+            }
+            Action::EditConflict(index) => self.edit_conflict(index),
+            Action::SaveResolution => self.save_resolution(),
+            Action::TakeSide { path, ours } => self.take_side(path, ours),
+            Action::MarkResolved(path) => self.mark_resolved(path),
+            Action::ContinueOp(kind) => self.continue_op(kind),
+            Action::AbortOp { kind, confirmed } => self.abort_op(kind, confirmed),
+
+            Action::SelectReviewFile(path) => self.open_review_file(path, false),
+            Action::ToggleViewed(path) => self.toggle_viewed(path),
+            Action::SetReviewBase(base) => self.set_review_base(base),
+            Action::ToggleReviewSplit => self.toggle_review_split(),
+            Action::PickLine { at, side, extend } => self.pick_line(at, side, extend),
+            Action::SaveComment => self.save_comment(),
+            Action::CancelComment => self.cancel_comment(),
+            Action::EditComment(id) => self.edit_comment(id),
+            Action::DeleteComment(id) => self.delete_comment(id),
+            Action::ClearReviewComments => self.clear_review_comments(),
+            Action::MergeReviewed {
+                worktree,
+                branch,
+                into,
+            } => self.merge_reviewed(worktree, branch, into),
             Action::OpenInIde(path) => {
                 crate::launch::open_in_ide(&path, &self.settings.ide_command)
             }
-            Action::SelectReviewFile(_)
-            | Action::ToggleViewed(_)
-            | Action::SetReviewBase(_)
-            | Action::ToggleReviewSplit
-            | Action::PickLine { .. }
-            | Action::SaveComment
-            | Action::CancelComment
-            | Action::EditComment(_)
-            | Action::DeleteComment(_)
-            | Action::ClearReviewComments
-            | Action::MergeReviewed { .. } => self.apply_review_action(action),
-            Action::OpenSlash
-            | Action::CloseSlash
-            | Action::ToggleSlashItem(_)
-            | Action::RunSlash
-            | Action::RestoreSlashed(_) => self.apply_slash_action(action),
-            Action::PreviewInMain(_) | Action::UpdatePreview | Action::RestoreMain => {
-                self.apply_preview_action(action)
-            }
-            Action::LoadIdentity | Action::SaveIdentity(_) => self.apply_settings_action(action),
-            Action::OpenFileHistory(_)
-            | Action::CloseFileHistory
-            | Action::SelectFileCommit(_)
-            | Action::SetFileHistoryMode(_) => self.apply_file_history_action(action),
-            other => self.apply_change(other),
+
+            Action::OpenSlash => self.open_slash(),
+            Action::CloseSlash => self.close_slash(),
+            Action::ToggleSlashItem(i) => self.toggle_slash_item(i),
+            Action::RunSlash => self.run_slash(),
+            Action::RestoreSlashed(i) => self.restore_slashed(i),
+
+            Action::PreviewInMain(worktree) => self.preview_in_main(worktree),
+            Action::UpdatePreview => self.update_preview(),
+            Action::RestoreMain => self.restore_main(),
+
+            Action::OpenFileHistory(path) => self.open_file_history(path),
+            Action::CloseFileHistory => self.close_file_history(),
+            Action::SelectFileCommit(i) => self.select_file_commit(i),
+            Action::SetFileHistoryMode(mode) => self.set_file_history_mode(mode),
+
+            Action::LoadIdentity => self.load_identity(),
+            Action::SaveIdentity(identity) => self.save_identity(identity),
         }
     }
 }

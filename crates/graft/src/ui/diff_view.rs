@@ -30,6 +30,7 @@ use crate::project::{Action, Confirm, DiffView, Project};
 use crate::settings::Settings;
 use crate::text::plural;
 use crate::theme::{self, color};
+use crate::ui::{Actions, AppAction};
 
 const ROW: f32 = 20.0;
 const GUTTER: f32 = 24.0;
@@ -234,7 +235,7 @@ fn blocks<'a>(ui: &Ui, marks: Option<&Marks<'a>>, width: f32) -> Vec<Block<'a>> 
 
 /// Row `part` of a comment block. Every row paints the whole block, clipped
 /// to itself, so the block scrolls in and out smoothly.
-fn comment_row(ui: &Ui, rect: Rect, block: &Block, part: usize, actions: &mut Vec<Action>) {
+fn comment_row(ui: &Ui, rect: Rect, block: &Block, part: usize, actions: &mut Actions) {
     let clip = ui.clip_rect();
     let left = clip.left().max(rect.left()) + GUTTER;
     let right = clip.right().min(rect.right()) - COMMENT_RIGHT;
@@ -338,7 +339,7 @@ fn pick_on_hover(
     at: (usize, usize),
     side: Option<Side>,
     p: Pointer,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     let same_side = marks.pick.is_some_and(|pick| pick.side == side);
@@ -357,7 +358,7 @@ fn pick_on_hover(
     }
 }
 
-pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
+pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
     let Some(view) = &project.diff_view else {
         empty_state(
             ui,
@@ -366,7 +367,13 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
         );
         return;
     };
-    show_view(ui, view, project.is_operating(), &project.settings, actions);
+    show_view(
+        ui,
+        view,
+        project.is_operating(),
+        project.settings(),
+        actions,
+    );
 }
 
 /// Any file diff: File status (with staging) or a commit or stash (read-only,
@@ -376,7 +383,7 @@ pub fn show_view(
     view: &DiffView,
     busy: bool,
     settings: &Settings,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     if matches!(view.key.source, Source::Commit(_)) && ui.input(|i| i.key_pressed(Key::Escape)) {
         actions.push(Action::CloseCommitFile);
@@ -398,7 +405,7 @@ pub fn body(
     split: bool,
     wrap: bool,
     marks: Option<&Marks>,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let Some(diff) = &view.diff else {
         if let Some(error) = &view.error {
@@ -538,7 +545,7 @@ fn side_by_side(
     diff: &FileDiff,
     wrap: bool,
     marks: Option<&Marks>,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let width = ui.available_width() - ui.spacing().scroll.allocated_width();
     let blocks = blocks(ui, marks, width);
@@ -709,13 +716,7 @@ fn paint_code(
     }
 }
 
-fn header(
-    ui: &mut Ui,
-    view: &DiffView,
-    busy: bool,
-    settings: &Settings,
-    actions: &mut Vec<Action>,
-) {
+fn header(ui: &mut Ui, view: &DiffView, busy: bool, settings: &Settings, actions: &mut Actions) {
     Panel::top("diff-header")
         .frame(
             Frame::new()
@@ -797,12 +798,7 @@ fn header(
 
 /// "Whole file" / "Changes only", for diffs that have unchanged lines to
 /// show.
-pub fn whole_file_button(
-    ui: &mut Ui,
-    view: &DiffView,
-    settings: &Settings,
-    actions: &mut Vec<Action>,
-) {
+pub fn whole_file_button(ui: &mut Ui, view: &DiffView, settings: &Settings, actions: &mut Actions) {
     if view.gaps.is_none() {
         return;
     }
@@ -818,7 +814,7 @@ pub fn whole_file_button(
         .on_hover_text(settings.keys.tip(tip, Command::WholeFile))
         .clicked()
     {
-        actions.push(Action::ToggleWholeFile);
+        actions.app(AppAction::ToggleWholeFile);
     }
 }
 
@@ -846,7 +842,7 @@ pub fn discard_file(source: &Source, path: String) -> Action {
     }))
 }
 
-fn selection_bar(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Action>) {
+fn selection_bar(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Actions) {
     Panel::bottom("diff-selection")
         .frame(
             Frame::new()
@@ -908,7 +904,7 @@ fn lines(
     busy: bool,
     wrap: bool,
     marks: Option<&Marks>,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let width = ui.available_width() - ui.spacing().scroll.allocated_width();
     let blocks = blocks(ui, marks, width);
@@ -998,7 +994,7 @@ fn hunk_row(
     diff: &FileDiff,
     h: usize,
     busy: bool,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     paint_hunk_header(ui, rect, &diff.hunks[h], GUTTER);
 
@@ -1099,7 +1095,7 @@ fn small_button(
 /// Hidden unchanged lines: "42 unchanged lines" with buttons that show
 /// 20 more below the hunk above (↓), 20 more above the hunk below (↑), or
 /// all of them. The label and buttons stay at the visible left edge.
-fn gap_row(ui: &mut Ui, rect: Rect, view: &DiffView, g: usize, actions: &mut Vec<Action>) {
+fn gap_row(ui: &mut Ui, rect: Rect, view: &DiffView, g: usize, actions: &mut Actions) {
     let Some(gap) = view.gaps.as_ref().and_then(|gaps| gaps.get(g)) else {
         return;
     };
@@ -1147,7 +1143,7 @@ fn gap_row(ui: &mut Ui, rect: Rect, view: &DiffView, g: usize, actions: &mut Vec
             .clicked()
         {
             actions.push(Action::ShowLines {
-                commit: view.read_only,
+                key: view.key.clone(),
                 new: gap.in_new(&lines),
                 old: lines,
             });

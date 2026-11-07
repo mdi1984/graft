@@ -24,6 +24,7 @@ use crate::project::{Action, DialogKind, FileKey, Project, RefKind, RefLabel};
 use crate::text::plural;
 use crate::theme::{self, color};
 use crate::time;
+use crate::ui::Actions;
 
 const ROW_HEIGHT: f32 = 26.0;
 const LANE_WIDTH: f32 = 14.0;
@@ -34,7 +35,7 @@ const DATE_COL: f32 = 116.0;
 const AUTHOR_COL: f32 = 150.0;
 const MIN_DESCRIPTION: f32 = 180.0;
 
-pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
+pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
     Panel::right("commit-details")
         .resizable(true)
         .default_size(400.0)
@@ -68,7 +69,13 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
             .exact_size((height * 0.55).max(160.0))
             .frame(Frame::new().fill(color::app_bg()))
             .show(ui, |ui| {
-                diff_view::show_view(ui, view, project.is_operating(), &project.settings, actions)
+                diff_view::show_view(
+                    ui,
+                    view,
+                    project.is_operating(),
+                    project.settings(),
+                    actions,
+                )
             });
     }
     commit_list(ui, project, history, actions);
@@ -111,7 +118,7 @@ impl Columns {
     }
 }
 
-fn commit_list(ui: &mut Ui, project: &Project, history: &History, actions: &mut Vec<Action>) {
+fn commit_list(ui: &mut Ui, project: &Project, history: &History, actions: &mut Actions) {
     let width = ui.available_width();
     // Big repos can have dozens of lanes: by default the graph gets at most a
     // quarter of the list, the rest is clipped. Dragging the header divider
@@ -214,7 +221,7 @@ fn keyboard_nav(
     history: &History,
     selected: Option<usize>,
     project: &Project,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     if ui.memory(|m| m.focused().is_some()) {
         return;
@@ -488,7 +495,7 @@ fn curve(painter: &egui::Painter, from: Pos2, to: Pos2, vertical_first: bool, st
     ));
 }
 
-fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Vec<Action>) {
+fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Actions) {
     let busy = project.is_operating();
     let wt = project.worktree();
     let branch = wt.and_then(|wt| wt.branch.clone());
@@ -599,7 +606,7 @@ fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Ve
 // ---------------------------------------------------------------------------
 // Details pane
 
-fn details_pane(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
+fn details_pane(ui: &mut Ui, project: &Project, actions: &mut Actions) {
     let Some(id) = project.selected else {
         empty_state(ui, "No commit selected", "Pick a commit on the left.");
         return;
@@ -622,7 +629,7 @@ fn details_pane(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
     }
 }
 
-fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &mut Vec<Action>) {
+fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &mut Actions) {
     ui.spacing_mut().item_spacing.y = 6.0;
     ui.add(
         egui::Label::new(
@@ -780,7 +787,7 @@ fn person(ui: &mut Ui, name: &str, email: &str) {
     });
 }
 
-fn uncommitted(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
+fn uncommitted(ui: &mut Ui, project: &Project, actions: &mut Actions) {
     ui.spacing_mut().item_spacing.y = 6.0;
     ui.label(
         RichText::new("Uncommitted changes")

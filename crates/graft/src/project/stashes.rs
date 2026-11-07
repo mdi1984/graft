@@ -6,18 +6,19 @@ use std::path::PathBuf;
 use graft_core::stash::{self, Stash};
 use graft_core::{Oid, short};
 
-use super::changes::Then;
-use super::{Event, Project};
+use super::ops::{At, say};
+use super::{Project, readable};
 
 impl Project {
     pub(super) fn load_stashes(&mut self) {
         let git = self.git.clone();
-        self.pool.spawn(&self.tx, move || {
-            Event::Stashes(stash::list(&git).map_err(|e| format!("{e:#}")))
-        });
+        self.spawn(
+            move || stash::list(&git),
+            |p, result| p.on_stashes(readable(result)),
+        );
     }
 
-    pub(super) fn on_stashes(&mut self, result: Result<Vec<Stash>, String>) {
+    fn on_stashes(&mut self, result: Result<Vec<Stash>, String>) {
         if let Ok(list) = &result {
             let still_there = self
                 .selected_stash
@@ -42,37 +43,42 @@ impl Project {
         self.stash_files = None;
         self.commit_diff = None;
         let git = self.git.clone();
-        self.pool.spawn(&self.tx, move || {
-            Event::StashFiles(id, stash::files(&git, id).map_err(|e| format!("{e:#}")))
-        });
+        self.spawn(
+            move || stash::files(&git, id),
+            move |p, result| {
+                if p.selected_stash == Some(id) {
+                    p.stash_files = Some(readable(result));
+                }
+            },
+        );
     }
 
     pub(super) fn apply_stash(&mut self, id: Oid, worktree: PathBuf, pop: bool) {
-        let name = graft_core::paths::folder_name(&worktree);
         let done = format!(
-            "{} {} in {name}",
+            "{} {} in {}",
             if pop { "Popped" } else { "Applied" },
-            short(&id)
+            short(&id),
+            graft_core::paths::folder_name(&worktree)
         );
         let label = if pop {
             "Popping stash"
         } else {
             "Applying stash"
         };
-        self.run_op_at(
-            self.git.at(&worktree),
+        self.run_op(
+            At::Path(worktree),
             label,
-            Then::Info(done),
-            move |git| stash::apply(&git, id, pop).map(|()| None),
+            move |git| stash::apply(&git, id, pop),
+            say(done),
         );
     }
 
     pub(super) fn drop_stash(&mut self, id: Oid) {
-        self.run_op_at(
-            self.git.clone(),
+        self.run_op(
+            At::Main,
             "Dropping stash",
-            Then::Info(format!("Dropped stash {}", short(&id))),
-            move |git| stash::drop(&git, id).map(|()| None),
+            move |git| stash::drop(&git, id),
+            say(format!("Dropped stash {}", short(&id))),
         );
     }
 }

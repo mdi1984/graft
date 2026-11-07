@@ -16,8 +16,9 @@ use crate::keys::{Command, Keymap};
 use crate::project::{Action, FileKey, Project};
 use crate::text::plural;
 use crate::theme::{self, RADIUS, color};
+use crate::ui::Actions;
 
-pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
+pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
     let Some(status) = project.worktree().and_then(|wt| wt.status.clone()) else {
         empty_state(
             ui,
@@ -60,8 +61,8 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
 }
 
 /// The file list from the keyboard: move, stage, unstage, discard.
-fn keyboard(ui: &Ui, project: &Project, status: &WorktreeStatus, actions: &mut Vec<Action>) {
-    let keys = &project.settings.keys;
+fn keyboard(ui: &Ui, project: &Project, status: &WorktreeStatus, actions: &mut Actions) {
+    let keys = &project.settings().keys;
     let ctx = ui.ctx();
     // Top to bottom as listed; `Some(true)` can be staged, `Some(false)`
     // unstaged.
@@ -129,8 +130,8 @@ fn keyboard(ui: &Ui, project: &Project, status: &WorktreeStatus, actions: &mut V
     }
 }
 
-fn file_lists(ui: &mut Ui, project: &Project, status: &WorktreeStatus, actions: &mut Vec<Action>) {
-    let keys = &project.settings.keys;
+fn file_lists(ui: &mut Ui, project: &Project, status: &WorktreeStatus, actions: &mut Actions) {
+    let keys = &project.settings().keys;
     let busy = project.is_operating();
     let selected = project.diff_view.as_ref().map(|v| &v.key);
     let staged: Vec<&StatusEntry> = status.staged().collect();
@@ -281,7 +282,7 @@ fn file_row(
     stage: Option<bool>,
     busy: bool,
     keys: &Keymap,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let (rect, response) = file_row::allocate(ui, selected, Sense::click());
     let y = rect.center().y;
@@ -295,7 +296,7 @@ fn file_row(
     file_row::paint_file(ui, rect.left() + 6.0, y, change, &entry.path, right);
 
     let paths = vec![entry.path.clone()];
-    let toggle = |actions: &mut Vec<Action>| match stage {
+    let toggle = |actions: &mut Actions| match stage {
         Some(true) => actions.push(Action::StageFiles(paths.clone())),
         Some(false) => actions.push(Action::UnstageFiles(paths.clone())),
         None => {}
@@ -373,14 +374,10 @@ fn file_row(
     });
 }
 
-fn commit_box(
-    ui: &mut Ui,
-    project: &mut Project,
-    status: &WorktreeStatus,
-    actions: &mut Vec<Action>,
-) {
+fn commit_box(ui: &mut Ui, project: &mut Project, status: &WorktreeStatus, actions: &mut Actions) {
     let staged = status.staged().count();
     let busy = project.is_operating();
+    let keys = project.settings().keys.clone();
     let form = &mut project.commit_form;
     let width = ui.available_width();
 
@@ -429,7 +426,6 @@ fn commit_box(
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let ready = form.ready(staged) && !busy;
             let label = if form.amend { "Amend commit" } else { "Commit" };
-            let keys = &project.settings.keys;
             let clicked = button(ui, label, ButtonKind::Primary, ready)
                 .on_hover_text(keys.tip(label, Command::Commit))
                 .clicked();

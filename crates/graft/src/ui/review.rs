@@ -22,8 +22,9 @@ use crate::project::comments::{self, LineComment};
 use crate::project::{Action, Confirm, Project};
 use crate::text::plural;
 use crate::theme::{self, color};
+use crate::ui::Actions;
 
-pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
+pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
     // Shared handles: the screen reads them while `project` takes actions.
     let Some(snap) = project.snapshot.clone() else {
         return;
@@ -136,7 +137,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
             diff,
             project.is_operating(),
             split,
-            project.settings.wrap_lines,
+            project.settings().wrap_lines,
             Some(&marks),
             actions,
         ),
@@ -157,7 +158,7 @@ fn header(
     wt: &Worktree,
     review: &Review,
     viewed: usize,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let busy = project.is_operating();
     // Not enough room for everything on one line: the numbers and the
@@ -213,7 +214,7 @@ fn header(
 
 /// What "Open in IDE" runs, from the settings.
 fn ide_tip(project: &Project, what: &str) -> String {
-    match project.settings.ide_command.trim() {
+    match project.settings().ide_command.trim() {
         "" => format!("Open {what} with its default program"),
         command => format!("Open {what} with {command}"),
     }
@@ -268,7 +269,7 @@ fn base_picker(
     snap: &RepoSnapshot,
     wt: &Worktree,
     base: Option<&str>,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     ui.label(RichText::new("Reviewing").color(color::text_weak()));
     ui.label(
@@ -306,7 +307,7 @@ fn merge_button(
     wt: &Worktree,
     review: &Review,
     busy: bool,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let base = review.base.as_str();
     let target = snap.worktree_for_branch(base);
@@ -371,7 +372,7 @@ fn file_list(
     project: &Project,
     review: &Review,
     uncommitted: &[&str],
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let selected = project.review.as_ref().and_then(|v| v.selected.as_deref());
     ui.label(
@@ -483,7 +484,7 @@ fn file_header(
     project: &Project,
     wt: &Worktree,
     file: &ReviewFile,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let viewed = project.is_viewed(file);
     let split = project.review.as_ref().is_none_or(|v| v.split);
@@ -520,7 +521,7 @@ fn file_header(
                     if button(ui, label, kind, true)
                         .on_hover_text(
                             project
-                                .settings
+                                .settings()
                                 .keys
                                 .tip("Marks it and opens the next file", Command::MarkViewed),
                         )
@@ -541,13 +542,17 @@ fn file_header(
                         actions.push(Action::ToggleReviewSplit);
                     }
                     if let Some(view) = &project.commit_diff {
-                        diff_view::whole_file_button(ui, view, &project.settings, actions);
+                        diff_view::whole_file_button(ui, view, project.settings(), actions);
                     }
                 });
             });
         });
     // Marks the open file as viewed (not while typing a comment).
-    if project.settings.keys.pressed(ui.ctx(), Command::MarkViewed) {
+    if project
+        .settings()
+        .keys
+        .pressed(ui.ctx(), Command::MarkViewed)
+    {
         actions.push(Action::ToggleViewed(path));
     }
 }
@@ -558,7 +563,7 @@ fn comments_bar(
     project: &mut Project,
     wt: &Worktree,
     review: &Review,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let Some(state) = project.review_state() else {
         return;
@@ -629,7 +634,7 @@ fn comment_panel(
     project: &mut Project,
     path: &str,
     outdated: &[LineComment],
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let Some(view) = &project.review else { return };
     let diff = project.commit_diff.as_ref().and_then(|d| d.diff.as_ref());
@@ -660,8 +665,8 @@ fn comment_panel(
     }
 }
 
-fn comment_editor(ui: &mut Ui, project: &mut Project, title: &str, actions: &mut Vec<Action>) {
-    let keys = project.settings.keys.clone();
+fn comment_editor(ui: &mut Ui, project: &mut Project, title: &str, actions: &mut Actions) {
+    let keys = project.settings().keys.clone();
     let Some(view) = &mut project.review else {
         return;
     };
@@ -743,7 +748,7 @@ fn file_note(
     project: &mut Project,
     path: &str,
     outdated: &[LineComment],
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let has_note = project
         .review_state()

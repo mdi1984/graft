@@ -15,6 +15,7 @@ use super::widgets::{ButtonKind, button, empty_state, waiting};
 use crate::project::{Action, ConflictView, Project};
 use crate::text::plural;
 use crate::theme::{self, RADIUS, color};
+use crate::ui::Actions;
 
 /// Lines of clean context shown around each conflict.
 const CONTEXT: usize = 3;
@@ -27,7 +28,7 @@ fn side_names(wt: &Worktree) -> (String, String) {
 }
 
 /// The strip across the top of the Workspace while something is in progress.
-pub fn banner(ui: &mut Ui, project: &Project, wt: &Worktree, actions: &mut Vec<Action>) {
+pub fn banner(ui: &mut Ui, project: &Project, wt: &Worktree, actions: &mut Actions) {
     let Some(InProgress { kind, title }) = &wt.in_progress else {
         return;
     };
@@ -83,7 +84,7 @@ pub fn banner(ui: &mut Ui, project: &Project, wt: &Worktree, actions: &mut Vec<A
 }
 
 /// The resolver for `project.conflict`, in place of the diff.
-pub fn resolver(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
+pub fn resolver(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
     let busy = project.is_operating();
     let (ours_name, theirs_name) = project
         .worktree()
@@ -140,7 +141,7 @@ fn header(
     view: &ConflictView,
     file: &ConflictFile,
     busy: bool,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     Panel::top("conflict-header")
         .frame(
@@ -225,7 +226,7 @@ fn whole_file(
     ours_name: &str,
     theirs_name: &str,
     busy: bool,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let describe = |side: &Option<graft_core::conflicts::Side>| match side {
         None => "deleted the file",
@@ -295,7 +296,7 @@ fn cards(
     ours_name: &str,
     theirs_name: &str,
     busy: bool,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let total = view.resolutions.len();
     let mut index = 0;

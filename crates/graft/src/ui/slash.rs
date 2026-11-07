@@ -9,6 +9,7 @@ use super::widgets::dialog;
 use super::widgets::{ButtonKind, button, elided_path, inline_spinner, note, progress_bar, title};
 use crate::project::{Action, SlashView, SlashedBranch};
 use crate::theme::{self, color};
+use crate::ui::Actions;
 
 const WIDTH: f32 = 560.0;
 
@@ -17,7 +18,7 @@ pub fn show(
     view: &SlashView,
     slashed: &[SlashedBranch],
     progress: Option<Progress>,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let shown = dialog::show(ctx, "slash-modal", WIDTH, view.running, |ui| {
         title(ui, "Slash");
@@ -67,7 +68,7 @@ fn plan_ui(
     plan: &Plan,
     slashed: &[SlashedBranch],
     progress: Option<&Progress>,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     if let Some(error) = &plan.fetch_error {
         let first = error.lines().next().unwrap_or_default();
@@ -204,7 +205,7 @@ fn candidate_row(
     view: &SlashView,
     index: usize,
     candidate: &Candidate,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let mut on = view.checked.get(index).copied().unwrap_or(false);
     let name = match (&candidate.branch, &candidate.worktree) {
@@ -241,7 +242,7 @@ fn candidate_row(
     }
 }
 
-fn recent_ui(ui: &mut Ui, slashed: &[SlashedBranch], running: bool, actions: &mut Vec<Action>) {
+fn recent_ui(ui: &mut Ui, slashed: &[SlashedBranch], running: bool, actions: &mut Actions) {
     let now = jiff::Timestamp::now().as_second();
     for (i, entry) in slashed.iter().enumerate() {
         ui.horizontal(|ui| {

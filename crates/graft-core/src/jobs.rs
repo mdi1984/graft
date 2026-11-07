@@ -51,25 +51,6 @@ pub fn is_cancelled(error: &anyhow::Error) -> bool {
     error.downcast_ref::<Cancelled>().is_some()
 }
 
-/// A job's error on its way to the UI thread.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum JobError {
-    /// The user cancelled it: nothing to report.
-    Cancelled,
-    /// It failed; the message is for showing.
-    Failed(String),
-}
-
-impl From<anyhow::Error> for JobError {
-    fn from(error: anyhow::Error) -> Self {
-        if is_cancelled(&error) {
-            JobError::Cancelled
-        } else {
-            JobError::Failed(format!("{error:#}"))
-        }
-    }
-}
-
 /// A job panicked (a bug). Its reply carries this instead, so whoever waits
 /// for the result is not left waiting forever.
 #[derive(Clone, Debug, PartialEq, Eq)]

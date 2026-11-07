@@ -2,15 +2,13 @@
 //! the user pick, delete, and keep "Recently slashed" so a branch can be
 //! brought back.
 
-use std::sync::{Arc, Mutex};
-
-use graft_core::Progress;
 use graft_core::slash::{self, Candidate, Outcome, Plan, Slashed};
-use graft_core::{CancelToken, JobError, Oid};
+use graft_core::{Oid, is_cancelled};
 use serde::{Deserialize, Serialize};
 
-use super::changes::{Operation, Then};
-use super::{Action, Event, Project};
+use super::ops::At;
+use super::{Project, readable};
+use crate::text::plural;
 
 /// A deleted branch in "Recently slashed". Saved by the app.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,87 +65,78 @@ impl SlashView {
 }
 
 impl Project {
-    fn open_slash(&mut self) {
-        if self.is_operating() {
-            return;
-        }
-        self.slash = Some(SlashView {
-            plan: None,
-            checked: Vec::new(),
-            running: false,
-            outcome: None,
-        });
-        let progress = Arc::new(Mutex::new(Progress::default()));
-        let cancel = CancelToken::default();
-        self.op = Some(Operation {
-            label: "Slash: fetching and scanning…".to_owned(),
-            progress: progress.clone(),
-            cancel: Some(cancel.clone()),
-        });
-        let git = self.git.clone();
+    pub(super) fn open_slash(&mut self) {
         let protected = self.settings.protected.clone();
-        self.pool.spawn_long(&self.tx, move |waker| {
-            let report = |p: Progress| {
-                if let Ok(mut slot) = progress.lock() {
-                    *slot = p;
-                }
-                waker();
-            };
-            let result = slash::scan(&git, &protected, &cancel, report).map_err(JobError::from);
-            Event::SlashPlan(result)
-        });
+        let started = self.run_long(
+            At::Main,
+            "Slash: fetching and scanning",
+            move |git, cancel, report| slash::scan(&git, &protected, cancel, report),
+            Self::on_slash_plan,
+        );
+        if started {
+            self.slash = Some(SlashView {
+                plan: None,
+                checked: Vec::new(),
+                running: false,
+                outcome: None,
+            });
+        }
     }
 
-    pub(super) fn on_slash_plan(&mut self, result: Result<Plan, JobError>) {
-        self.op = None;
-        self.refresh();
+    fn on_slash_plan(&mut self, result: anyhow::Result<Plan>) {
         let Some(view) = &mut self.slash else { return };
-        let result = match result {
-            Ok(plan) => Ok(plan),
-            Err(JobError::Failed(e)) => Err(e),
-            Err(JobError::Cancelled) => {
-                self.slash = None;
-                return;
-            }
-        };
+        if result.as_ref().is_err_and(is_cancelled) {
+            self.slash = None;
+            return;
+        }
+        let result = readable(result);
         if let Ok(plan) = &result {
             view.checked = plan.candidates.iter().map(|c| c.suggested).collect();
         }
         view.plan = Some(result);
     }
 
-    fn run_slash(&mut self) {
-        let Some(view) = &mut self.slash else { return };
-        let chosen = view.chosen();
-        if chosen.is_empty() || view.running || self.op.is_some() {
+    pub(super) fn close_slash(&mut self) {
+        let Some(view) = &self.slash else { return };
+        if view.running {
             return;
         }
-        view.running = true;
-        let git = self.git.clone();
-        let progress = Arc::new(Mutex::new(Progress::default()));
-        let cancel = CancelToken::default();
-        self.op = Some(Operation {
-            label: "Slashing".to_owned(),
-            progress: progress.clone(),
-            cancel: Some(cancel.clone()),
-        });
-        self.pool.spawn_long(&self.tx, move |waker| {
-            let report = |p: Progress| {
-                if let Ok(mut slot) = progress.lock() {
-                    *slot = p;
-                }
-                waker();
-            };
-            Event::SlashDone(slash::execute(&git, &chosen, &cancel, report))
-        });
+        if view.plan.is_none() {
+            self.cancel_op();
+        }
+        self.slash = None;
     }
 
-    pub(super) fn on_slash_done(&mut self, outcome: Outcome) {
-        self.op = None;
-        self.refresh();
+    pub(super) fn toggle_slash_item(&mut self, i: usize) {
+        if let Some(view) = &mut self.slash
+            && let Some(on) = view.checked.get_mut(i)
+        {
+            *on = !*on;
+        }
+    }
+
+    pub(super) fn run_slash(&mut self) {
+        let Some(view) = &self.slash else { return };
+        let chosen = view.chosen();
+        if chosen.is_empty() || view.running {
+            return;
+        }
+        let started = self.run_long(
+            At::Main,
+            "Slashing",
+            move |git, cancel, report| slash::execute(&git, &chosen, cancel, report),
+            Self::on_slash_done,
+        );
+        if started && let Some(view) = &mut self.slash {
+            view.running = true;
+        }
+    }
+
+    fn on_slash_done(&mut self, outcome: Outcome) {
         let now = jiff::Timestamp::now().as_second();
+        let slashed = &mut self.memory.slashed;
         for s in outcome.slashed.iter().rev() {
-            self.slashed.insert(
+            slashed.insert(
                 0,
                 SlashedBranch {
                     branch: s.branch.clone(),
@@ -156,7 +145,7 @@ impl Project {
                 },
             );
         }
-        self.slashed.truncate(KEEP_SLASHED);
+        slashed.truncate(KEEP_SLASHED);
         let branches = outcome.slashed.len();
         let mut parts = Vec::new();
         if branches > 0 {
@@ -166,10 +155,7 @@ impl Project {
             });
         }
         if outcome.worktrees_removed > 0 {
-            parts.push(match outcome.worktrees_removed {
-                1 => "1 worktree".to_owned(),
-                n => format!("{n} worktrees"),
-            });
+            parts.push(plural(outcome.worktrees_removed, "worktree"));
         }
         if !parts.is_empty() {
             let stopped = if outcome.cancelled {
@@ -183,9 +169,7 @@ impl Project {
             self.infos
                 .push("Slash stopped; nothing was deleted".to_owned());
         }
-        for e in &outcome.errors {
-            self.notices.push(e.clone());
-        }
+        self.notices.extend(outcome.errors.iter().cloned());
         if outcome.errors.is_empty() {
             self.slash = None;
         } else if let Some(view) = &mut self.slash {
@@ -194,8 +178,10 @@ impl Project {
         }
     }
 
-    fn restore_slashed(&mut self, index: usize) {
-        let Some(entry) = self.slashed.get(index).cloned() else {
+    /// Bring a slashed branch back; it leaves "Recently slashed" once it is
+    /// back.
+    pub(super) fn restore_slashed(&mut self, index: usize) {
+        let Some(entry) = self.memory.slashed.get(index).cloned() else {
             return;
         };
         if entry.target.is_null() {
@@ -216,41 +202,20 @@ impl Project {
             branch: entry.branch.clone(),
             target: entry.target,
         };
-        self.slashed.remove(index);
-        let done = format!("Restored {}", entry.branch);
-        self.run_op_at(
-            self.git.clone(),
+        self.run_op(
+            At::Main,
             "Restoring",
-            Then::Info(done),
-            move |git| slash::restore(&git, &slashed).map(|()| None),
-        );
-    }
-
-    pub(super) fn apply_slash_action(&mut self, action: Action) {
-        match action {
-            Action::OpenSlash => self.open_slash(),
-            Action::CloseSlash => {
-                if !self.slash.as_ref().is_some_and(|s| s.running) {
-                    if self.slash.as_ref().is_some_and(|s| s.plan.is_none())
-                        && let Some(op) = &self.op
-                        && let Some(cancel) = &op.cancel
-                    {
-                        cancel.cancel();
+            move |git| slash::restore(&git, &slashed),
+            move |p, result| match result {
+                Ok(()) => {
+                    if let Some(i) = p.memory.slashed.iter().position(|s| *s == entry) {
+                        p.memory.slashed.remove(i);
                     }
-                    self.slash = None;
+                    p.infos.push(format!("Restored {}", entry.branch));
                 }
-            }
-            Action::ToggleSlashItem(i) => {
-                if let Some(view) = &mut self.slash
-                    && let Some(on) = view.checked.get_mut(i)
-                {
-                    *on = !*on;
-                }
-            }
-            Action::RunSlash => self.run_slash(),
-            Action::RestoreSlashed(i) => self.restore_slashed(i),
-            _ => {}
-        }
+                Err(e) => p.report(e),
+            },
+        );
     }
 }
 

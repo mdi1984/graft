@@ -8,6 +8,7 @@ use super::widgets::dialog::{self, footer};
 use super::widgets::{ButtonKind, button, error_label, field_label, hint, note, text_field, title};
 use crate::project::{Action, BranchMode, NewWorktreeForm, checkout_choices};
 use crate::theme;
+use crate::ui::Actions;
 
 const WIDTH: f32 = 520.0;
 
@@ -15,7 +16,7 @@ pub fn show(
     ctx: &egui::Context,
     form: &mut NewWorktreeForm,
     snap: &RepoSnapshot,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let shown = dialog::show(ctx, "new-worktree-modal", WIDTH, form.creating, |ui| {
         title(ui, "New worktree");

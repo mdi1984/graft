@@ -1,16 +1,15 @@
 //! Branches, tags and commit actions: the small dialogs that ask for a name,
-//! and what happens when git says no (unmerged branch, rejected push).
+//! and what happens when git says no (unmerged branch, changes in the way).
 
-use graft_core::Oid;
 use graft_core::refs::{
     self, NOT_MERGED, RefKind, ResetMode, blocked_by_changes, blocked_by_untracked, check_ref_name,
-    files_in_the_way, no_identity, no_remote,
+    files_in_the_way,
 };
-use graft_core::remote::{self, is_rejected_push};
-use graft_core::stash;
+use graft_core::{Git, Oid, remote, stash};
 
-use super::changes::Then;
-use super::{Action, Confirm, Project, RemoteOp, Tab};
+use super::conflicts::{after_conflicts, merge_messages};
+use super::ops::{At, say};
+use super::{Action, Confirm, Project, Tab, WorkspaceView};
 
 /// A dialog that asks for a name or a choice before running a git command.
 #[derive(Clone, Debug)]
@@ -130,28 +129,78 @@ impl Dialog {
     }
 }
 
-impl Project {
-    pub(super) fn submit_dialog(&mut self) {
-        let Some(dialog) = &mut self.dialog else {
-            return;
-        };
-        if dialog.submitting {
+/// The ending of an operation submitted from the open dialog: success
+/// closes it, then `then` runs; an error shows in the dialog.
+fn from_dialog<T>(
+    then: impl FnOnce(&mut Project, anyhow::Result<T>) + Send,
+) -> impl FnOnce(&mut Project, anyhow::Result<T>) + Send {
+    move |p, result| {
+        if let Err(e) = &result
+            && let Some(dialog) = &mut p.dialog
+        {
+            dialog.submitting = false;
+            dialog.error = Some(format!("{e:#}"));
             return;
         }
-        let kind = dialog.kind.clone();
-        // Problems git would only report after a round trip.
-        let problem = match &kind {
+        if result.is_ok() {
+            p.dialog = None;
+        }
+        then(p, result);
+    }
+}
+
+/// The ending of a switch to `branch`: if local changes are in the way,
+/// offer to stash them first.
+fn switched(branch: String) -> impl FnOnce(&mut Project, anyhow::Result<Option<String>>) + Send {
+    move |p, result| match result {
+        Ok(Some(extra)) => p.infos.push(format!("Switched to {branch}. {extra}")),
+        Ok(None) => p.infos.push(format!("Switched to {branch}")),
+        Err(e) if blocked_by_changes(&format!("{e:#}")) => {
+            let error = format!("{e:#}");
+            p.confirm = Some(Confirm {
+                title: format!("Your changes are in the way of {branch}"),
+                body: format!(
+                    "Switching would overwrite uncommitted changes in your main folder: \
+                     {}.\n\nGraft can stash them first; get them back later from \
+                     Stashes (Apply or Pop).",
+                    files_in_the_way(&error)
+                ),
+                confirm_label: "Stash and switch".to_owned(),
+                action: Action::StashAndCheckout {
+                    branch,
+                    untracked: blocked_by_untracked(&error),
+                },
+            });
+        }
+        Err(e) => p.report(e),
+    }
+}
+
+impl Project {
+    pub(super) fn open_dialog(&mut self, kind: DialogKind) {
+        if !self.is_operating() {
+            self.dialog = Some(Dialog::new(kind));
+        }
+    }
+
+    pub(super) fn close_dialog(&mut self) {
+        if !self.dialog.as_ref().is_some_and(|d| d.submitting) {
+            self.dialog = None;
+        }
+    }
+
+    /// Problems in the open dialog's fields that git would only report
+    /// after a round trip.
+    fn dialog_problem(&self, kind: &DialogKind) -> Option<String> {
+        let snap = self.snapshot.as_deref();
+        match kind {
             DialogKind::NewBranch { name, .. }
             | DialogKind::RenameBranch { name, .. }
             | DialogKind::StashBranch { name, .. } => {
                 let name = name.trim();
                 if let Err(problem) = check_ref_name(RefKind::Branch, name) {
                     Some(problem)
-                } else if self
-                    .snapshot
-                    .as_ref()
-                    .is_some_and(|s| s.branch(name).is_some())
-                {
+                } else if snap.is_some_and(|s| s.branch(name).is_some()) {
                     Some(format!("A branch named {name} already exists."))
                 } else {
                     None
@@ -161,11 +210,7 @@ impl Project {
                 let name = name.trim();
                 if let Err(problem) = check_ref_name(RefKind::Tag, name) {
                     Some(problem)
-                } else if self
-                    .snapshot
-                    .as_ref()
-                    .is_some_and(|s| s.tags.iter().any(|t| t.name == name))
-                {
+                } else if snap.is_some_and(|s| s.tags.iter().any(|t| t.name == name)) {
                     Some(format!("A tag named {name} already exists."))
                 } else {
                     None
@@ -184,10 +229,7 @@ impl Project {
             } => {
                 let name = name.trim();
                 let taken = original.as_deref() != Some(name)
-                    && self
-                        .snapshot
-                        .as_ref()
-                        .is_some_and(|s| s.remotes.iter().any(|r| r.name == name));
+                    && snap.is_some_and(|s| s.remotes.iter().any(|r| r.name == name));
                 if let Err(problem) = check_ref_name(RefKind::Remote, name) {
                     Some(problem)
                 } else if taken {
@@ -198,13 +240,30 @@ impl Project {
                     None
                 }
             }
-        };
-        if let Some(problem) = problem {
-            dialog.error = Some(problem);
+        }
+    }
+
+    pub(super) fn submit_dialog(&mut self) {
+        let Some(dialog) = &self.dialog else { return };
+        if dialog.submitting {
             return;
         }
-        dialog.error = None;
-        dialog.submitting = true;
+        let kind = dialog.kind.clone();
+        if let Some(problem) = self.dialog_problem(&kind) {
+            if let Some(dialog) = &mut self.dialog {
+                dialog.error = Some(problem);
+            }
+            return;
+        }
+        let started = self.start_dialog_op(kind);
+        if started && let Some(dialog) = &mut self.dialog {
+            dialog.error = None;
+            dialog.submitting = true;
+        }
+    }
+
+    /// Run what the dialog asks for; false if it could not start.
+    fn start_dialog_op(&mut self, kind: DialogKind) -> bool {
         match kind {
             DialogKind::NewBranch {
                 name,
@@ -218,16 +277,22 @@ impl Project {
                 } else {
                     format!("Created branch {name}")
                 };
-                self.run_op("Creating branch", Then::Dialog(done), move |git| {
-                    refs::create_branch(&git, &name, &start, checkout)
-                });
+                self.run_op(
+                    At::Selected,
+                    "Creating branch",
+                    move |git| refs::create_branch(&git, &name, &start, checkout),
+                    from_dialog(say(done)),
+                )
             }
             DialogKind::RenameBranch { old, name } => {
                 let name = name.trim().to_owned();
                 let done = format!("Renamed {old} to {name}");
-                self.run_op("Renaming branch", Then::Dialog(done), move |git| {
-                    refs::rename_branch(&git, &old, &name)
-                });
+                self.run_op(
+                    At::Selected,
+                    "Renaming branch",
+                    move |git| refs::rename_branch(&git, &old, &name),
+                    from_dialog(say(done)),
+                )
             }
             DialogKind::NewTag {
                 name,
@@ -237,9 +302,12 @@ impl Project {
             } => {
                 let name = name.trim().to_owned();
                 let done = format!("Created tag {name}");
-                self.run_op("Creating tag", Then::Dialog(done), move |git| {
-                    refs::create_tag(&git, &name, &target, Some(&message))
-                });
+                self.run_op(
+                    At::Selected,
+                    "Creating tag",
+                    move |git| refs::create_tag(&git, &name, &target, Some(&message)),
+                    from_dialog(say(done)),
+                )
             }
             DialogKind::Stash {
                 message,
@@ -253,25 +321,33 @@ impl Project {
                     keep_index,
                     staged_only,
                 };
-                self.run_op("Stashing", Then::Dialog("Stashed".to_owned()), move |git| {
-                    stash::push(&git, &options)
-                });
+                self.run_op(
+                    At::Selected,
+                    "Stashing",
+                    move |git| stash::push(&git, &options),
+                    from_dialog(say("Stashed".to_owned())),
+                )
             }
             DialogKind::StashBranch { id, name, .. } => {
                 let name = name.trim().to_owned();
                 let done = format!("Created {name} from the stash and switched to it");
-                self.run_op("Creating branch", Then::Dialog(done), move |git| {
-                    stash::branch(&git, &name, id)
-                });
+                self.run_op(
+                    At::Selected,
+                    "Creating branch",
+                    move |git| stash::branch(&git, &name, id),
+                    from_dialog(say(done)),
+                )
             }
             DialogKind::Merge {
                 into, rev, no_ff, ..
             } => {
-                dialog.submitting = false;
-                self.apply_conflict_action(Action::Merge { rev, no_ff, into });
-                if let Some(dialog) = &mut self.dialog {
-                    dialog.submitting = self.op.is_some();
-                }
+                let (done, stopped) = merge_messages(&rev, &into);
+                self.run_op(
+                    At::Selected,
+                    "Merging",
+                    move |git| graft_core::conflicts::merge(&git, &rev, no_ff),
+                    from_dialog(after_conflicts(done, stopped, None)),
+                )
             }
             DialogKind::Remote {
                 original,
@@ -291,9 +367,12 @@ impl Project {
                 } else {
                     "Saving remote"
                 };
-                self.run_op(label, Then::Dialog(done), move |git| {
-                    remote::save_remote(&git, original.as_deref(), &name, &url, fetch)
-                });
+                self.run_op(
+                    At::Selected,
+                    label,
+                    move |git| remote::save_remote(&git, original.as_deref(), &name, &url, fetch),
+                    from_dialog(say(done)),
+                )
             }
             DialogKind::Reset {
                 target,
@@ -302,208 +381,24 @@ impl Project {
                 mode,
             } => {
                 let done = format!("Reset {branch} to {target_label}");
-                self.run_op("Resetting", Then::Dialog(done), move |git| {
-                    refs::reset(&git, &target, mode)
-                });
-            }
-        }
-    }
-
-    /// Something failed: show it where the user can act on it.
-    pub(super) fn on_op_error(&mut self, then: Then, error: String) {
-        if let Some(form) = &mut self.new_worktree
-            && form.creating
-        {
-            form.creating = false;
-            form.error = Some(error);
-            return;
-        }
-        if let Some(dialog) = &mut self.dialog
-            && dialog.submitting
-        {
-            dialog.submitting = false;
-            dialog.error = Some(error);
-            return;
-        }
-        match then {
-            Then::DeletedBranch(name) if error.contains(NOT_MERGED) => {
-                self.confirm = Some(Confirm {
-                    title: format!("{name} is not merged"),
-                    body: format!(
-                        "Its commits are not in your current branch or its upstream. \
-                         Deleting it anyway can lose those commits.\n\n{error}"
-                    ),
-                    confirm_label: "Delete anyway".to_owned(),
-                    action: Action::DeleteBranch { name, force: true },
-                });
-            }
-            Then::Switched(branch) if blocked_by_changes(&error) => {
-                let untracked = blocked_by_untracked(&error);
-                self.confirm = Some(Confirm {
-                    title: format!("Your changes are in the way of {branch}"),
-                    body: format!(
-                        "Switching would overwrite uncommitted changes in your main folder: \
-                         {}.\n\nGraft can stash them first; get them back later from \
-                         Stashes (Apply or Pop).",
-                        files_in_the_way(&error)
-                    ),
-                    confirm_label: "Stash and switch".to_owned(),
-                    action: Action::StashAndCheckout { branch, untracked },
-                });
-            }
-            Then::Pushed if is_rejected_push(&error) => {
-                self.confirm = Some(Confirm {
-                    title: "The remote has commits you don't have".to_owned(),
-                    body: "Pull first to combine them with yours. Or force push to replace \
-                           the remote branch with yours; Graft uses --force-with-lease, so it \
-                           only goes through if nobody pushed since your last fetch."
-                        .to_owned(),
-                    confirm_label: "Force push".to_owned(),
-                    action: Action::Remote(RemoteOp::ForcePush),
-                });
-            }
-            _ if no_remote(&error) => {
-                self.notices.push(
-                    "This repository has no remote yet. Add one under REMOTES in the sidebar \
-                     (Add remote…)."
-                        .to_owned(),
-                );
-            }
-            _ if no_identity(&error) => {
-                self.notices.push(
-                    "Git doesn't know who you are yet. Set your name and email in Settings \
-                     (the gear at the top right)."
-                        .to_owned(),
-                );
-            }
-            _ => self.notices.push(error),
-        }
-    }
-
-    pub(super) fn apply_ref_action(&mut self, action: Action) {
-        match action {
-            Action::OpenDialog(kind) => {
-                if !self.is_operating() {
-                    self.dialog = Some(Dialog::new(kind));
-                }
-            }
-            Action::CloseDialog => {
-                if !self.dialog.as_ref().is_some_and(|d| d.submitting) {
-                    self.dialog = None;
-                }
-            }
-            Action::SubmitDialog => self.submit_dialog(),
-            Action::Checkout(branch) => {
-                let then = Then::Switched(branch.clone());
-                self.checkout("Switching branch", then, move |git| {
-                    refs::switch(&git, &branch).map(|()| None)
-                });
-            }
-            Action::StashAndCheckout { branch, untracked } => {
-                let then = Then::Switched(branch.clone());
-                self.checkout("Switching branch", then, move |git| {
-                    stash::push(
-                        &git,
-                        &stash::Options {
-                            message: format!("Before switching to {branch}"),
-                            include_untracked: untracked,
-                            ..Default::default()
-                        },
-                    )?;
-                    refs::switch(&git, &branch)?;
-                    Ok(Some(format!(
-                        "Your changes are in the stash \"Before switching to {branch}\""
-                    )))
-                });
-            }
-            Action::CheckoutRemote { local, remote } => {
-                let done = format!("Switched to {local}, tracking {remote}");
-                self.checkout("Switching branch", Then::Info(done), move |git| {
-                    refs::switch_tracking(&git, &local, &remote).map(|()| None)
-                });
-            }
-            Action::CheckoutDetached(id) => {
-                let rev = id.to_string();
-                let done = format!("Checked out {}", graft_core::short(&id));
-                self.checkout("Checking out", Then::Info(done), move |git| {
-                    refs::switch_detached(&git, &rev).map(|()| None)
-                });
-            }
-            Action::DeleteBranch { name, force } => {
-                let target = name.clone();
-                self.run_op_at(
-                    self.git.clone(),
-                    "Deleting branch",
-                    Then::DeletedBranch(name.clone()),
-                    move |git| {
-                        refs::delete_branch(&git, &target, force)?;
-                        Ok(Some(format!("Deleted branch {target}")))
-                    },
-                );
-            }
-            Action::RemoveRemote(name) => {
-                let done = format!("Removed remote {name}");
-                self.run_op_at(
-                    self.git.clone(),
-                    "Removing remote",
-                    Then::Info(done),
-                    move |git| remote::remove_remote(&git, &name).map(|()| None),
-                );
-            }
-            Action::DeleteTag(name) => {
-                let done = format!("Deleted tag {name}");
-                self.run_op("Deleting tag", Then::Info(done), move |git| {
-                    refs::delete_tag(&git, &name)
-                });
-            }
-            Action::CherryPick(id) => {
-                let rev = id.to_string();
-                let done = format!("Cherry-picked {}", graft_core::short(&id));
-                let stopped = format!(
-                    "Cherry-picking {} stopped with conflicts. Resolve them in File status, then Continue.",
-                    graft_core::short(&id)
-                );
-                self.run_op_at(
-                    self.wt_git(),
-                    "Cherry-picking",
-                    Then::MayConflict(done),
-                    move |git| Ok(refs::cherry_pick(&git, &rev)?.then_some(stopped)),
-                );
-            }
-            Action::Revert(id) => {
-                let rev = id.to_string();
-                let done = format!("Reverted {}", graft_core::short(&id));
-                let stopped = format!(
-                    "Reverting {} stopped with conflicts. Resolve them in File status, then Continue.",
-                    graft_core::short(&id)
-                );
-                self.run_op_at(
-                    self.wt_git(),
-                    "Reverting",
-                    Then::MayConflict(done),
-                    move |git| Ok(refs::revert(&git, &rev)?.then_some(stopped)),
-                );
-            }
-            Action::UndoCommit => {
                 self.run_op(
-                    "Undoing commit",
-                    Then::Info("Undid the last commit; its changes are staged".to_owned()),
-                    move |git| refs::undo_last_commit(&git),
-                );
-                self.nav.view = super::WorkspaceView::FileStatus;
+                    At::Selected,
+                    "Resetting",
+                    move |git| refs::reset(&git, &target, mode),
+                    from_dialog(say(done)),
+                )
             }
-            _ => {}
         }
     }
 
     /// Check out in the main folder, never in a linked worktree, and select
     /// the main folder so the user sees where it happened. Stays put on
     /// Review or with a drafted commit message, which selecting would reset.
-    fn checkout(
+    fn checkout<R: Send + 'static>(
         &mut self,
         label: &str,
-        then: Then,
-        job: impl FnOnce(graft_core::Git) -> anyhow::Result<Option<String>> + Send + 'static,
+        job: impl FnOnce(Git) -> anyhow::Result<R> + Send + 'static,
+        done: impl FnOnce(&mut Project, anyhow::Result<R>) + Send + 'static,
     ) {
         if self.is_operating() {
             return;
@@ -512,18 +407,149 @@ impl Project {
             self.notices.push(reason.to_owned());
             return;
         }
-        let draft =
-            !self.commit_form.summary.trim().is_empty() || !self.commit_form.body.trim().is_empty();
+        if !self.run_op(At::Main, label, job, done) {
+            return;
+        }
         if self.nav.tab != Tab::Review
-            && !draft
+            && !self.commit_form.is_drafted()
             && let Some(main) = self.main_worktree()
             && !graft_core::same_path(&main.path, &self.nav.worktree)
         {
             let main = main.path.clone();
             self.open_worktree(main);
         }
-        // `self.git` works in the main folder.
-        self.run_op_at(self.git.clone(), label, then, job);
+    }
+
+    pub(super) fn switch(&mut self, branch: String) {
+        let done = switched(branch.clone());
+        self.checkout(
+            "Switching branch",
+            move |git| refs::switch(&git, &branch).map(|()| None),
+            done,
+        );
+    }
+
+    pub(super) fn stash_and_switch(&mut self, branch: String, untracked: bool) {
+        let done = switched(branch.clone());
+        self.checkout(
+            "Switching branch",
+            move |git| {
+                let message = format!("Before switching to {branch}");
+                stash::push(
+                    &git,
+                    &stash::Options {
+                        message: message.clone(),
+                        include_untracked: untracked,
+                        ..Default::default()
+                    },
+                )?;
+                refs::switch(&git, &branch)?;
+                Ok(Some(format!("Your changes are in the stash \"{message}\"")))
+            },
+            done,
+        );
+    }
+
+    pub(super) fn switch_tracking(&mut self, local: String, remote: String) {
+        let done = format!("Switched to {local}, tracking {remote}");
+        self.checkout(
+            "Switching branch",
+            move |git| refs::switch_tracking(&git, &local, &remote),
+            say(done),
+        );
+    }
+
+    pub(super) fn switch_detached(&mut self, id: Oid) {
+        let done = format!("Checked out {}", graft_core::short(&id));
+        self.checkout(
+            "Checking out",
+            move |git| refs::switch_detached(&git, &id.to_string()),
+            say(done),
+        );
+    }
+
+    pub(super) fn delete_branch(&mut self, name: String, force: bool) {
+        let target = name.clone();
+        self.run_op(
+            At::Main,
+            "Deleting branch",
+            move |git| refs::delete_branch(&git, &target, force),
+            move |p, result| match result {
+                Ok(()) => p.infos.push(format!("Deleted branch {name}")),
+                Err(e) if format!("{e:#}").contains(NOT_MERGED) => {
+                    p.confirm = Some(Confirm {
+                        title: format!("{name} is not merged"),
+                        body: format!(
+                            "Its commits are not in your current branch or its upstream. \
+                             Deleting it anyway can lose those commits.\n\n{e:#}"
+                        ),
+                        confirm_label: "Delete anyway".to_owned(),
+                        action: Action::DeleteBranch { name, force: true },
+                    });
+                }
+                Err(e) => p.report(e),
+            },
+        );
+    }
+
+    pub(super) fn remove_remote(&mut self, name: String) {
+        let done = format!("Removed remote {name}");
+        self.run_op(
+            At::Main,
+            "Removing remote",
+            move |git| remote::remove_remote(&git, &name),
+            say(done),
+        );
+    }
+
+    pub(super) fn delete_tag(&mut self, name: String) {
+        let done = format!("Deleted tag {name}");
+        self.run_op(
+            At::Selected,
+            "Deleting tag",
+            move |git| refs::delete_tag(&git, &name),
+            say(done),
+        );
+    }
+
+    pub(super) fn cherry_pick(&mut self, id: Oid) {
+        let short = graft_core::short(&id);
+        let done = format!("Cherry-picked {short}");
+        let stopped = format!(
+            "Cherry-picking {short} stopped with conflicts. Resolve them in File status, then Continue."
+        );
+        self.run_op(
+            At::Selected,
+            "Cherry-picking",
+            move |git| refs::cherry_pick(&git, &id.to_string()),
+            after_conflicts(done, stopped, None),
+        );
+    }
+
+    pub(super) fn revert(&mut self, id: Oid) {
+        let short = graft_core::short(&id);
+        let done = format!("Reverted {short}");
+        let stopped = format!(
+            "Reverting {short} stopped with conflicts. Resolve them in File status, then Continue."
+        );
+        self.run_op(
+            At::Selected,
+            "Reverting",
+            move |git| refs::revert(&git, &id.to_string()),
+            after_conflicts(done, stopped, None),
+        );
+    }
+
+    pub(super) fn undo_commit(&mut self) {
+        let started = self.run_op(
+            At::Selected,
+            "Undoing commit",
+            move |git| refs::undo_last_commit(&git),
+            say("Undid the last commit; its changes are staged".to_owned()),
+        );
+        if started {
+            self.nav.view = WorkspaceView::FileStatus;
+        }
     }
 }
 
@@ -538,6 +564,8 @@ mod tests {
     use graft_core::jobs::JobPool;
 
     use super::*;
+    use crate::project::RepoMemory;
+    use crate::settings::Settings;
 
     fn git(dir: &Path, args: &[&str]) {
         let status = Cmd::new("git")
@@ -608,7 +636,14 @@ mod tests {
         prepare(&main);
 
         let pool = JobPool::new(2, Arc::new(|| {}));
-        let mut project = Project::new(main.clone(), main.clone(), Console::default(), pool);
+        let mut project = Project::new(
+            main.clone(),
+            main.clone(),
+            Settings::default(),
+            RepoMemory::default(),
+            Console::default(),
+            pool,
+        );
         wait(&mut project, "snapshot never came", |p| {
             p.snapshot.is_some()
         });
@@ -722,6 +757,49 @@ mod tests {
         });
         assert!(graft_core::same_path(&project.nav.worktree, &linked));
         assert_eq!(project.commit_form.summary, "half-written");
+    }
+
+    /// Selecting another worktree on the Review tab drops the old
+    /// worktree's File status diff, so nothing stages into the wrong one.
+    #[test]
+    fn review_worktree_switch_drops_the_old_diff() {
+        let Setup {
+            _dir,
+            mut project,
+            main,
+            linked,
+        } = setup(|_| {});
+        std::fs::write(
+            linked.join("b.txt"),
+            "agent's work
+",
+        )
+        .unwrap();
+        project.refresh();
+        wait(&mut project, "no diff for the new file", |p| {
+            p.diff_view.as_ref().is_some_and(|v| v.key.path == "b.txt")
+        });
+        project.apply(Action::SetTab(Tab::Review));
+        project.apply(Action::OpenWorktree(main));
+        assert_eq!(project.nav.tab, Tab::Review);
+        assert!(project.diff_view.is_none(), "main is clean: no diff");
+    }
+
+    /// An action refused because another operation runs changes nothing.
+    #[test]
+    fn refused_operations_leave_the_screen_alone() {
+        let Setup {
+            _dir, mut project, ..
+        } = setup(|_| {});
+        project.nav.view = WorkspaceView::History;
+        project.apply(Action::Checkout("other".to_owned()));
+        assert!(project.is_operating());
+        project.apply(Action::UndoCommit);
+        assert_eq!(project.nav.view, WorkspaceView::History);
+        project.dialog = Some(Dialog::new(DialogKind::stash()));
+        project.apply(Action::SubmitDialog);
+        assert!(!project.dialog.as_ref().unwrap().submitting);
+        wait(&mut project, "checkout never ended", |p| !p.is_operating());
     }
 
     #[test]

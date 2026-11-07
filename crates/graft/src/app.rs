@@ -3,19 +3,19 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, Sender};
 use egui::{CentralPanel, Frame, Margin, Panel};
-use graft_core::Progress;
 use graft_core::jobs::{JobPool, Waker};
 use graft_core::repo::{self, Location};
-use graft_core::{CancelToken, Console, JobError, Panicked, same_path};
+use graft_core::{Console, Panicked, is_cancelled, same_path};
 use serde::{Deserialize, Serialize};
 
 use crate::groups::{self, GroupId, TabGroup};
 use crate::keys::{self, Command};
-use crate::project::{Action, Project, ReviewState, SlashedBranch};
+use crate::project::{Action, Project, RepoMemory, ReviewState, SlashedBranch};
+use crate::running::Running;
 use crate::settings::Settings;
 use crate::theme::color;
 use crate::ui::about::AboutAction;
@@ -23,9 +23,10 @@ use crate::ui::console::{self as console_ui, ConsoleView, STATUS_HEIGHT};
 use crate::ui::group_dialog::{self, GroupForm, GroupTarget};
 use crate::ui::project_tabs::{self, GroupInfo, TabAction, TabInfo};
 use crate::ui::settings::{self as settings_ui, SettingsForm};
-use crate::ui::start::{Busy, Recent, StartAction, StartPage};
+use crate::ui::start::{Recent, StartAction, StartPage};
 use crate::ui::toasts::Toasts;
-use crate::update::{self, Release};
+use crate::ui::{Actions, AppAction};
+use crate::update;
 use crate::{fonts, theme, ui};
 
 const STORAGE_KEY: &str = "graft";
@@ -48,32 +49,39 @@ struct Persisted {
     settings: Settings,
 }
 
-#[derive(Clone, Copy)]
-enum Pick {
-    Open,
-    CloneParent,
-    InitFolder,
+impl Persisted {
+    /// What was saved about each repository, by its root.
+    fn memories(&mut self) -> HashMap<PathBuf, RepoMemory> {
+        let mut memories: HashMap<PathBuf, RepoMemory> = HashMap::new();
+        for (root, reviews) in std::mem::take(&mut self.reviews) {
+            memories.entry(root).or_default().reviews = reviews;
+        }
+        for (root, slashed) in std::mem::take(&mut self.slashed) {
+            let key = memories.keys().find(|k| same_path(k, &root)).cloned();
+            memories.entry(key.unwrap_or(root)).or_default().slashed = slashed;
+        }
+        memories
+    }
+
+    fn set_memories(&mut self, memories: impl IntoIterator<Item = (PathBuf, RepoMemory)>) {
+        for (root, memory) in memories {
+            let memory = memory.pruned();
+            if !memory.reviews.is_empty() {
+                self.reviews.insert(root.clone(), memory.reviews);
+            }
+            if !memory.slashed.is_empty() {
+                self.slashed.insert(root, memory.slashed);
+            }
+        }
+    }
 }
 
-enum AppEvent {
-    Picked(Pick, Option<PathBuf>),
-    Distros(Vec<String>),
-    Home(String, Option<String>),
-    Opened(Result<Location, JobError>),
-    /// `manual` when the user asked (About), so failures are shown.
-    UpdateChecked {
-        result: Result<Release, String>,
-        manual: bool,
-    },
-    /// The new program, ready to start.
-    UpdateInstalled(Result<update::Installed, String>),
-    /// A job panicked instead of answering.
-    Panicked(String),
-}
+/// A finished job's result, applied to the app on the UI thread.
+struct Done(Box<dyn FnOnce(&mut GraftApp) + Send>);
 
-impl From<Panicked> for AppEvent {
-    fn from(p: Panicked) -> Self {
-        AppEvent::Panicked(p.0)
+impl From<Panicked> for Done {
+    fn from(panic: Panicked) -> Self {
+        Done(Box::new(move |app| app.open_failed(panic.0)))
     }
 }
 
@@ -93,16 +101,14 @@ pub struct GraftApp {
     console_view: ConsoleView,
     console_open: bool,
     pool: JobPool,
-    tx: Sender<AppEvent>,
-    rx: Receiver<AppEvent>,
+    tx: Sender<Done>,
+    rx: Receiver<Done>,
     toasts: Toasts,
     search: String,
     window_title: String,
     was_focused: bool,
-    /// Review state of repositories that are not open.
-    reviews: HashMap<PathBuf, HashMap<PathBuf, ReviewState>>,
-    /// "Recently slashed" of repositories that are not open.
-    slashed: HashMap<PathBuf, Vec<SlashedBranch>>,
+    /// What Graft remembers about repositories that are not open.
+    memories: HashMap<PathBuf, RepoMemory>,
     settings: Settings,
     settings_form: Option<SettingsForm>,
     update: update::Status,
@@ -131,7 +137,7 @@ impl GraftApp {
         let console = Console::default();
         let (tx, rx) = crossbeam_channel::unbounded();
 
-        let persisted: Persisted = cc
+        let mut persisted: Persisted = cc
             .storage
             .and_then(|s| eframe::get_value(s, STORAGE_KEY))
             .unwrap_or_default();
@@ -146,20 +152,21 @@ impl GraftApp {
                     .map(Path::to_path_buf)
             })
             .unwrap_or_else(crate::settings::default_clone_parent);
-        let mut reviews = persisted.reviews;
-        let mut slashed = persisted.slashed;
-        let settings = persisted.settings;
+        let mut memories = persisted.memories();
+        let settings = std::mem::take(&mut persisted.settings);
         theme::apply(&cc.egui_ctx, settings.theme.preference());
         let projects: Vec<Project> = persisted
             .open
             .iter()
             .map(|root| {
-                let mut project =
-                    Project::new(root.clone(), root.clone(), console.clone(), pool.clone());
-                project.reviews = take_reviews(&mut reviews, root);
-                project.slashed = take_reviews(&mut slashed, root);
-                project.settings = settings.clone();
-                project
+                Project::new(
+                    root.clone(),
+                    root.clone(),
+                    settings.clone(),
+                    take_memory(&mut memories, root),
+                    console.clone(),
+                    pool.clone(),
+                )
             })
             .collect();
         let active = persisted
@@ -185,8 +192,7 @@ impl GraftApp {
             search: String::new(),
             window_title: String::new(),
             was_focused: true,
-            reviews,
-            slashed,
+            memories,
             settings,
             settings_form: None,
             update: update::Status::Idle,
@@ -210,49 +216,34 @@ impl GraftApp {
         app
     }
 
+    /// Run `job` on the pool; `done` gets its result on the UI thread.
+    fn spawn<T: Send + 'static>(
+        &self,
+        job: impl FnOnce() -> T + Send + 'static,
+        done: impl FnOnce(&mut GraftApp, T) + Send + 'static,
+    ) {
+        self.pool.spawn(&self.tx, move || {
+            let result = job();
+            Done(Box::new(move |app| done(app, result)))
+        });
+    }
+
+    /// Like [`Self::spawn`], on a thread of its own: for jobs that wait on
+    /// the network or the user.
+    fn spawn_long<T: Send + 'static>(
+        &self,
+        job: impl FnOnce(Waker) -> T + Send + 'static,
+        done: impl FnOnce(&mut GraftApp, T) + Send + 'static,
+    ) {
+        self.pool.spawn_long(&self.tx, move |waker| {
+            let result = job(waker);
+            Done(Box::new(move |app| done(app, result)))
+        });
+    }
+
     fn poll(&mut self) {
-        while let Ok(event) = self.rx.try_recv() {
-            match event {
-                AppEvent::Picked(_, None) => {}
-                AppEvent::Picked(Pick::Open, Some(path)) => self.open_folder(path),
-                AppEvent::Picked(Pick::CloneParent, Some(path)) => {
-                    self.start.picked_clone_parent(&path);
-                }
-                AppEvent::Picked(Pick::InitFolder, Some(path)) => {
-                    self.start.picked_init_folder(&path);
-                }
-                AppEvent::Distros(distros) => self.start.set_distros(distros),
-                AppEvent::Home(distro, home) => self.start.set_home(distro, home),
-                AppEvent::Opened(Ok(location)) => self.add_project(location),
-                AppEvent::Opened(Err(JobError::Cancelled)) => self.start.busy = None,
-                AppEvent::Opened(Err(JobError::Failed(error))) | AppEvent::Panicked(error) => {
-                    self.start.busy = None;
-                    if self.active.is_none() {
-                        self.start.error = Some(error);
-                    } else {
-                        self.toasts.error(error);
-                    }
-                }
-                AppEvent::UpdateChecked { result, manual } => {
-                    self.update = match result {
-                        Ok(release) if release.is_newer() => update::Status::Available(release),
-                        Ok(_) => update::Status::UpToDate,
-                        Err(error) if manual => update::Status::Failed(error),
-                        Err(error) => {
-                            tracing::info!("update check: {error}");
-                            update::Status::Idle
-                        }
-                    };
-                }
-                AppEvent::UpdateInstalled(result) => {
-                    match result.and_then(|installed| {
-                        update::restart(&installed).map_err(|e| format!("{e:#}"))
-                    }) {
-                        Ok(()) => self.closing = true,
-                        Err(error) => self.update = update::Status::Failed(error),
-                    }
-                }
-            }
+        while let Ok(Done(apply)) = self.rx.try_recv() {
+            apply(self);
         }
         for project in &mut self.projects {
             project.poll();
@@ -280,13 +271,31 @@ impl GraftApp {
     /// Find the repository at `path` in the background, then open it.
     fn open_folder(&mut self, path: PathBuf) {
         let console = self.console.clone();
-        self.pool.spawn(&self.tx, move || {
-            AppEvent::Opened(repo::locate(&path, &console).map_err(JobError::from))
-        });
+        self.spawn(move || repo::locate(&path, &console), Self::opened);
+    }
+
+    /// A repository was found, cloned or created, or that failed.
+    fn opened(&mut self, result: anyhow::Result<Location>) {
+        match result {
+            Ok(location) => self.add_project(location),
+            Err(e) if is_cancelled(&e) => self.start.stop(None),
+            Err(e) => self.open_failed(format!("{e:#}")),
+        }
+    }
+
+    /// Say why opening failed: on the start page while it shows, else as a
+    /// toast.
+    fn open_failed(&mut self, error: String) {
+        if self.active.is_none() {
+            self.start.stop(Some(error));
+        } else {
+            self.start.stop(None);
+            self.toasts.error(error);
+        }
     }
 
     fn add_project(&mut self, location: Location) {
-        if self.start.busy.is_some() {
+        if self.start.is_busy() {
             self.toasts
                 .info(format!("Ready: {}", location.root.display()));
         }
@@ -303,15 +312,15 @@ impl GraftApp {
             }
             return;
         }
-        let mut project = Project::new(
+        let memory = take_memory(&mut self.memories, &location.root);
+        let project = Project::new(
             location.root,
             location.opened,
+            self.settings.clone(),
+            memory,
             self.console.clone(),
             self.pool.clone(),
         );
-        project.reviews = take_reviews(&mut self.reviews, &project.root);
-        project.slashed = take_reviews(&mut self.slashed, &project.root);
-        project.settings = self.settings.clone();
         self.projects.push(project);
         self.activate(Some(self.projects.len() - 1));
         // Next to the other open tabs of its group.
@@ -489,11 +498,9 @@ impl GraftApp {
         if index >= self.projects.len() {
             return;
         }
-        let mut project = self.projects.remove(index);
-        self.reviews
-            .insert(project.root.clone(), std::mem::take(&mut project.reviews));
-        self.slashed
-            .insert(project.root.clone(), std::mem::take(&mut project.slashed));
+        let project = self.projects.remove(index);
+        self.memories
+            .insert(project.root.clone(), project.memory().clone());
         let fix = |slot: Option<usize>, len: usize| match slot {
             Some(i) if i == index => None,
             Some(i) if i > index => Some(i - 1),
@@ -584,61 +591,50 @@ impl GraftApp {
         match action {
             StartAction::PickOpen => {
                 let start = self.start.open_start();
-                self.pick(Pick::Open, "Open a git repository", start);
+                self.pick("Open a git repository", start, Self::open_folder);
             }
             StartAction::LoadDistros => {
-                self.pool
-                    .spawn(&self.tx, || AppEvent::Distros(graft_core::wsl::distros()));
+                self.spawn(graft_core::wsl::distros, |app, distros| {
+                    app.start.set_distros(distros)
+                });
             }
             StartAction::LoadHome(distro) => {
-                self.pool.spawn(&self.tx, move || {
-                    let home = graft_core::wsl::Wsl::new(&distro).home();
-                    AppEvent::Home(distro, home)
-                });
+                let asked = distro.clone();
+                self.spawn(
+                    move || graft_core::wsl::Wsl::new(&asked).home(),
+                    |app, home| app.start.set_home(distro, home),
+                );
             }
             StartAction::PickCloneParent => {
                 let start = self.start.clone_parent_start();
-                self.pick(Pick::CloneParent, "Clone into folder", start);
+                self.pick("Clone into folder", start, |app, folder| {
+                    app.start.picked_clone_parent(&folder)
+                });
             }
             StartAction::PickInitFolder => {
                 let start = self.start.init_start();
-                self.pick(Pick::InitFolder, "Folder for the new repository", start);
+                self.pick("Folder for the new repository", start, |app, folder| {
+                    app.start.picked_init_folder(&folder)
+                });
             }
             StartAction::Clone { url, dest } => {
-                let progress = Arc::new(Mutex::new(Progress::default()));
-                let cancel = CancelToken::default();
-                self.start.busy = Some(Busy {
-                    label: format!("Cloning {}", graft_core::console::redact(&url)),
-                    progress: progress.clone(),
-                    cancel: Some(cancel.clone()),
-                });
+                let label = format!("Cloning {}", graft_core::console::redact(&url));
+                let (running, cancel) = Running::cancellable(label);
+                let report = running.reporter(self.pool.waker());
+                self.start.begin(running);
                 let console = self.console.clone();
-                self.pool.spawn_long(&self.tx, move |waker| {
-                    let result = repo::clone(&url, &dest, &console, &cancel, |p| {
-                        if let Ok(mut slot) = progress.lock() {
-                            *slot = p;
-                        }
-                        waker();
-                    });
-                    AppEvent::Opened(result.map_err(JobError::from))
-                });
+                self.spawn_long(
+                    move |_| repo::clone(&url, &dest, &console, &cancel, report),
+                    Self::opened,
+                );
             }
             StartAction::Init(path) => {
-                self.start.busy = Some(Busy {
-                    label: format!("Creating {}", self.start.show_path(&path)),
-                    progress: Arc::default(),
-                    cancel: None,
-                });
+                let label = format!("Creating {}", self.start.show_path(&path));
+                self.start.begin(Running::new(label));
                 let console = self.console.clone();
-                self.pool.spawn(&self.tx, move || {
-                    AppEvent::Opened(repo::init(&path, &console).map_err(JobError::from))
-                });
+                self.spawn(move || repo::init(&path, &console), Self::opened);
             }
-            StartAction::Cancel => {
-                if let Some(cancel) = self.start.busy.as_ref().and_then(|b| b.cancel.as_ref()) {
-                    cancel.cancel();
-                }
-            }
+            StartAction::Cancel => self.start.cancel(),
             StartAction::OpenRecent(path) => self.open_folder(path),
             StartAction::ForgetRecent(path) => self.recent.retain(|r| !same_path(&r.path, &path)),
             StartAction::OpenGroup(id) => self.open_group(id),
@@ -647,22 +643,42 @@ impl GraftApp {
         }
     }
 
-    /// Show a folder picker on its own thread; the answer arrives as an event.
-    fn pick(&self, pick: Pick, title: &'static str, start: Option<PathBuf>) {
-        self.pool.spawn_long(&self.tx, move |_| {
-            let mut dialog = rfd::FileDialog::new().set_title(title);
-            if let Some(dir) = start.filter(|d| d.is_dir()) {
-                dialog = dialog.set_directory(dir);
-            }
-            AppEvent::Picked(pick, dialog.pick_folder())
-        });
+    /// Show a folder picker on its own thread; `picked` gets the folder.
+    fn pick(
+        &self,
+        title: &'static str,
+        start: Option<PathBuf>,
+        picked: impl FnOnce(&mut GraftApp, PathBuf) + Send + 'static,
+    ) {
+        self.spawn_long(
+            move |_| {
+                let mut dialog = rfd::FileDialog::new().set_title(title);
+                if let Some(dir) = start.filter(|d| d.is_dir()) {
+                    dialog = dialog.set_directory(dir);
+                }
+                dialog.pick_folder()
+            },
+            |app, folder| {
+                if let Some(folder) = folder {
+                    picked(app, folder);
+                }
+            },
+        );
     }
 
+    /// `manual` when the user asked (About), so failures are shown.
     fn check_update(&mut self, manual: bool) {
         self.update = update::Status::Checking;
-        self.pool.spawn(&self.tx, move || AppEvent::UpdateChecked {
-            result: update::check().map_err(|e| format!("{e:#}")),
-            manual,
+        self.spawn(update::check, move |app, result| {
+            app.update = match result {
+                Ok(release) if release.is_newer() => update::Status::Available(release),
+                Ok(_) => update::Status::UpToDate,
+                Err(e) if manual => update::Status::Failed(format!("{e:#}")),
+                Err(e) => {
+                    tracing::info!("update check: {e:#}");
+                    update::Status::Idle
+                }
+            };
         });
     }
 
@@ -685,11 +701,14 @@ impl GraftApp {
                 };
                 let release = release.clone();
                 self.update = update::Status::Installing(release.clone());
-                self.pool.spawn_long(&self.tx, move |_| {
-                    AppEvent::UpdateInstalled(
-                        update::install(&release).map_err(|e| format!("{e:#}")),
-                    )
-                });
+                self.spawn_long(
+                    move |_| update::install(&release),
+                    |app, installed| match installed.and_then(|i| update::restart(&i)) {
+                        // The new Graft runs: close this one.
+                        Ok(()) => app.closing = true,
+                        Err(e) => app.update = update::Status::Failed(format!("{e:#}")),
+                    },
+                );
             }
         }
     }
@@ -728,14 +747,7 @@ impl GraftApp {
             }
             settings_ui::Outcome::Save(settings, identity) => {
                 self.settings_form = None;
-                self.settings = settings;
-                for p in &mut self.projects {
-                    // Whole files load differently: set it the long way.
-                    let whole = p.settings.whole_file;
-                    p.settings = self.settings.clone();
-                    p.settings.whole_file = whole;
-                    p.set_whole_file(self.settings.whole_file);
-                }
+                self.change_settings(|s| *s = settings.clone());
                 if let (Some(identity), Some(i)) = (identity, self.active) {
                     self.projects[i].apply(Action::SaveIdentity(identity));
                 }
@@ -759,7 +771,7 @@ impl GraftApp {
             self.activate(None);
         }
         if pressed(Command::OpenFolder) {
-            self.pick(Pick::Open, "Open a git repository", None);
+            self.pick("Open a git repository", None, Self::open_folder);
         }
         if pressed(Command::CloseTab) {
             match self.active {
@@ -793,28 +805,29 @@ impl GraftApp {
             self.console_open = !self.console_open;
         }
         if pressed(Command::WrapLines) {
-            self.settings.wrap_lines = !self.settings.wrap_lines;
-            for p in &mut self.projects {
-                p.settings.wrap_lines = self.settings.wrap_lines;
-            }
-            // An open Settings window saves what it shows: keep it current.
-            if let Some(form) = &mut self.settings_form {
-                form.draft.wrap_lines = self.settings.wrap_lines;
-            }
+            let wrap = !self.settings.wrap_lines;
+            self.change_settings(|s| s.wrap_lines = wrap);
         }
         if pressed(Command::WholeFile) {
             self.toggle_whole_file();
         }
     }
 
-    fn toggle_whole_file(&mut self) {
-        self.settings.whole_file = !self.settings.whole_file;
+    /// Change the settings everywhere they live: the app's, every
+    /// project's, and an open Settings window's (it saves what it shows).
+    fn change_settings(&mut self, change: impl Fn(&mut Settings)) {
+        change(&mut self.settings);
         for p in &mut self.projects {
-            p.set_whole_file(self.settings.whole_file);
+            p.set_settings(&self.settings);
         }
         if let Some(form) = &mut self.settings_form {
-            form.draft.whole_file = self.settings.whole_file;
+            change(&mut form.draft);
         }
+    }
+
+    fn toggle_whole_file(&mut self) {
+        let whole = !self.settings.whole_file;
+        self.change_settings(|s| s.whole_file = whole);
     }
 
     /// Folders dropped onto the window open as projects.
@@ -869,11 +882,8 @@ impl GraftApp {
     }
 
     fn sync_window_title(&mut self, ctx: &egui::Context) {
-        let title = match self.active.map(|i| &self.projects[i]) {
-            Some(project) => match project.worktree() {
-                Some(wt) if !wt.is_main => format!("{} · {} — Graft", project.name, wt.label()),
-                _ => format!("{} — Graft", project.name),
-            },
+        let title = match self.active {
+            Some(i) => self.projects[i].title(),
             None => "Graft".to_owned(),
         };
         if title != self.window_title {
@@ -884,93 +894,32 @@ impl GraftApp {
 
     /// What the status bar shows as running, and whether it can be cancelled.
     fn activity(&self) -> Option<(String, bool)> {
-        if let Some(busy) = &self.start.busy {
-            return Some((busy.label.clone(), false));
+        if let Some(status) = self.start.busy_status() {
+            return Some((status, false));
         }
-        let project = &self.projects[self.active?];
-        if let Some(op) = &project.op {
-            let progress = op.progress.lock().map(|p| p.clone()).unwrap_or_default();
-            let mut label = op.label.clone();
-            if !progress.phase.is_empty() {
-                label.push_str(" · ");
-                label.push_str(&progress.phase);
-            }
-            if let Some(fraction) = progress.fraction {
-                label.push_str(&format!(" {:.0}%", fraction * 100.0));
-            }
-            return Some((label, op.cancel.is_some()));
-        }
-        if project.loading {
-            Some((format!("Refreshing {}…", project.name), false))
-        } else if project.history_loading {
-            Some(("Loading history…".to_owned(), false))
-        } else {
-            None
-        }
+        self.projects[self.active?].activity()
     }
 
     fn project_ui(&mut self, ui: &mut egui::Ui, index: usize) {
-        let mut actions = Vec::new();
-        let project = &self.projects[index];
-        if let Some(confirm) = &project.confirm {
-            ui::confirm::show(ui.ctx(), confirm, &mut actions);
+        let Actions { project, app } =
+            ui::project::show(ui, &mut self.projects, index, &mut self.search);
+        for action in project {
+            self.projects[index].apply(action);
         }
-        let project = &mut self.projects[index];
-        if let (Some(form), Some(snap)) = (&mut project.new_worktree, &project.snapshot) {
-            ui::new_worktree::show(ui.ctx(), form, snap, &mut actions);
-        }
-        if let Some(dialog) = &mut project.dialog {
-            ui::dialog::show(ui.ctx(), dialog, &mut actions);
-        }
-        if let Some(view) = &project.slash {
-            let progress = project.op.as_ref().and_then(|op| {
-                let p = op.progress.lock().ok()?;
-                (!p.line.is_empty()).then(|| p.clone())
-            });
-            ui::slash::show(ui.ctx(), view, &project.slashed, progress, &mut actions);
-        }
-        let project = &self.projects[index];
-        let bar = |margin| Frame::new().fill(color::bar_bg()).inner_margin(margin);
-
-        Panel::top("toolbar")
-            .frame(bar(Margin::symmetric(12, 8)))
-            .show(ui, |ui| {
-                ui::toolbar::show(ui, &self.projects, index, &mut actions, &mut self.search)
-            });
-        Panel::top("tabs")
-            .frame(bar(Margin::symmetric(12, 0)))
-            .show(ui, |ui| ui::tabs::show(ui, project, &mut actions));
-        if project.snapshot.is_some() {
-            Panel::left("sidebar")
-                .resizable(true)
-                .default_size(260.0)
-                .size_range(200.0..=440.0)
-                .frame(
-                    Frame::new()
-                        .fill(color::sidebar_bg())
-                        .inner_margin(Margin::symmetric(8, 12)),
-                )
-                .show(ui, |ui| ui::sidebar::show(ui, project, &mut actions));
-        }
-        let project = &mut self.projects[index];
-        CentralPanel::no_frame()
-            .frame(Frame::new().fill(color::app_bg()))
-            .show(ui, |ui| ui::main_area::show(ui, project, &mut actions));
-
-        for action in actions {
+        for action in app {
             match action {
-                Action::Close => {
+                AppAction::Close => {
                     self.close_project(index);
-                    break;
+                    return;
                 }
-                Action::ToggleWholeFile => self.toggle_whole_file(),
-                Action::InProject { project, actions } if project < self.projects.len() => {
+                AppAction::ToggleWholeFile => self.toggle_whole_file(),
+                AppAction::InProject { project, actions } if project < self.projects.len() => {
                     self.activate(Some(project));
                     for action in actions {
                         self.projects[project].apply(action);
                     }
                 }
-                action => self.projects[index].apply(action),
+                AppAction::InProject { .. } => {}
             }
         }
     }
@@ -994,8 +943,8 @@ impl eframe::App for GraftApp {
         if self.closing {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        if self.settings.auto_fetch_minutes > 0 && !self.projects.is_empty() {
-            ctx.request_repaint_after(std::time::Duration::from_secs(20));
+        if let Some(wake) = self.projects.iter().filter_map(Project::next_wake).min() {
+            ctx.request_repaint_after(wake);
         }
 
         let infos: Vec<TabInfo> = self
@@ -1005,7 +954,7 @@ impl eframe::App for GraftApp {
                 name: p.name.clone(),
                 tooltip: graft_core::paths::display(&p.root),
                 dirty: p.is_dirty(),
-                busy: p.snapshot.is_none() && p.error.is_none(),
+                busy: p.is_starting(),
                 error: p.error.is_some(),
                 group: groups::group_of(&self.groups, &p.root),
             })
@@ -1105,32 +1054,21 @@ impl eframe::App for GraftApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        let clone_parent = self.start.clone_parent_path();
-        let mut reviews = self.reviews.clone();
-        for p in &self.projects {
-            reviews.insert(p.root.clone(), p.reviews.clone());
-        }
-        for worktrees in reviews.values_mut() {
-            worktrees
-                .retain(|_, s| s.base.is_some() || !s.viewed.is_empty() || !s.notes.is_empty());
-        }
-        reviews.retain(|_, worktrees| !worktrees.is_empty());
-        let mut slashed = self.slashed.clone();
-        for p in &self.projects {
-            slashed.insert(p.root.clone(), p.slashed.clone());
-        }
-        slashed.retain(|_, list| !list.is_empty());
-        let persisted = Persisted {
+        let mut persisted = Persisted {
             open: self.projects.iter().map(|p| p.root.clone()).collect(),
             active: self.active,
             recent: self.recent.iter().map(|r| r.path.clone()).collect(),
             groups: self.groups.clone(),
-            clone_parent: Some(clone_parent),
+            clone_parent: Some(self.start.clone_parent_path()),
             console_open: self.console_open,
-            reviews,
-            slashed,
             settings: self.settings.clone(),
+            ..Persisted::default()
         };
+        let open = self
+            .projects
+            .iter()
+            .map(|p| (p.root.clone(), p.memory().clone()));
+        persisted.set_memories(self.memories.clone().into_iter().chain(open));
         eframe::set_value(storage, STORAGE_KEY, &persisted);
     }
 
@@ -1140,7 +1078,7 @@ impl eframe::App for GraftApp {
 }
 
 /// What was saved for the repository at `root`.
-fn take_reviews<T: Default>(reviews: &mut HashMap<PathBuf, T>, root: &Path) -> T {
-    let key = reviews.keys().find(|k| same_path(k, root)).cloned();
-    key.and_then(|k| reviews.remove(&k)).unwrap_or_default()
+fn take_memory(memories: &mut HashMap<PathBuf, RepoMemory>, root: &Path) -> RepoMemory {
+    let key = memories.keys().find(|k| same_path(k, root)).cloned();
+    key.and_then(|k| memories.remove(&k)).unwrap_or_default()
 }

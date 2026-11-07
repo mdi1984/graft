@@ -34,7 +34,7 @@ pub mod wsl;
 
 pub use cli::{Git, Progress};
 pub use console::Console;
-pub use jobs::{CancelToken, Cancelled, JobError, Panicked, is_cancelled};
+pub use jobs::{CancelToken, Cancelled, Panicked, is_cancelled};
 pub use model::{
     Branch, Oid, Remote, RemoteBranch, RepoSnapshot, Tag, Upstream, Worktree, null_oid, short,
 };

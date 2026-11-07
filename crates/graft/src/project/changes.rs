@@ -1,19 +1,18 @@
 //! File status: the selected file's diff, line selection, staging and
-//! discarding, the commit form, and fetch/pull/push.
+//! discarding, and the commit form. Also loads the read-only diff of a
+//! commit, stash or review file.
 
 use std::collections::BTreeSet;
 use std::ops::Range;
-use std::sync::{Arc, Mutex};
 
-use graft_core::Progress;
+use graft_core::Git;
 use graft_core::diff::{self, FileDiff, Gap, Source};
 use graft_core::ops::{self, LineOp};
-use graft_core::remote;
 use graft_core::status::{EntryKind, StatusEntry};
-use graft_core::{CancelToken, Git, JobError};
 
 use super::comments::{Pick, Side};
-use super::{Action, Event, Project};
+use super::ops::{At, quietly};
+use super::{Project, RemoteOp, readable};
 
 /// One file in one of the File status lists.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,10 +59,10 @@ fn line_count(diff: &FileDiff) -> usize {
 }
 
 /// A diff as loaded in the background, ready to show.
-pub struct Loaded {
-    pub diff: FileDiff,
-    pub gaps: Option<Vec<Gap>>,
-    pub highlights: Highlights,
+struct Loaded {
+    diff: FileDiff,
+    gaps: Option<Vec<Gap>>,
+    highlights: Highlights,
 }
 
 /// Line ranges on one side of a diff.
@@ -85,11 +84,10 @@ fn load_shown(
     whole: bool,
     revealed: &[(Side, Range<u32>)],
     kept: &[(Side, Range<u32>)],
-) -> Result<Loaded, String> {
+) -> anyhow::Result<Loaded> {
     let reveal = |old, new| whole || has(revealed, old, new);
     let keep = |old, new| has(kept, old, new);
-    let (diff, gaps) = diff::load_expanded(git, &key.source, &key.path, reveal, keep)
-        .map_err(|e| format!("{e:#}"))?;
+    let (diff, gaps) = diff::load_expanded(git, &key.source, &key.path, reveal, keep)?;
     let highlights = Highlights::of(&diff);
     Ok(Loaded {
         diff,
@@ -127,6 +125,15 @@ impl Highlights {
     }
 }
 
+/// Which of the two diffs a project shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Slot {
+    /// File status: the selected worktree's file, with staging.
+    Status,
+    /// A file of a commit, stash or review.
+    ReadOnly,
+}
+
 /// The diff shown next to the file lists.
 pub struct DiffView {
     pub key: FileKey,
@@ -144,11 +151,11 @@ pub struct DiffView {
     /// Unchanged lines the user asked to see, by the line numbers of the
     /// side that stays put (the working tree's while staging).
     pub revealed: SideLines,
-    generation: u64,
+    ticket: u64,
 }
 
 impl DiffView {
-    fn new(key: FileKey, read_only: bool) -> Self {
+    fn new(key: FileKey, slot: Slot) -> Self {
         Self {
             key,
             diff: None,
@@ -157,10 +164,42 @@ impl DiffView {
             loading: true,
             selection: BTreeSet::new(),
             anchor: None,
-            read_only,
+            read_only: slot == Slot::ReadOnly,
             gaps: None,
             revealed: Vec::new(),
-            generation: 0,
+            ticket: 0,
+        }
+    }
+
+    fn clear_selection(&mut self) {
+        self.selection.clear();
+        self.anchor = None;
+    }
+
+    fn changed_lines(&self) -> Vec<(usize, usize)> {
+        let Some(diff) = &self.diff else {
+            return Vec::new();
+        };
+        diff.hunks
+            .iter()
+            .enumerate()
+            .flat_map(|(h, hunk)| {
+                hunk.lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, l)| l.is_change())
+                    .map(move |(l, _)| (h, l))
+            })
+            .collect()
+    }
+
+    /// Select every changed line from `a` to `b`.
+    fn select_range(&mut self, a: (usize, usize), b: (usize, usize)) {
+        let (lo, hi) = (a.min(b), a.max(b));
+        for at in self.changed_lines() {
+            if lo <= at && at <= hi {
+                self.selection.insert(at);
+            }
         }
     }
 }
@@ -191,86 +230,14 @@ impl CommitForm {
             format!("{summary}\n\n{body}")
         }
     }
-}
 
-/// A git command that changes things, running in the background.
-pub struct Operation {
-    pub label: String,
-    pub progress: Arc<Mutex<Progress>>,
-    pub cancel: Option<CancelToken>,
-}
-
-/// A question to confirm before doing something destructive.
-#[derive(Clone, Debug)]
-pub struct Confirm {
-    pub title: String,
-    pub body: String,
-    pub confirm_label: String,
-    pub action: Action,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RemoteOp {
-    Fetch,
-    Pull,
-    Push,
-    /// Push over a diverged upstream, with lease.
-    ForcePush,
-    PushTag {
-        remote: String,
-        tag: String,
-    },
-    DeleteRemoteBranch {
-        remote: String,
-        branch: String,
-    },
-}
-
-impl RemoteOp {
-    fn label(&self) -> String {
-        match self {
-            Self::Fetch => "Fetching".to_owned(),
-            Self::Pull => "Pulling".to_owned(),
-            Self::Push => "Pushing".to_owned(),
-            Self::ForcePush => "Force pushing".to_owned(),
-            Self::PushTag { tag, .. } => format!("Pushing tag {tag}"),
-            Self::DeleteRemoteBranch { remote, branch } => {
-                format!("Deleting {remote}/{branch}")
-            }
-        }
+    /// Something typed that a reset would lose.
+    pub fn is_drafted(&self) -> bool {
+        !self.summary.trim().is_empty() || !self.body.trim().is_empty()
     }
-}
-
-/// What happens when an operation finishes successfully.
-pub(super) enum Then {
-    Nothing,
-    /// A plain push: if the remote rejects it, offer to force push.
-    Pushed,
-    /// Deleting this branch: if it is not merged, offer to force it.
-    DeletedBranch(String),
-    /// Submitted from the open dialog: close it on success, show errors in it.
-    Dialog(String),
-    /// Select this worktree as soon as a snapshot contains it.
-    OpenWorktree(std::path::PathBuf),
-    Committed {
-        summary: String,
-        push: bool,
-    },
-    Info(String),
-    /// Switching to this branch: if local changes are in the way, offer to
-    /// stash them first.
-    Switched(String),
-    /// A merge, rebase, cherry-pick, revert or continue: the job's extra
-    /// message means it stopped with conflicts.
-    MayConflict(String),
 }
 
 impl Project {
-    /// Git pointed at the selected worktree.
-    pub fn wt_git(&self) -> Git {
-        self.git.at(&self.nav.worktree)
-    }
-
     /// The main folder. Checkouts always happen there, never in a linked
     /// worktree: a worktree keeps its branch.
     pub fn main_worktree(&self) -> Option<&graft_core::Worktree> {
@@ -305,219 +272,169 @@ impl Project {
         }
     }
 
-    pub fn is_operating(&self) -> bool {
-        self.op.is_some()
+    fn view(&self, slot: Slot) -> Option<&DiffView> {
+        match slot {
+            Slot::Status => self.diff_view.as_ref(),
+            Slot::ReadOnly => self.commit_diff.as_ref(),
+        }
+    }
+
+    fn view_mut(&mut self, slot: Slot) -> Option<&mut DiffView> {
+        match slot {
+            Slot::Status => self.diff_view.as_mut(),
+            Slot::ReadOnly => self.commit_diff.as_mut(),
+        }
+    }
+
+    /// The slot whose diff shows `key`.
+    fn slot_of(&self, key: &FileKey) -> Option<Slot> {
+        [Slot::Status, Slot::ReadOnly]
+            .into_iter()
+            .find(|&slot| self.view(slot).is_some_and(|v| v.key == *key))
     }
 
     pub fn select_file(&mut self, key: FileKey) {
         if self.diff_view.as_ref().is_some_and(|v| v.key == key) {
             return;
         }
-        self.diff_view = Some(DiffView::new(key, false));
-        self.load_diff();
+        self.diff_view = Some(DiffView::new(key, Slot::Status));
+        self.load_view(Slot::Status);
         self.sync_conflict();
     }
 
-    /// Show one file of a commit or stash (read-only).
+    /// Show one file of a commit, stash or review (read-only).
     pub fn select_commit_file(&mut self, key: FileKey) {
         if self.commit_diff.as_ref().is_some_and(|v| v.key == key) {
             return;
         }
-        self.commit_diff = Some(DiffView::new(key, true));
-        self.load_commit_diff();
+        self.commit_diff = Some(DiffView::new(key, Slot::ReadOnly));
+        self.load_view(Slot::ReadOnly);
     }
 
-    /// (Re)load the read-only diff (commit, stash, review).
-    pub(super) fn load_commit_diff(&mut self) {
-        self.diff_generation += 1;
-        let generation = self.diff_generation;
+    /// (Re)load the diff in `slot`; what is selected or picked in it
+    /// survives if only the unchanged lines shown change.
+    pub(super) fn load_view(&mut self, slot: Slot) {
+        let Some(key) = self.view(slot).map(|v| v.key.clone()) else {
+            return;
+        };
+        let ticket = self.ticket();
         let whole = self.settings.whole_file;
         // Commits are the same everywhere; the rest reads the worktree.
-        let git = match self.commit_diff.as_ref().map(|v| &v.key.source) {
-            Some(Source::Commit(_)) => self.git.clone(),
+        let git = match key.source {
+            Source::Commit(_) => self.git.clone(),
             _ => self.wt_git(),
         };
-        let Some(view) = &mut self.commit_diff else {
-            return;
-        };
-        view.generation = generation;
-        view.loading = true;
-        let key = view.key.clone();
-        let revealed = view.revealed.clone();
         let kept = self.comment_lines(&key);
-        self.pool.spawn(&self.tx, move || Event::CommitDiff {
-            generation,
-            result: load_shown(&git, &key, whole, &revealed, &kept),
-        });
+        let view = self.view_mut(slot).expect("checked above");
+        view.ticket = ticket;
+        view.loading = true;
+        let revealed = view.revealed.clone();
+        self.spawn(
+            move || load_shown(&git, &key, whole, &revealed, &kept),
+            move |p, result| p.on_view_loaded(slot, ticket, result),
+        );
     }
 
-    pub(super) fn on_commit_diff(&mut self, generation: u64, result: Result<Loaded, String>) {
-        let Some(view) = &mut self.commit_diff else {
+    fn on_view_loaded(&mut self, slot: Slot, ticket: u64, result: anyhow::Result<Loaded>) {
+        let picked = self.picked_in(slot);
+        let Some(view) = self.view_mut(slot).filter(|v| v.ticket == ticket) else {
             return;
         };
-        if view.generation != generation {
+        view.loading = false;
+        let Loaded {
+            diff,
+            gaps,
+            highlights,
+        } = match readable(result) {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                view.diff = None;
+                view.error = Some(e);
+                return;
+            }
+        };
+        let same = view.diff.as_ref() == Some(&diff);
+        let mut pick = None;
+        if !same {
+            // Selected and picked lines stay when only more lines show; when
+            // the changes differ, they would point elsewhere.
+            let old = view.diff.as_ref();
+            let moved = old.and_then(|old| {
+                let selection = follow(old, &diff, view.selection.iter().copied())?;
+                let anchor = match view.anchor {
+                    Some(a) => Some(follow(old, &diff, [a])?[0]),
+                    None => None,
+                };
+                Some((selection, anchor))
+            });
+            let (selection, anchor) = moved.unwrap_or_default();
+            view.selection = selection.into_iter().collect();
+            view.anchor = anchor;
+            pick = picked.map(|p| {
+                old.and_then(|old| follow(old, &diff, [p.anchor, p.cursor]))
+                    .map(|at| Pick {
+                        anchor: at[0],
+                        cursor: at[1],
+                        ..p
+                    })
+            });
+        }
+        // A big diff's colors come later; keep the old ones meanwhile.
+        let old = std::mem::replace(&mut view.highlights, highlights);
+        if same && view.highlights.syntax.is_empty() {
+            view.highlights.syntax = old.syntax;
+        }
+        view.diff = Some(diff);
+        view.gaps = gaps;
+        view.error = None;
+        if let (Some(pick), Some(review)) = (pick, &mut self.review) {
+            review.pick = pick;
+        }
+        self.color_later(slot, ticket);
+    }
+
+    /// The review's picked lines, if the diff in `slot` is the review's file.
+    fn picked_in(&self, slot: Slot) -> Option<Pick> {
+        let review = self.review.as_ref()?;
+        let view = self.view(slot)?;
+        let reviewed = slot == Slot::ReadOnly
+            && !matches!(view.key.source, Source::Commit(_))
+            && review.selected.as_deref() == Some(view.key.path.as_str());
+        review.pick.filter(|_| reviewed)
+    }
+
+    /// Syntax colors for a diff too big to color with the diff itself.
+    fn color_later(&self, slot: Slot, ticket: u64) {
+        let Some(view) = self.view(slot) else { return };
+        let Some(diff) = &view.diff else { return };
+        if !view.highlights.syntax.is_empty() || line_count(diff) <= INLINE_SYNTAX_LINES {
             return;
         }
-        view.loading = false;
-        match result {
-            Ok(loaded) => {
-                // Lines picked to comment on stay picked when more show;
-                // when the lines changed, the pick would point elsewhere.
-                if let (Some(old), Some(review)) = (&view.diff, &mut self.review)
-                    && let Some(pick) = review.pick
-                    && *old != loaded.diff
-                {
-                    review.pick =
-                        follow(old, &loaded.diff, [pick.anchor, pick.cursor]).map(|at| Pick {
-                            anchor: at[0],
-                            cursor: at[1],
-                            ..pick
-                        });
+        let diff = diff.clone();
+        self.spawn(
+            move || graft_core::syntax::highlight(&diff),
+            move |p, syntax| {
+                if let Some(view) = p.view_mut(slot).filter(|v| v.ticket == ticket) {
+                    view.highlights.syntax = syntax;
                 }
-                view.diff = Some(loaded.diff);
-                view.gaps = loaded.gaps;
-                view.highlights = loaded.highlights;
-                view.error = None;
-            }
-            Err(e) => view.error = Some(e),
-        }
-        self.color_later(generation, true);
+            },
+        );
     }
 
     /// Show more unchanged lines, `old` and `new` being their numbers on
-    /// each side, in the File status diff or, with `commit`, in the
-    /// read-only one.
-    fn show_lines(&mut self, commit: bool, old: Range<u32>, new: Range<u32>) {
-        let view = if commit {
-            &mut self.commit_diff
-        } else {
-            &mut self.diff_view
+    /// each side, in the diff that shows `key`.
+    pub(super) fn show_lines(&mut self, key: &FileKey, old: Range<u32>, new: Range<u32>) {
+        let Some(slot) = self.slot_of(key) else {
+            return;
         };
-        let Some(view) = view else { return };
+        let view = self.view_mut(slot).expect("found above");
         // Staging a hunk above moves the index's numbers, not the working
         // tree's.
         view.revealed.push(match view.key.source {
             Source::Unstaged => (Side::New, new),
             _ => (Side::Old, old),
         });
-        if commit {
-            self.load_commit_diff();
-        } else {
-            self.load_diff();
-        }
-    }
-
-    /// Show whole files in diffs, or only the changes with some context.
-    pub fn set_whole_file(&mut self, whole: bool) {
-        if self.settings.whole_file == whole {
-            return;
-        }
-        self.settings.whole_file = whole;
-        if self.diff_view.is_some() {
-            self.load_diff();
-        }
-        if self.commit_diff.is_some() {
-            self.load_commit_diff();
-        }
-    }
-
-    /// Syntax colors for a diff too big to color with the diff itself.
-    fn color_later(&self, generation: u64, commit: bool) {
-        let view = if commit {
-            self.commit_diff.as_ref()
-        } else {
-            self.diff_view.as_ref()
-        };
-        let Some(diff) = view.and_then(|v| v.diff.as_ref()) else {
-            return;
-        };
-        let colored = view.is_some_and(|v| !v.highlights.syntax.is_empty());
-        if colored || line_count(diff) <= INLINE_SYNTAX_LINES {
-            return;
-        }
-        let diff = diff.clone();
-        self.pool.spawn(&self.tx, move || Event::Syntax {
-            generation,
-            syntax: graft_core::syntax::highlight(&diff),
-        });
-    }
-
-    pub(super) fn on_syntax(&mut self, generation: u64, syntax: graft_core::syntax::Syntax) {
-        for view in [&mut self.diff_view, &mut self.commit_diff]
-            .into_iter()
-            .flatten()
-        {
-            if view.generation == generation {
-                view.highlights.syntax = syntax;
-                return;
-            }
-        }
-    }
-
-    /// (Re)load the selected file's diff; the selection survives if the diff
-    /// did not change.
-    pub(super) fn load_diff(&mut self) {
-        self.diff_generation += 1;
-        let generation = self.diff_generation;
-        let git = self.wt_git();
-        let whole = self.settings.whole_file;
-        let Some(view) = &mut self.diff_view else {
-            return;
-        };
-        view.generation = generation;
-        view.loading = true;
-        let key = view.key.clone();
-        let revealed = view.revealed.clone();
-        self.pool.spawn(&self.tx, move || Event::Diff {
-            generation,
-            result: load_shown(&git, &key, whole, &revealed, &[]),
-        });
-    }
-
-    pub(super) fn on_diff(&mut self, generation: u64, result: Result<Loaded, String>) {
-        let Some(view) = &mut self.diff_view else {
-            return;
-        };
-        if view.generation != generation {
-            return;
-        }
-        view.loading = false;
-        match result {
-            Ok(Loaded {
-                diff,
-                gaps,
-                highlights,
-            }) => {
-                let same = view.diff.as_ref() == Some(&diff);
-                if !same {
-                    // Selected lines stay selected when only more lines show.
-                    let moved = view.diff.as_ref().and_then(|old| {
-                        let selection = follow(old, &diff, view.selection.iter().copied())?;
-                        let anchor = match view.anchor {
-                            Some(a) => Some(follow(old, &diff, [a])?[0]),
-                            None => None,
-                        };
-                        Some((selection, anchor))
-                    });
-                    let (selection, anchor) = moved.unwrap_or_default();
-                    view.selection = selection.into_iter().collect();
-                    view.anchor = anchor;
-                }
-                // A big diff's colors come later; keep the old ones meanwhile.
-                let old = std::mem::replace(&mut view.highlights, highlights);
-                if same && view.highlights.syntax.is_empty() {
-                    view.highlights.syntax = old.syntax;
-                }
-                view.diff = Some(diff);
-                view.gaps = gaps;
-                view.error = None;
-            }
-            Err(e) => {
-                view.diff = None;
-                view.error = Some(e);
-            }
-        }
-        self.color_later(generation, false);
+        self.load_view(slot);
     }
 
     /// After a status refresh: keep the selected file if it is still in its
@@ -544,7 +461,7 @@ impl Project {
             None => keys.first().cloned(),
         };
         match next {
-            Some(key) if Some(&key) == current.as_ref() => self.load_diff(),
+            Some(key) if Some(&key) == current.as_ref() => self.load_view(Slot::Status),
             Some(key) => {
                 self.diff_view = None;
                 self.select_file(key);
@@ -554,74 +471,12 @@ impl Project {
         self.sync_conflict();
     }
 
-    pub(super) fn apply_change(&mut self, action: Action) {
-        match action {
-            Action::SelectFile(key) => self.select_file(key),
-            Action::ClickLine { hunk, line, shift } => self.click_line(hunk, line, shift),
-            Action::DragLine { hunk, line } => self.drag_line(hunk, line),
-            Action::ClearLines => {
-                if let Some(v) = &mut self.diff_view {
-                    v.selection.clear();
-                    v.anchor = None;
-                }
-            }
-            Action::ShowLines { commit, old, new } => self.show_lines(commit, old, new),
-            Action::HunkOp(hunk, op) => self.lines_op(op, Some(hunk)),
-            Action::LinesOp(op) => self.lines_op(op, None),
-            Action::StageFiles(paths) => self.run_op("Staging", Then::Nothing, move |git| {
-                ops::stage_paths(&git, &paths)
-            }),
-            Action::UnstageFiles(paths) => self.run_op("Unstaging", Then::Nothing, move |git| {
-                ops::unstage_paths(&git, &paths)
-            }),
-            Action::Discard { tracked, untracked } => {
-                self.run_op("Discarding", Then::Nothing, move |git| {
-                    ops::discard_paths(&git, &tracked, &untracked)
-                })
-            }
-            Action::Commit => self.commit(),
-            Action::ToggleAmend => self.toggle_amend(),
-            Action::Remote(op) => self.remote(op),
-            Action::CancelOperation => {
-                if let Some(cancel) = self.op.as_ref().and_then(|o| o.cancel.as_ref()) {
-                    cancel.cancel();
-                }
-            }
-            Action::Ask(confirm) => self.confirm = Some(*confirm),
-            Action::ConfirmYes => {
-                if let Some(confirm) = self.confirm.take() {
-                    self.apply(confirm.action);
-                }
-            }
-            Action::ConfirmNo => self.confirm = None,
-            Action::OpenPath(path) => {
-                let full = self.nav.worktree.join(&path);
-                if let Err(e) = crate::launch::open_path(&full, &self.settings.ide_command) {
-                    self.notices
-                        .push(format!("Could not open {}: {e}", full.display()));
-                }
-            }
-            Action::RevealPath(path) => {
-                if let Err(e) = crate::launch::reveal(&self.nav.worktree.join(&path)) {
-                    self.notices.push(format!("Could not open Explorer: {e}"));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn click_line(&mut self, hunk: usize, line: usize, shift: bool) {
+    pub(super) fn click_line(&mut self, hunk: usize, line: usize, shift: bool) {
         let Some(view) = &mut self.diff_view else {
             return;
         };
         match (shift, view.anchor) {
-            (true, Some(anchor)) => {
-                let changed = changed_lines(view);
-                let (a, b) = (anchor.min((hunk, line)), anchor.max((hunk, line)));
-                for key in changed.into_iter().filter(|k| *k >= a && *k <= b) {
-                    view.selection.insert(key);
-                }
-            }
+            (true, Some(anchor)) => view.select_range(anchor, (hunk, line)),
             _ => {
                 if !view.selection.remove(&(hunk, line)) {
                     view.selection.insert((hunk, line));
@@ -632,24 +487,22 @@ impl Project {
     }
 
     /// Dragging over lines selects everything from where the drag started.
-    fn drag_line(&mut self, hunk: usize, line: usize) {
-        let Some(view) = &mut self.diff_view else {
-            return;
-        };
-        let Some(anchor) = view.anchor else {
-            return;
-        };
-        let (a, b) = (anchor.min((hunk, line)), anchor.max((hunk, line)));
-        for key in changed_lines(view)
-            .into_iter()
-            .filter(|k| *k >= a && *k <= b)
+    pub(super) fn drag_line(&mut self, hunk: usize, line: usize) {
+        if let Some(view) = &mut self.diff_view
+            && let Some(anchor) = view.anchor
         {
-            view.selection.insert(key);
+            view.select_range(anchor, (hunk, line));
+        }
+    }
+
+    pub(super) fn clear_lines(&mut self) {
+        if let Some(view) = &mut self.diff_view {
+            view.clear_selection();
         }
     }
 
     /// Stage, unstage or discard a hunk (`Some(index)`) or the selected lines.
-    fn lines_op(&mut self, op: LineOp, hunk: Option<usize>) {
+    pub(super) fn lines_op(&mut self, op: LineOp, hunk: Option<usize>) {
         let Some(view) = &self.diff_view else {
             return;
         };
@@ -663,43 +516,77 @@ impl Project {
             LineOp::Unstage => "Unstaging",
             LineOp::Discard => "Discarding",
         };
-        if let Some(v) = &mut self.diff_view {
-            v.selection.clear();
-            v.anchor = None;
-        }
-        self.run_op(label, Then::Nothing, move |git| {
+        let job = move |git: Git| {
             ops::apply_lines(&git, &diff, &source, op, |h, l| match hunk {
                 Some(only) => h == only,
                 None => selection.contains(&(h, l)),
             })
-        });
+        };
+        if self.run_op(At::Selected, label, job, quietly)
+            && let Some(view) = &mut self.diff_view
+        {
+            view.clear_selection();
+        }
     }
 
-    fn commit(&mut self) {
-        let message = self.commit_form.message();
-        if message.is_empty() || self.is_operating() {
+    pub(super) fn stage_files(&mut self, paths: Vec<String>) {
+        let job = move |git: Git| ops::stage_paths(&git, &paths);
+        self.run_op(At::Selected, "Staging", job, quietly);
+    }
+
+    pub(super) fn unstage_files(&mut self, paths: Vec<String>) {
+        let job = move |git: Git| ops::unstage_paths(&git, &paths);
+        self.run_op(At::Selected, "Unstaging", job, quietly);
+    }
+
+    pub(super) fn discard(&mut self, tracked: Vec<String>, untracked: Vec<String>) {
+        let job = move |git: Git| ops::discard_paths(&git, &tracked, &untracked);
+        self.run_op(At::Selected, "Discarding", job, quietly);
+    }
+
+    pub(super) fn commit(&mut self) {
+        let staged = self
+            .worktree()
+            .and_then(|wt| wt.status.as_ref())
+            .map_or(0, |s| s.staged().count());
+        if !self.commit_form.ready(staged) {
             return;
         }
+        let message = self.commit_form.message();
         let amend = self.commit_form.amend;
         let push = self.commit_form.push_after;
         let summary = self.commit_form.summary.trim().to_owned();
         self.run_op(
+            At::Selected,
             if amend { "Amending" } else { "Committing" },
-            Then::Committed { summary, push },
             move |git| ops::commit(&git, &message, amend).map(|_| ()),
+            move |p, result| match result {
+                Ok(()) => {
+                    p.commit_form = CommitForm {
+                        push_after: p.commit_form.push_after,
+                        ..CommitForm::default()
+                    };
+                    p.infos.push(format!("Committed: {summary}"));
+                    if push {
+                        p.remote(RemoteOp::Push);
+                    }
+                }
+                Err(e) => p.report(e),
+            },
         );
     }
 
-    fn toggle_amend(&mut self) {
+    pub(super) fn toggle_amend(&mut self) {
         let form = &mut self.commit_form;
         form.amend = !form.amend;
         if form.amend {
             form.before_amend = Some((form.summary.clone(), form.body.clone()));
             if form.summary.trim().is_empty() {
                 let git = self.wt_git();
-                self.pool.spawn(&self.tx, move || {
-                    Event::LastMessage(ops::last_commit_message(&git).ok().flatten())
-                });
+                self.spawn(
+                    move || ops::last_commit_message(&git),
+                    |p, message| p.on_last_message(message),
+                );
             }
         } else if let Some((summary, body)) = form.before_amend.take() {
             form.summary = summary;
@@ -707,13 +594,21 @@ impl Project {
         }
     }
 
-    pub(super) fn on_last_message(&mut self, message: Option<String>) {
+    fn on_last_message(&mut self, message: anyhow::Result<Option<String>>) {
         let form = &mut self.commit_form;
-        let Some(message) = message else {
-            form.amend = false;
-            self.notices
-                .push("There is no commit to amend yet.".to_owned());
-            return;
+        let message = match message {
+            Ok(Some(message)) => message,
+            Ok(None) => {
+                form.amend = false;
+                self.notices
+                    .push("There is no commit to amend yet.".to_owned());
+                return;
+            }
+            Err(e) => {
+                self.notices
+                    .push(format!("Could not read the last commit message: {e:#}"));
+                return;
+            }
         };
         if !form.amend || !form.summary.trim().is_empty() {
             return;
@@ -723,145 +618,17 @@ impl Project {
         form.body = body.trim().to_owned();
     }
 
-    fn remote(&mut self, op: RemoteOp) {
-        if self.is_operating() {
-            return;
-        }
-        let progress = Arc::new(Mutex::new(Progress::default()));
-        let cancel = CancelToken::default();
-        self.op = Some(Operation {
-            label: format!("{}…", op.label()),
-            progress: progress.clone(),
-            cancel: Some(cancel.clone()),
-        });
-        let git = self.wt_git();
-        let then = match &op {
-            RemoteOp::Fetch => Then::Nothing,
-            RemoteOp::Pull => Then::Info("Pulled".to_owned()),
-            RemoteOp::Push => Then::Pushed,
-            RemoteOp::ForcePush => Then::Info("Force pushed".to_owned()),
-            RemoteOp::PushTag { remote, tag } => {
-                Then::Info(format!("Pushed tag {tag} to {remote}"))
-            }
-            RemoteOp::DeleteRemoteBranch { remote, branch } => {
-                Then::Info(format!("Deleted {remote}/{branch}"))
-            }
-        };
-        self.pool.spawn_long(&self.tx, move |waker| {
-            let report = |p: Progress| {
-                if let Ok(mut slot) = progress.lock() {
-                    *slot = p;
-                }
-                waker();
-            };
-            let result = match op {
-                RemoteOp::Fetch => remote::fetch(&git, false, &cancel, report),
-                RemoteOp::Pull => remote::pull(&git, &cancel, report),
-                RemoteOp::Push => remote::push(&git, &cancel, report),
-                RemoteOp::ForcePush => remote::force_push(&git, &cancel, report),
-                RemoteOp::PushTag { remote, tag } => {
-                    remote::push_tag(&git, &remote, &tag, &cancel, report)
-                }
-                RemoteOp::DeleteRemoteBranch { remote, branch } => {
-                    remote::delete_remote_branch(&git, &remote, &branch, &cancel, report)
-                }
-            };
-            Event::OpDone {
-                then,
-                result: result.map(|()| None).map_err(JobError::from),
-            }
-        });
-    }
-
-    /// Run a quick git operation on the selected worktree, then refresh.
-    pub(super) fn run_op(
-        &mut self,
-        label: &str,
-        then: Then,
-        job: impl FnOnce(Git) -> anyhow::Result<()> + Send + 'static,
-    ) {
-        let git = self.wt_git();
-        self.run_op_at(git, label, then, move |git| job(git).map(|()| None));
-    }
-
-    /// Run a quick git operation with `git`, then refresh. The job may return
-    /// an extra message for the user.
-    pub(super) fn run_op_at(
-        &mut self,
-        git: Git,
-        label: &str,
-        then: Then,
-        job: impl FnOnce(Git) -> anyhow::Result<Option<String>> + Send + 'static,
-    ) {
-        if self.is_operating() {
-            return;
-        }
-        self.op = Some(Operation {
-            label: format!("{label}…"),
-            progress: Arc::default(),
-            cancel: None,
-        });
-        self.pool.spawn(&self.tx, move || Event::OpDone {
-            then,
-            result: job(git).map_err(JobError::from),
-        });
-    }
-
-    pub(super) fn on_op_done(&mut self, then: Then, result: Result<Option<String>, JobError>) {
-        self.op = None;
-        self.refresh();
-        match result {
-            Err(JobError::Cancelled) => {}
-            Err(JobError::Failed(e)) => self.on_op_error(then, e),
-            Ok(extra) => match then {
-                Then::Nothing | Then::DeletedBranch(_) => self.infos.extend(extra),
-                Then::Pushed => self.infos.push("Pushed".to_owned()),
-                Then::Dialog(text) => {
-                    self.dialog = None;
-                    self.infos.push(text);
-                }
-                Then::MayConflict(done) => self.on_may_conflict(done, extra),
-                Then::Switched(branch) => self.infos.push(match extra {
-                    Some(extra) => format!("Switched to {branch}. {extra}"),
-                    None => format!("Switched to {branch}"),
-                }),
-                Then::Info(text) => self.infos.push(match extra {
-                    Some(extra) => format!("{text}. {extra}"),
-                    None => text,
-                }),
-                Then::OpenWorktree(path) => {
-                    self.new_worktree = None;
-                    self.infos.extend(extra);
-                    self.pending_open = Some(path);
-                }
-                Then::Committed { summary, push } => {
-                    self.commit_form = CommitForm {
-                        push_after: self.commit_form.push_after,
-                        ..CommitForm::default()
-                    };
-                    self.infos.push(format!("Committed: {summary}"));
-                    if push {
-                        self.remote(RemoteOp::Push);
-                    }
-                }
-            },
+    pub(super) fn open_path(&mut self, path: &str) {
+        let full = self.nav.worktree.join(path);
+        if let Err(e) = crate::launch::open_path(&full, &self.settings.ide_command) {
+            self.notices
+                .push(format!("Could not open {}: {e}", full.display()));
         }
     }
-}
 
-fn changed_lines(view: &DiffView) -> Vec<(usize, usize)> {
-    let Some(diff) = &view.diff else {
-        return Vec::new();
-    };
-    diff.hunks
-        .iter()
-        .enumerate()
-        .flat_map(|(h, hunk)| {
-            hunk.lines
-                .iter()
-                .enumerate()
-                .filter(|(_, l)| l.is_change())
-                .map(move |(l, _)| (h, l))
-        })
-        .collect()
+    pub(super) fn reveal_path(&mut self, path: &str) {
+        if let Err(e) = crate::launch::reveal(&self.nav.worktree.join(path)) {
+            self.notices.push(format!("Could not open Explorer: {e}"));
+        }
+    }
 }

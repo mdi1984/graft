@@ -16,6 +16,7 @@ pub use form::*;
 use super::icons::{self, Icon};
 use crate::project::{Action, CheckedOut};
 use crate::theme::{self, RADIUS, color};
+use crate::ui::Actions;
 
 pub const ICON_SIZE: f32 = 14.0;
 
@@ -565,13 +566,7 @@ pub fn checkout_color(checked_out: CheckedOut) -> Color32 {
 }
 
 /// A context menu entry that sends `action` and closes the menu.
-pub fn menu_item(
-    ui: &mut Ui,
-    label: &str,
-    enabled: bool,
-    actions: &mut Vec<Action>,
-    action: Action,
-) {
+pub fn menu_item(ui: &mut Ui, label: &str, enabled: bool, actions: &mut Actions, action: Action) {
     if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
         actions.push(action);
         ui.close();

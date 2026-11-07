@@ -16,8 +16,9 @@ use super::widgets::{
 use crate::project::{Action, Confirm, DialogKind, FileKey, Project};
 use crate::theme::{self, color};
 use crate::time;
+use crate::ui::Actions;
 
-pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
+pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
     let Some(stashes) = &project.stashes else {
         waiting(ui);
         return;
@@ -75,9 +76,13 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
         .show(ui, |ui| details(ui, project, snap, stash, actions));
 
     match &project.commit_diff {
-        Some(view) => {
-            diff_view::show_view(ui, view, project.is_operating(), &project.settings, actions)
-        }
+        Some(view) => diff_view::show_view(
+            ui,
+            view,
+            project.is_operating(),
+            project.settings(),
+            actions,
+        ),
         None => empty_state(ui, "", "Pick a file above to see its changes."),
     }
 }
@@ -87,7 +92,7 @@ fn list(
     project: &Project,
     snap: &RepoSnapshot,
     stashes: &[Stash],
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let now = time::now();
     ui.label(
@@ -171,7 +176,7 @@ fn details(
     project: &Project,
     snap: &RepoSnapshot,
     stash: &Stash,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let busy = project.is_operating();
     ui.spacing_mut().item_spacing.y = 6.0;

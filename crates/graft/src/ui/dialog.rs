@@ -7,10 +7,11 @@ use super::widgets::dialog::{self, footer};
 use super::widgets::{error_label, field_label, note, text_field, title};
 use crate::project::{Action, Dialog, DialogKind};
 use crate::theme::{self, color};
+use crate::ui::Actions;
 
 const WIDTH: f32 = 440.0;
 
-pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Vec<Action>) {
+pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Actions) {
     let busy = dialog.submitting;
     let shown = dialog::show(ctx, "ref-dialog", WIDTH, busy, |ui| {
         let focus = std::mem::take(&mut dialog.focus);

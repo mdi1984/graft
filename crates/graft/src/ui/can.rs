@@ -11,6 +11,16 @@ pub struct Can {
     pub hint: String,
 }
 
+impl Can {
+    /// Not while `blocked` says why nothing can start.
+    pub fn unless(self, blocked: Option<&str>) -> Self {
+        match blocked {
+            Some(why) if self.ok => no(why),
+            _ => self,
+        }
+    }
+}
+
 pub fn yes(hint: impl Into<String>) -> Can {
     Can {
         ok: true,

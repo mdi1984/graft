@@ -9,6 +9,7 @@ use graft_core::status::Change;
 use super::widgets::{elided, paint_galley_left, paint_row_bg};
 use crate::project::Action;
 use crate::theme::{self, color};
+use crate::ui::Actions;
 
 pub const FILE_ROW_HEIGHT: f32 = 26.0;
 /// From the change letter to the path.
@@ -110,7 +111,7 @@ pub fn file_row(ui: &mut Ui, file: &FileChange, selected: bool, note: Option<&st
 }
 
 /// The context menu entries every file has.
-pub fn menu_items(ui: &mut Ui, path: &str, actions: &mut Vec<Action>) {
+pub fn menu_items(ui: &mut Ui, path: &str, actions: &mut Actions) {
     if ui.button("File history").clicked() {
         actions.push(Action::OpenFileHistory(path.to_owned()));
         ui.close();

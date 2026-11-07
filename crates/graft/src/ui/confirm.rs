@@ -6,8 +6,9 @@ use super::widgets::dialog;
 use super::widgets::{ButtonKind, button, title};
 use crate::project::{Action, Confirm};
 use crate::theme::{self, color};
+use crate::ui::Actions;
 
-pub fn show(ctx: &egui::Context, confirm: &Confirm, actions: &mut Vec<Action>) {
+pub fn show(ctx: &egui::Context, confirm: &Confirm, actions: &mut Actions) {
     let shown = dialog::show(ctx, "confirm-modal", 420.0, false, |ui| {
         ui.spacing_mut().item_spacing.y = 8.0;
         title(ui, &confirm.title);

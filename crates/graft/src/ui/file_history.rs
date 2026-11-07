@@ -16,12 +16,13 @@ use super::widgets::{
 use crate::project::{Action, FileHistoryMode, FileHistoryView, Project};
 use crate::text::plural;
 use crate::theme::{self, color};
+use crate::ui::Actions;
 
 const ROW: f32 = 46.0;
 const LINE: f32 = 18.0;
 const GUTTER: f32 = 250.0;
 
-pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
+pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
     let Some(view) = &project.file_history else {
         return;
     };
@@ -54,7 +55,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
         .show(ui, |ui| commit_list(ui, view, commits, actions));
 
     let busy = project.is_operating();
-    let wrap = project.settings.wrap_lines;
+    let wrap = project.settings().wrap_lines;
     match view.mode {
         FileHistoryMode::Changes => match &project.commit_diff {
             Some(diff) => diff_view::body(ui, diff, busy, false, wrap, None, actions),
@@ -75,7 +76,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
     }
 }
 
-fn toolbar(ui: &mut Ui, view: &FileHistoryView, actions: &mut Vec<Action>) {
+fn toolbar(ui: &mut Ui, view: &FileHistoryView, actions: &mut Actions) {
     Panel::top("file-history-bar")
         .frame(
             Frame::new()
@@ -115,7 +116,7 @@ fn commit_list(
     ui: &mut Ui,
     view: &FileHistoryView,
     commits: &[graft_core::file_log::FileCommit],
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     // Arrow keys move through the list unless something else has the keyboard.
     if !ui.ctx().egui_wants_keyboard_input()
@@ -182,7 +183,7 @@ fn blame_view(
     view: &FileHistoryView,
     commits: &[graft_core::file_log::FileCommit],
     blame: &Blame,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let now = crate::time::now();
     let digits = blame.lines.len().max(1).to_string().len() as f32;

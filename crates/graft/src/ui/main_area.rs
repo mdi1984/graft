@@ -10,8 +10,9 @@ use super::widgets::{
 use super::{conflicts, file_history, file_status, history, review, stashes};
 use crate::project::{Action, Project, Tab, WorkspaceView};
 use crate::theme::{self, color};
+use crate::ui::{Actions, AppAction};
 
-pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
+pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
     if project.snapshot.is_none() {
         not_loaded(ui, project, actions);
         return;
@@ -52,7 +53,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
 }
 
 /// The strip across the top while main shows another worktree.
-fn preview_banner(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
+fn preview_banner(ui: &mut Ui, project: &Project, actions: &mut Actions) {
     let Some(snap) = &project.snapshot else {
         return;
     };
@@ -157,7 +158,7 @@ fn header(ui: &mut Ui, title: &str, worktree: Option<&Worktree>) {
 }
 
 /// The project has no snapshot yet: loading, or it failed (folder gone?).
-fn not_loaded(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
+fn not_loaded(ui: &mut Ui, project: &Project, actions: &mut Actions) {
     let Some(error) = &project.error else {
         let path = paths::display(&project.root);
         loading(ui, &format!("Opening {path}…"));
@@ -177,7 +178,7 @@ fn not_loaded(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
                 actions.push(Action::Refresh);
             }
             if button(ui, "Close tab", ButtonKind::Secondary, true).clicked() {
-                actions.push(Action::Close);
+                actions.app(AppAction::Close);
             }
         });
     });

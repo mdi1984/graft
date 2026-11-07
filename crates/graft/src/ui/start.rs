@@ -3,11 +3,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
 use egui::{Align2, Color32, Rect, ScrollArea, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
-use graft_core::CancelToken;
-use graft_core::Progress;
 use graft_core::paths::{self, native};
 use graft_core::repo::clone_folder_name;
 use graft_core::wsl::Wsl;
@@ -19,6 +16,7 @@ use super::widgets::{
 };
 use crate::groups::{GroupId, TabGroup};
 use crate::keys::{Command, Keymap};
+use crate::running::Running;
 use crate::theme::{self, RADIUS, color};
 
 const WIDTH: f32 = 600.0;
@@ -53,13 +51,6 @@ fn place_of(path: &Path) -> Place {
     }
 }
 
-/// A clone or init in progress.
-pub struct Busy {
-    pub label: String,
-    pub progress: Arc<Mutex<Progress>>,
-    pub cancel: Option<CancelToken>,
-}
-
 pub struct StartPage {
     pub mode: Mode,
     pub url: String,
@@ -68,8 +59,9 @@ pub struct StartPage {
     /// The user typed a folder name, so stop deriving it from the URL.
     folder_name_edited: bool,
     pub init_path: String,
-    pub busy: Option<Busy>,
-    pub error: Option<String>,
+    /// A clone or init in progress.
+    busy: Option<Running>,
+    error: Option<String>,
     pub place: Place,
     /// Installed WSL distros; `None` until asked for.
     distros: Option<Vec<String>>,
@@ -301,6 +293,33 @@ impl StartPage {
             return Some(StartAction::LoadHome(name));
         }
         None
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.busy.is_some()
+    }
+
+    /// A clone or init started.
+    pub fn begin(&mut self, running: Running) {
+        self.error = None;
+        self.busy = Some(running);
+    }
+
+    /// The clone or init ended without a repository: cancelled, or with
+    /// `error` to show.
+    pub fn stop(&mut self, error: Option<String>) {
+        self.busy = None;
+        self.error = error;
+    }
+
+    pub fn cancel(&self) {
+        if let Some(busy) = &self.busy {
+            busy.cancel();
+        }
+    }
+
+    pub fn busy_status(&self) -> Option<String> {
+        self.busy.as_ref().map(Running::status)
     }
 
     /// Forget the forms after a repository was opened.
@@ -663,8 +682,8 @@ fn card(
     response
 }
 
-fn busy_panel(ui: &mut Ui, busy: &Busy, width: f32, action: &mut Option<StartAction>) {
-    let progress = busy.progress.lock().map(|p| p.clone()).unwrap_or_default();
+fn busy_panel(ui: &mut Ui, busy: &Running, width: f32, action: &mut Option<StartAction>) {
+    let progress = busy.progress();
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(&busy.label).color(color::text()));
@@ -683,7 +702,7 @@ fn busy_panel(ui: &mut Ui, busy: &Busy, width: f32, action: &mut Option<StartAct
         // Progress arrives from git in the background; look again soon.
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(100));
-        if busy.cancel.is_some() && button(ui, "Cancel", ButtonKind::Secondary, true).clicked() {
+        if busy.can_cancel() && button(ui, "Cancel", ButtonKind::Secondary, true).clicked() {
             *action = Some(StartAction::Cancel);
         }
     });

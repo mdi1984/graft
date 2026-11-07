@@ -10,15 +10,15 @@ use std::sync::Arc;
 
 use graft_core::diff::Source;
 use graft_core::review::{self, Review, ReviewFile};
-use graft_core::{conflicts, same_path};
+use graft_core::same_path;
 use serde::{Deserialize, Serialize};
 
-use super::changes::{SideLines, Then};
+use super::changes::{SideLines, Slot};
 use super::comments::{self, LineComment, Pick, Side};
-use super::{Action, Event, FileKey, Project};
+use super::{FileKey, Project, readable};
 
 /// What Graft remembers about reviewing one worktree.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ReviewState {
     /// The branch picked to review against; `None` uses the default branch.
@@ -32,6 +32,17 @@ pub struct ReviewState {
 }
 
 impl ReviewState {
+    /// Nothing to remember.
+    pub fn is_empty(&self) -> bool {
+        let Self {
+            base,
+            viewed,
+            notes,
+            comments,
+        } = self;
+        base.is_none() && viewed.is_empty() && notes.is_empty() && comments.is_empty()
+    }
+
     /// Line comments plus non-empty file notes.
     pub fn comment_count(&self) -> usize {
         let notes = self.notes.values().filter(|n| !n.trim().is_empty()).count();
@@ -69,7 +80,7 @@ pub struct ReviewView {
     pub draft: String,
     /// Focus the comment box on the next frame.
     pub focus_draft: bool,
-    generation: u64,
+    ticket: u64,
 }
 
 impl ReviewView {
@@ -80,25 +91,33 @@ impl ReviewView {
     pub fn file(&self, path: &str) -> Option<&ReviewFile> {
         self.review()?.files.iter().find(|f| f.change.path == path)
     }
+
+    /// Drop the pick and the comment being written.
+    fn clear_draft(&mut self) {
+        self.pick = None;
+        self.editing = None;
+        self.draft.clear();
+    }
 }
 
 impl Project {
     /// The remembered review state of the selected worktree.
     pub fn review_state(&self) -> Option<&ReviewState> {
-        self.reviews
+        self.memory
+            .reviews
             .iter()
             .find(|(path, _)| same_path(path, &self.nav.worktree))
             .map(|(_, state)| state)
     }
 
     pub fn review_state_mut(&mut self) -> &mut ReviewState {
-        let key = self
-            .reviews
+        let reviews = &mut self.memory.reviews;
+        let key = reviews
             .keys()
             .find(|path| same_path(path, &self.nav.worktree))
             .cloned()
             .unwrap_or_else(|| self.nav.worktree.clone());
-        self.reviews.entry(key).or_default()
+        reviews.entry(key).or_default()
     }
 
     pub fn is_viewed(&self, file: &ReviewFile) -> bool {
@@ -116,7 +135,7 @@ impl Project {
         if !same {
             let split = self.review.as_ref().is_none_or(|r| r.split);
             self.review = Some(ReviewView {
-                worktree: worktree.clone(),
+                worktree,
                 data: None,
                 loading: false,
                 selected: None,
@@ -125,43 +144,39 @@ impl Project {
                 editing: None,
                 draft: String::new(),
                 focus_draft: false,
-                generation: 0,
+                ticket: 0,
             });
             self.commit_diff = None;
         }
-        self.diff_generation += 1;
-        let generation = self.diff_generation;
+        let ticket = self.ticket();
         let view = self.review.as_mut().expect("just set");
         view.loading = true;
-        view.generation = generation;
+        view.ticket = ticket;
 
         let current = self.worktree().and_then(|wt| wt.branch.as_deref());
         let base = self
             .review_state()
             .and_then(|s| s.base.clone())
-            .or_else(|| {
-                let snap = self.snapshot.as_ref()?;
-                review::default_base(snap, current)
-            });
+            .or_else(|| review::default_base(self.snapshot.as_ref()?, current));
         let git = self.wt_git();
-        self.pool.spawn(&self.tx, move || {
-            let result = (|| {
+        self.spawn(
+            move || {
                 let base = base.ok_or_else(|| {
-                    "There is no main or master branch to review against. Pick a base \
+                    anyhow::anyhow!(
+                        "There is no main or master branch to review against. Pick a base \
                          branch above."
-                        .to_owned()
+                    )
                 })?;
-                review::load(&git, &base).map_err(|e| format!("{e:#}"))
-            })();
-            Event::Review { generation, result }
-        });
+                review::load(&git, &base)
+            },
+            move |p, result| p.on_review(ticket, readable(result)),
+        );
     }
 
-    pub(super) fn on_review(&mut self, generation: u64, result: Result<Review, String>) {
-        let Some(view) = &mut self.review else { return };
-        if view.generation != generation {
+    fn on_review(&mut self, ticket: u64, result: Result<Review, String>) {
+        let Some(view) = self.review.as_mut().filter(|v| v.ticket == ticket) else {
             return;
-        }
+        };
         view.loading = false;
         let old = view.selected.as_ref().and_then(|p| view.file(p)).cloned();
         view.data = Some(result.map(Arc::new));
@@ -196,7 +211,7 @@ impl Project {
         }
     }
 
-    fn open_review_file(&mut self, path: String, reload: bool) {
+    pub(super) fn open_review_file(&mut self, path: String, reload: bool) {
         let Some(view) = &mut self.review else { return };
         let Some(review) = view.review() else { return };
         let Some(file) = view.file(&path) else { return };
@@ -217,7 +232,7 @@ impl Project {
         let same = self.commit_diff.as_ref().is_some_and(|d| d.key == key);
         if same && reload {
             // Keeps the lines shown and the unchanged lines opened up.
-            self.load_commit_diff();
+            self.load_view(Slot::ReadOnly);
             return;
         }
         if !same {
@@ -269,12 +284,12 @@ impl Project {
         }
         view.revealed
             .extend(inside.into_iter().map(|lines| (Side::Old, lines)));
-        self.load_commit_diff();
+        self.load_view(Slot::ReadOnly);
     }
 
     /// Mark or unmark a file as viewed; marking the open file moves on to the
     /// next file not viewed yet.
-    fn toggle_viewed(&mut self, path: String) {
+    pub(super) fn toggle_viewed(&mut self, path: String) {
         let Some(file) = self.review.as_ref().and_then(|v| v.file(&path)).cloned() else {
             return;
         };
@@ -304,9 +319,39 @@ impl Project {
         }
     }
 
+    pub(super) fn set_review_base(&mut self, base: String) {
+        self.review_state_mut().base = Some(base);
+        self.load_review();
+    }
+
+    pub(super) fn toggle_review_split(&mut self) {
+        if let Some(view) = &mut self.review {
+            view.split = !view.split;
+        }
+    }
+
+    pub(super) fn pick_line(&mut self, at: (usize, usize), side: Option<Side>, extend: bool) {
+        let Some(view) = &mut self.review else { return };
+        match &mut view.pick {
+            Some(pick) if extend && pick.side == side => pick.cursor = at,
+            _ => {
+                if view.editing.take().is_some() {
+                    view.draft.clear();
+                }
+                view.pick = Some(Pick {
+                    anchor: at,
+                    cursor: at,
+                    side,
+                });
+                view.focus_draft = true;
+            }
+        }
+        self.open_gaps_in_pick();
+    }
+
     /// Save the draft: as a new comment on the picked lines, or into the
     /// comment being edited.
-    fn save_comment(&mut self) {
+    pub(super) fn save_comment(&mut self) {
         let Some(view) = &self.review else { return };
         let text = view.draft.trim().to_owned();
         if text.is_empty() {
@@ -347,107 +392,78 @@ impl Project {
                 text,
             });
         }
+        self.cancel_comment();
+    }
+
+    pub(super) fn cancel_comment(&mut self) {
+        if let Some(view) = &mut self.review {
+            view.clear_draft();
+        }
+    }
+
+    pub(super) fn edit_comment(&mut self, id: u64) {
+        let Some(text) = self
+            .review_state()
+            .and_then(|s| s.comments.iter().find(|c| c.id == id))
+            .map(|c| c.text.clone())
+        else {
+            return;
+        };
         if let Some(view) = &mut self.review {
             view.pick = None;
+            view.editing = Some(id);
+            view.draft = text;
+            view.focus_draft = true;
+        }
+    }
+
+    pub(super) fn delete_comment(&mut self, id: u64) {
+        self.review_state_mut().comments.retain(|c| c.id != id);
+        if let Some(view) = &mut self.review
+            && view.editing == Some(id)
+        {
             view.editing = None;
             view.draft.clear();
         }
     }
 
-    pub(super) fn apply_review_action(&mut self, action: Action) {
-        match action {
-            Action::SelectReviewFile(path) => self.open_review_file(path, false),
-            Action::ToggleViewed(path) => self.toggle_viewed(path),
-            Action::SetReviewBase(base) => {
-                self.review_state_mut().base = Some(base);
-                self.load_review();
-            }
-            Action::ToggleReviewSplit => {
-                if let Some(view) = &mut self.review {
-                    view.split = !view.split;
-                }
-            }
-            Action::PickLine { at, side, extend } => {
-                let Some(view) = &mut self.review else { return };
-                match &mut view.pick {
-                    Some(pick) if extend && pick.side == side => pick.cursor = at,
-                    _ => {
-                        if view.editing.take().is_some() {
-                            view.draft.clear();
-                        }
-                        view.pick = Some(Pick {
-                            anchor: at,
-                            cursor: at,
-                            side,
-                        });
-                        view.focus_draft = true;
-                    }
-                }
-                self.open_gaps_in_pick();
-            }
-            Action::SaveComment => self.save_comment(),
-            Action::CancelComment => {
-                if let Some(view) = &mut self.review {
-                    view.pick = None;
-                    view.editing = None;
-                    view.draft.clear();
-                }
-            }
-            Action::EditComment(id) => {
-                let Some(text) = self
-                    .review_state()
-                    .and_then(|s| s.comments.iter().find(|c| c.id == id))
-                    .map(|c| c.text.clone())
-                else {
-                    return;
-                };
-                if let Some(view) = &mut self.review {
-                    view.pick = None;
-                    view.editing = Some(id);
-                    view.draft = text;
-                    view.focus_draft = true;
-                }
-            }
-            Action::DeleteComment(id) => {
-                self.review_state_mut().comments.retain(|c| c.id != id);
-                if let Some(view) = &mut self.review
-                    && view.editing == Some(id)
-                {
-                    view.editing = None;
-                    view.draft.clear();
-                }
-            }
-            Action::ClearReviewComments => {
-                let state = self.review_state_mut();
-                state.comments.clear();
-                state.notes.clear();
-                if let Some(view) = &mut self.review {
-                    view.pick = None;
-                    view.editing = None;
-                    view.draft.clear();
-                }
-            }
-            Action::MergeReviewed {
-                worktree,
-                branch,
-                into,
-            } => {
-                let done = format!("Merged {branch} into {into}");
-                let stopped = format!(
-                    "Merging {branch} into {into} stopped with conflicts. Resolve them in \
-                     File status of {into}, then Continue."
-                );
-                let target = worktree.clone();
-                self.run_op_at(
-                    self.git.at(&worktree),
-                    "Merging",
-                    Then::MayConflict(done),
-                    move |git| Ok(conflicts::merge(&git, &branch, false)?.then_some(stopped)),
-                );
-                // Conflicts are resolved where the merge happened.
-                self.pending_conflicts = Some(target);
-            }
-            _ => {}
+    pub(super) fn clear_review_comments(&mut self) {
+        let state = self.review_state_mut();
+        state.comments.clear();
+        state.notes.clear();
+        self.cancel_comment();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A review with only line comments is worth remembering (they were
+    /// lost on restart when only marks and notes counted).
+    #[test]
+    fn line_comments_alone_are_remembered() {
+        let mut state = ReviewState::default();
+        assert!(state.is_empty());
+        state.comments.push(LineComment {
+            id: 1,
+            path: "a.rs".into(),
+            side: Side::New,
+            start: 1,
+            end: 1,
+            excerpt: "+a\n".into(),
+            text: "why?".into(),
+        });
+        assert!(!state.is_empty());
+        let memory = super::super::RepoMemory {
+            reviews: [
+                (PathBuf::from("wt"), state),
+                (PathBuf::from("empty"), ReviewState::default()),
+            ]
+            .into(),
+            slashed: Vec::new(),
         }
+        .pruned();
+        assert_eq!(memory.reviews.len(), 1);
     }
 }

@@ -7,6 +7,7 @@ use graft_core::{RemoteBranch, RepoSnapshot, same_path};
 
 use super::widgets::menu_item;
 use crate::project::{Action, Project};
+use crate::ui::Actions;
 
 /// Go to the worktree that has the local branch `name`, or check it out or
 /// open a new worktree for it. Nothing for the selected worktree's own
@@ -17,7 +18,7 @@ pub fn local_items(
     repo: &RepoSnapshot,
     name: &str,
     named: bool,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) -> bool {
     match repo.worktree_for_branch(name) {
         Some(wt) if same_path(&wt.path, &project.nav.worktree) => false,
@@ -60,7 +61,7 @@ pub fn tracking_items(
     project: &Project,
     branch: &RemoteBranch,
     named: bool,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let busy = project.is_operating();
     let local = branch.branch_name();
@@ -82,7 +83,7 @@ pub fn tracking_items(
     new_worktree_item(ui, &branch.name, named, busy, actions);
 }
 
-fn new_worktree_item(ui: &mut Ui, name: &str, named: bool, busy: bool, actions: &mut Vec<Action>) {
+fn new_worktree_item(ui: &mut Ui, name: &str, named: bool, busy: bool, actions: &mut Actions) {
     let label = if named {
         format!("New worktree for {name}…")
     } else {

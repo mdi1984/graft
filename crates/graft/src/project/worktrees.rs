@@ -9,8 +9,8 @@ use graft_core::watch::Watcher;
 use graft_core::worktree::{self, Start};
 use graft_core::{RepoSnapshot, same_path};
 
-use super::changes::Then;
-use super::{Event, Project};
+use super::ops::{At, quietly, say};
+use super::{Done, Project};
 use crate::text::plural;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,6 +165,12 @@ impl Project {
         self.new_worktree = Some(form);
     }
 
+    pub(super) fn close_worktree_form(&mut self) {
+        if !self.new_worktree.as_ref().is_some_and(|f| f.creating) {
+            self.new_worktree = None;
+        }
+    }
+
     pub(super) fn create_worktree(&mut self) {
         let (Some(form), Some(snap)) = (&mut self.new_worktree, &self.snapshot) else {
             return;
@@ -184,31 +190,44 @@ impl Project {
             form.error = Some("Pick a full folder path for the worktree.".to_owned());
             return;
         }
-        form.error = None;
-        form.creating = true;
         let patterns = form.copy_ignored.then(|| form.patterns.clone());
         let main = self.git.clone();
         let target = path.clone();
-        self.run_op_at(
-            self.git.clone(),
-            "Creating worktree",
-            Then::OpenWorktree(path),
-            move |git| {
-                worktree::add(&git, &target, &start)?;
-                let Some(patterns) = patterns else {
-                    return Ok(None);
-                };
-                let copied = worktree::copy_ignored(&main, &target, &patterns)?;
-                Ok(Some(match copied.len() {
-                    0 => "Created the worktree. No ignored files matched to copy.".to_owned(),
-                    n => format!(
-                        "Created the worktree and copied {}: {}",
-                        plural(n, "ignored file"),
-                        copied.join(", ")
-                    ),
-                }))
+        let job = move |git: graft_core::Git| -> anyhow::Result<Option<String>> {
+            worktree::add(&git, &target, &start)?;
+            let Some(patterns) = patterns else {
+                return Ok(None);
+            };
+            let copied = worktree::copy_ignored(&main, &target, &patterns)?;
+            Ok(Some(match copied.len() {
+                0 => "Created the worktree. No ignored files matched to copy.".to_owned(),
+                n => format!(
+                    "Created the worktree and copied {}: {}",
+                    plural(n, "ignored file"),
+                    copied.join(", ")
+                ),
+            }))
+        };
+        let done = move |p: &mut Project, result: anyhow::Result<Option<String>>| match result {
+            Ok(extra) => {
+                p.new_worktree = None;
+                p.infos.extend(extra);
+                p.pending_open = Some(path);
+            }
+            Err(e) => match &mut p.new_worktree {
+                Some(form) => {
+                    form.creating = false;
+                    form.error = Some(format!("{e:#}"));
+                }
+                None => p.report(e),
             },
-        );
+        };
+        if self.run_op(At::Main, "Creating worktree", job, done)
+            && let Some(form) = &mut self.new_worktree
+        {
+            form.error = None;
+            form.creating = true;
+        }
     }
 
     pub(super) fn browse_worktree_folder(&mut self) {
@@ -221,18 +240,21 @@ impl Project {
             .filter(|p| p.is_dir())
             .map(Path::to_path_buf)
             .or_else(|| self.root.parent().map(Path::to_path_buf));
-        self.pool.spawn_long(&self.tx, move |_| {
-            let mut dialog = rfd::FileDialog::new().set_title("Where should the worktree go?");
-            if let Some(dir) = start {
-                dialog = dialog.set_directory(dir);
-            }
-            Event::PickedFolder(dialog.pick_folder())
-        });
+        self.spawn_long(
+            move |_| {
+                let mut dialog = rfd::FileDialog::new().set_title("Where should the worktree go?");
+                if let Some(dir) = start {
+                    dialog = dialog.set_directory(dir);
+                }
+                dialog.pick_folder()
+            },
+            |p, folder| p.on_picked_folder(folder),
+        );
     }
 
     /// A folder came back from the picker: the worktree goes in a new folder
     /// named after the branch inside it, unless it is empty.
-    pub(super) fn on_picked_folder(&mut self, folder: Option<PathBuf>) {
+    fn on_picked_folder(&mut self, folder: Option<PathBuf>) {
         let (Some(form), Some(snap), Some(folder)) =
             (&mut self.new_worktree, &self.snapshot, folder)
         else {
@@ -254,28 +276,31 @@ impl Project {
     }
 
     pub(super) fn remove_worktree(&mut self, path: PathBuf, force: bool) {
-        let name = folder_name(&path);
-        self.run_op_at(
-            self.git.clone(),
+        let done = format!("Removed worktree {}", folder_name(&path));
+        self.run_op(
+            At::Main,
             "Removing worktree",
-            Then::Info(format!("Removed worktree {name}")),
-            move |git| worktree::remove(&git, &path, force).map(|()| None),
+            move |git| worktree::remove(&git, &path, force),
+            say(done),
         );
     }
 
     pub(super) fn lock_worktree(&mut self, path: PathBuf, locked: bool) {
         let label = if locked { "Locking" } else { "Unlocking" };
-        self.run_op_at(self.git.clone(), label, Then::Nothing, move |git| {
-            worktree::set_locked(&git, &path, locked).map(|()| None)
-        });
+        self.run_op(
+            At::Main,
+            label,
+            move |git| worktree::set_locked(&git, &path, locked),
+            quietly,
+        );
     }
 
     pub(super) fn prune_worktrees(&mut self) {
-        self.run_op_at(
-            self.git.clone(),
+        self.run_op(
+            At::Main,
             "Pruning worktrees",
-            Then::Info("Removed missing worktrees".to_owned()),
-            move |git| worktree::prune(&git).map(|()| None),
+            move |git| worktree::prune(&git),
+            say("Removed missing worktrees".to_owned()),
         );
     }
 
@@ -300,10 +325,15 @@ impl Project {
         self.watcher = None;
         let tx = self.tx.clone();
         let waker = self.pool.waker();
-        match Watcher::new(roots, move || {
-            let _ = tx.send(Event::Changed);
+        let changed = move || {
+            let _ = tx.send(Done(Box::new(|p| {
+                if !p.is_operating() {
+                    p.refresh();
+                }
+            })));
             waker();
-        }) {
+        };
+        match Watcher::new(roots, changed) {
             Ok(watcher) => self.watcher = Some(watcher),
             Err(e) => tracing::warn!("file watcher unavailable: {e:#}"),
         }

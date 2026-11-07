@@ -13,6 +13,7 @@ use super::icons::Icon;
 use super::widgets::{Tone, tool_button, toolbar_divider};
 use crate::project::{Action, DialogKind, Project, RemoteOp, merge_dialog};
 use crate::text::plural;
+use crate::ui::Actions;
 
 /// Below this width, buttons with an icon drop their label.
 const COMPACT_WIDTH: f32 = 1120.0;
@@ -23,13 +24,13 @@ pub fn show(
     ui: &mut Ui,
     projects: &[Project],
     index: usize,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
     search: &mut String,
 ) {
     let project = &projects[index];
     let snap = project.snapshot.as_deref();
     let wt = project.worktree();
-    let busy = project.is_operating() || snap.is_none();
+    let blocked = project.can_act().err();
     let ahead = wt.map_or(0, |wt| wt.ahead());
     let behind = wt.map_or(0, |wt| wt.behind());
     let compact = ui.available_width() < COMPACT_WIDTH;
@@ -52,7 +53,7 @@ pub fn show(
         {
             actions.push(Action::ShowFileStatus);
         }
-        let can = can_pull(snap, wt);
+        let can = can_pull(snap, wt).unless(blocked);
         let pull_badge = (behind > 0).then(|| behind.to_string());
         if tool_button(
             ui,
@@ -64,11 +65,10 @@ pub fn show(
         )
         .on_hover_text(can.hint)
         .clicked()
-            && !busy
         {
             actions.push(Action::Remote(RemoteOp::Pull));
         }
-        let can = can_push(snap, wt);
+        let can = can_push(snap, wt).unless(blocked);
         let push_badge = (ahead > 0).then(|| ahead.to_string());
         if tool_button(
             ui,
@@ -80,7 +80,6 @@ pub fn show(
         )
         .on_hover_text(can.hint)
         .clicked()
-            && !busy
         {
             actions.push(Action::Remote(RemoteOp::Push));
         }
@@ -88,7 +87,8 @@ pub fn show(
             yes("Fetch all remotes")
         } else {
             no("No remote to fetch from. Add one under Remotes in the sidebar.")
-        };
+        }
+        .unless(blocked);
         if tool_button(
             ui,
             Some(Icon::Fetch),
@@ -99,7 +99,6 @@ pub fn show(
         )
         .on_hover_text(can.hint)
         .clicked()
-            && !busy
         {
             actions.push(Action::Remote(RemoteOp::Fetch));
         }
@@ -109,11 +108,11 @@ pub fn show(
             Some(wt) if wt.head.is_some() => yes("New branch from the current commit"),
             Some(_) => no("Make a first commit before creating branches"),
             None => no("Select a worktree first"),
-        };
+        }
+        .unless(blocked);
         if tool_button(ui, None, "Branch", None, Tone::Normal, can.ok)
             .on_hover_text(can.hint)
             .clicked()
-            && !busy
             && let Some(wt) = wt
         {
             let (start, start_label) = match (&wt.branch, wt.head) {
@@ -126,7 +125,7 @@ pub fn show(
                 start_label,
             )));
         }
-        let can = can_merge(snap, wt);
+        let can = can_merge(snap, wt).unless(blocked);
         if tool_button(
             ui,
             Some(Icon::Merge),
@@ -137,7 +136,6 @@ pub fn show(
         )
         .on_hover_text(can.hint)
         .clicked()
-            && !busy
             && let Some(kind) = merge_dialog(project, None)
         {
             actions.push(Action::OpenDialog(kind));
@@ -146,18 +144,18 @@ pub fn show(
             yes("Put this worktree's changes aside")
         } else {
             no("Nothing to stash: the worktree is clean")
-        };
+        }
+        .unless(blocked);
         if tool_button(ui, None, "Stash", None, Tone::Normal, can.ok)
             .on_hover_text(can.hint)
             .clicked()
-            && !busy
         {
             actions.push(Action::OpenDialog(DialogKind::stash()));
         }
-        if tool_button(ui, None, "New worktree", None, Tone::Normal, snap.is_some())
-            .on_hover_text("Check out a branch in a second folder")
+        let can = yes("Check out a branch in a second folder").unless(blocked);
+        if tool_button(ui, None, "New worktree", None, Tone::Normal, can.ok)
+            .on_hover_text(can.hint)
             .clicked()
-            && !busy
         {
             actions.push(Action::NewWorktree(None));
         }
@@ -167,6 +165,7 @@ pub fn show(
             Some(snap) => can::preview(snap, wt),
             None => (no("Select a worktree first"), None),
         };
+        let can = can.unless(blocked);
         if tool_button(
             ui,
             None,
@@ -177,22 +176,22 @@ pub fn show(
         )
         .on_hover_text(can.hint)
         .clicked()
-            && !busy
             && let Some(action) = preview_action
         {
             actions.push(action);
         }
+        let can =
+            yes("Clean up finished branches and worktrees (shows a preview first)").unless(blocked);
         if tool_button(
             ui,
             Some(Icon::Slash),
             label("Slash"),
             None,
             Tone::Danger,
-            true,
+            can.ok,
         )
-        .on_hover_text("Clean up finished branches and worktrees (shows a preview first)")
+        .on_hover_text(can.hint)
         .clicked()
-            && !busy
         {
             actions.push(Action::OpenSlash);
         }

@@ -16,13 +16,14 @@ use crate::project::{
 };
 use crate::text::plural;
 use crate::theme::{self, color};
+use crate::ui::Actions;
 
 const SECTION_GAP: f32 = 14.0;
 const PAD_X: f32 = 8.0;
 /// How far each folder level indents its rows.
 const NEST: f32 = 14.0;
 
-pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
+pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
     let Some(repo) = &project.snapshot else {
         return;
     };
@@ -366,7 +367,7 @@ fn worktree_row(ui: &mut Ui, wt: &Worktree, selected: bool) -> Response {
     response.on_hover_text(graft_core::paths::display(&wt.path))
 }
 
-fn worktree_menu(ui: &mut Ui, wt: &Worktree, busy: bool, actions: &mut Vec<Action>) {
+fn worktree_menu(ui: &mut Ui, wt: &Worktree, busy: bool, actions: &mut Actions) {
     if wt.prunable {
         if ui
             .add_enabled(!busy, egui::Button::new("Prune missing worktrees"))
@@ -458,7 +459,7 @@ fn branch_menu(
     project: &Project,
     branch: &Branch,
     head: Option<&str>,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let Some(repo) = &project.snapshot else {
         return;
@@ -522,13 +523,7 @@ fn branch_menu(
 
 /// "Merge X into current…" and "Rebase current onto X…", for the selected
 /// worktree's branch.
-fn merge_items(
-    ui: &mut Ui,
-    project: &Project,
-    name: &str,
-    rebase: bool,
-    actions: &mut Vec<Action>,
-) {
+fn merge_items(ui: &mut Ui, project: &Project, name: &str, rebase: bool, actions: &mut Actions) {
     let Some(wt) = project.worktree() else { return };
     let Some(current) = wt.branch.as_deref() else {
         return;
@@ -571,7 +566,7 @@ fn remote_branch_menu(
     repo: &RepoSnapshot,
     branch: &RemoteBranch,
     busy: bool,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     merge_items(ui, project, &branch.name, true, actions);
     let local = branch.branch_name();
@@ -618,7 +613,7 @@ fn remote_branch_menu(
     }
 }
 
-fn tag_menu(ui: &mut Ui, repo: &RepoSnapshot, tag: &str, busy: bool, actions: &mut Vec<Action>) {
+fn tag_menu(ui: &mut Ui, repo: &RepoSnapshot, tag: &str, busy: bool, actions: &mut Actions) {
     let remote = repo
         .remotes
         .iter()
@@ -743,13 +738,7 @@ fn open_branch(project: &Project, repo: &RepoSnapshot, name: &str) -> Option<Act
     }
 }
 
-fn remotes(
-    ui: &mut Ui,
-    project: &Project,
-    repo: &RepoSnapshot,
-    busy: bool,
-    actions: &mut Vec<Action>,
-) {
+fn remotes(ui: &mut Ui, project: &Project, repo: &RepoSnapshot, busy: bool, actions: &mut Actions) {
     let add = Action::OpenDialog(DialogKind::add_remote(repo.remotes.is_empty()));
     for remote in &repo.remotes {
         simple_row(ui, Icon::Cloud, &remote.name, color::text_mid(), 8.0)
@@ -818,7 +807,7 @@ fn remote_branch_row(
     label: &str,
     indent: f32,
     busy: bool,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let (rect, response) = row(ui, 24.0);
     paint_row_bg(ui.painter(), rect, &response, false);

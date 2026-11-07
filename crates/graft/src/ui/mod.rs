@@ -1,3 +1,6 @@
+//! The screens. They read the app's state and say what the user did as
+//! [`Actions`]; they never change state themselves.
+
 pub mod about;
 mod branch_menu;
 mod can;
@@ -14,6 +17,7 @@ pub mod history;
 pub mod icons;
 pub mod main_area;
 pub mod new_worktree;
+pub mod project;
 pub mod project_tabs;
 pub mod review;
 pub mod search;
@@ -27,3 +31,41 @@ pub mod toasts;
 pub mod toolbar;
 pub mod widgets;
 pub mod window_frame;
+
+use crate::project::Action;
+
+/// Something the user did that the app handles, not the shown project.
+#[derive(Clone, Debug)]
+pub enum AppAction {
+    /// Close the shown project's tab.
+    Close,
+    /// Switch to another open project and apply `actions` there (a search
+    /// hit in another project).
+    InProject {
+        project: usize,
+        actions: Vec<Action>,
+    },
+    /// Show whole files in diffs, or only the changes (an app setting).
+    ToggleWholeFile,
+}
+
+/// What the user did this frame.
+#[derive(Default)]
+pub struct Actions {
+    pub project: Vec<Action>,
+    pub app: Vec<AppAction>,
+}
+
+impl Actions {
+    pub fn push(&mut self, action: Action) {
+        self.project.push(action);
+    }
+
+    pub fn app(&mut self, action: AppAction) {
+        self.app.push(action);
+    }
+
+    pub fn extend(&mut self, actions: impl IntoIterator<Item = Action>) {
+        self.project.extend(actions);
+    }
+}
