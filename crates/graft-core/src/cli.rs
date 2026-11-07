@@ -59,7 +59,7 @@ impl Progress {
     }
 }
 
-pub fn parse_progress(line: &str) -> Progress {
+fn parse_progress(line: &str) -> Progress {
     let line = line.trim().trim_start_matches("remote:").trim();
     let (phase, rest) = line.split_once(':').unwrap_or((line, ""));
     let fraction = rest
@@ -109,7 +109,7 @@ impl Git {
     /// `path` as git sees it: a Linux path for a repository inside WSL.
     /// Fails for a path git there cannot reach (another distro, a network
     /// share): Linux git would take it as a relative file name.
-    pub fn path_arg(&self, path: &Path) -> Result<String> {
+    pub(crate) fn path_arg(&self, path: &Path) -> Result<String> {
         match &self.wsl {
             None => Ok(path.to_string_lossy().into_owned()),
             Some(wsl) => wsl.to_linux(path).with_context(|| {
@@ -123,7 +123,7 @@ impl Git {
     }
 
     /// An absolute path git printed, as a Windows path.
-    pub fn native_path(&self, path: &str) -> PathBuf {
+    pub(crate) fn native_path(&self, path: &str) -> PathBuf {
         match &self.wsl {
             Some(wsl) => wsl.to_windows(path),
             None => crate::paths::native(path),
@@ -137,7 +137,7 @@ impl Git {
 
     /// Same directory, but every command uses `index` as the index, leaving
     /// the real one alone.
-    pub fn with_index(&self, index: impl Into<PathBuf>) -> Self {
+    pub(crate) fn with_index(&self, index: impl Into<PathBuf>) -> Self {
         Self {
             index_file: Some(index.into()),
             ..self.clone()
@@ -147,7 +147,7 @@ impl Git {
     /// Paths may be patterns again. For commands that need it: `stash push
     /// -u` stores untracked files but leaves them in place when pathspecs
     /// are literal (git 2.5x), and `check-ignore` refuses literal pathspecs.
-    pub fn without_literal_pathspecs(&self) -> Self {
+    pub(crate) fn without_literal_pathspecs(&self) -> Self {
         Self {
             literal_pathspecs: false,
             ..self.clone()
@@ -155,7 +155,7 @@ impl Git {
     }
 
     /// Run git and return its output whatever the exit code.
-    pub fn run_raw<I, S>(&self, args: I) -> Result<Output>
+    pub(crate) fn run_raw<I, S>(&self, args: I) -> Result<Output>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -164,7 +164,7 @@ impl Git {
     }
 
     /// Run git, feeding `input` to stdin.
-    pub fn run_with_input<I, S>(&self, args: I, input: Option<&[u8]>) -> Result<Output>
+    pub(crate) fn run_with_input<I, S>(&self, args: I, input: Option<&[u8]>) -> Result<Output>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -174,7 +174,7 @@ impl Git {
 
     /// Run git; `expected` says which outcomes are normal, so the console
     /// does not list e.g. "stopped with conflicts" as a failure.
-    pub fn run_expecting<I, S>(
+    pub(crate) fn run_expecting<I, S>(
         &self,
         args: I,
         input: Option<&[u8]>,
@@ -234,7 +234,7 @@ impl Git {
     /// Run a long git command that reports progress on stderr (clone, fetch,
     /// push, pull) and fail with git's message on a non-zero exit code.
     /// `cancel` kills git; the error is then [`Cancelled`].
-    pub fn run_progress(
+    pub(crate) fn run_progress(
         &self,
         args: &[&str],
         cancel: &CancelToken,
@@ -479,7 +479,7 @@ fn keep_final_progress(stderr: &[u8]) -> Vec<u8> {
 }
 
 /// The most useful line(s) of a failed git command, for showing to the user.
-pub fn failure_message(out: &Output) -> String {
+pub(crate) fn failure_message(out: &Output) -> String {
     let stderr = crate::console::redact(&out.stderr_str());
     let text = if stderr.is_empty() {
         // wsl.exe reports its own failures (e.g. a removed distro) in UTF-16.

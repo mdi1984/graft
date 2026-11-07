@@ -7,13 +7,13 @@ use crate::cli::Git;
 use crate::status::Change;
 
 /// git's id of the empty tree: what a root commit is compared with.
-pub const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+pub(crate) const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /// How much of a file git looks at to call it binary.
 const BINARY_PROBE: usize = 8000;
 
 /// Whether `content` is binary the way git judges it: a NUL byte near the start.
-pub fn is_binary(content: &[u8]) -> bool {
+pub(crate) fn is_binary(content: &[u8]) -> bool {
     content.iter().take(BINARY_PROBE).any(|b| *b == 0)
 }
 

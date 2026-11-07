@@ -18,7 +18,7 @@ pub enum ResetMode {
 }
 
 impl ResetMode {
-    pub fn flag(self) -> &'static str {
+    fn flag(self) -> &'static str {
         match self {
             ResetMode::Soft => "--soft",
             ResetMode::Mixed => "--mixed",

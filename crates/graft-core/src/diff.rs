@@ -158,7 +158,7 @@ fn parent(git: &Git, id: &Oid) -> Result<Option<String>> {
 /// The old version of the file as git stores it (line endings as in the
 /// diff), to fill in the unchanged lines between hunks. `None` when there
 /// is no old version.
-pub fn old_version(git: &Git, source: &Source, path: &str) -> Result<Option<Vec<u8>>> {
+fn old_version(git: &Git, source: &Source, path: &str) -> Result<Option<Vec<u8>>> {
     let rev = match source {
         Source::Unstaged => format!(":0:{path}"),
         Source::Staged => format!("HEAD:{path}"),
@@ -496,7 +496,7 @@ fn parse_hunk_header(line: &[u8]) -> Option<Hunk> {
 
 /// How a patch will be applied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Direction {
+pub(crate) enum Direction {
     /// `git apply` (staging): unselected `+` lines are dropped, unselected
     /// `-` lines become context.
     Forward,
@@ -507,7 +507,7 @@ pub enum Direction {
 
 /// A patch containing only the selected lines, or `None` if nothing is
 /// selected. `selected(hunk, line)` says whether a changed line is included.
-pub fn build_patch(
+pub(crate) fn build_patch(
     diff: &FileDiff,
     direction: Direction,
     selected: impl Fn(usize, usize) -> bool,
@@ -586,7 +586,7 @@ fn partial_header(diff: &FileDiff, direction: Direction) -> Vec<u8> {
 /// Character ranges that differ between a removed and an added line, for
 /// word-level highlights: the part between the common prefix and suffix,
 /// widened to word boundaries.
-pub fn changed_ranges(old: &str, new: &str) -> (Range<usize>, Range<usize>) {
+fn changed_ranges(old: &str, new: &str) -> (Range<usize>, Range<usize>) {
     if old == new {
         return (0..0, 0..0);
     }

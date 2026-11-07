@@ -36,7 +36,7 @@ pub fn unstage_paths(git: &Git, paths: &[String]) -> Result<()> {
     Ok(())
 }
 
-pub fn has_head(git: &Git) -> Result<bool> {
+fn has_head(git: &Git) -> Result<bool> {
     Ok(git
         .run_raw(["rev-parse", "-q", "--verify", "HEAD"])?
         .success())
@@ -171,7 +171,7 @@ fn remove_lines(
 }
 
 /// `git apply` a patch to the index (`cached`) or the working tree.
-pub fn apply_patch(git: &Git, patch: &[u8], cached: bool, reverse: bool) -> Result<()> {
+fn apply_patch(git: &Git, patch: &[u8], cached: bool, reverse: bool) -> Result<()> {
     let mut args = vec!["apply", "--recount", "--whitespace=nowarn"];
     if cached {
         args.push("--cached");

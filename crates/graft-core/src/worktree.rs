@@ -149,7 +149,7 @@ pub fn copy_ignored(from: &Git, to: &Path, patterns: &str) -> Result<Vec<String>
 
 /// `*` matches any run of characters, `?` one character; case-insensitive
 /// like the Windows file system.
-pub fn glob_match(pattern: &str, name: &str) -> bool {
+pub(crate) fn glob_match(pattern: &str, name: &str) -> bool {
     let p: Vec<char> = pattern.to_lowercase().chars().collect();
     let n: Vec<char> = name.to_lowercase().chars().collect();
     let (mut pi, mut ni) = (0, 0);

@@ -47,7 +47,7 @@ pub fn folder_name(path: &Path) -> String {
 
 /// Whether `rel` under `root` passes through a symlink or junction (or is
 /// one). Writing there could land outside the repository.
-pub fn through_link(root: &Path, rel: &Path) -> bool {
+pub(crate) fn through_link(root: &Path, rel: &Path) -> bool {
     let mut at = root.to_path_buf();
     rel.components().any(|part| {
         at.push(part);

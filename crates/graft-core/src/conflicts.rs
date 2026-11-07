@@ -74,7 +74,7 @@ pub fn side_names(kind: Option<Kind>, branch: Option<&str>) -> (String, String) 
 
 /// Run a command that may stop with conflicts. Ok(true) means it stopped and
 /// the conflicts are waiting to be resolved.
-pub fn run_may_conflict(git: &Git, args: &[&str]) -> Result<bool> {
+fn run_may_conflict(git: &Git, args: &[&str]) -> Result<bool> {
     let out = git.run_expecting(args, None, |o| o.success() || stopped(o))?;
     if out.success() {
         return Ok(false);
@@ -285,7 +285,7 @@ fn write_blob(git: &Git, content: &[u8], flags: &[&str]) -> Result<String> {
 }
 
 /// Split `git merge-file --diff3` output at its conflict markers.
-pub fn parse_merged(text: &[u8]) -> Vec<Segment> {
+fn parse_merged(text: &[u8]) -> Vec<Segment> {
     enum State {
         Common,
         Ours,
