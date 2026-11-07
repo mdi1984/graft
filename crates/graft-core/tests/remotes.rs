@@ -1,20 +1,9 @@
 //! Adding, editing and removing remotes.
 
-use std::path::Path;
-use std::process::Command;
+mod common;
 
-use graft_core::remote;
-use graft_core::{Console, Git, snapshot};
-
-fn sh(dir: &Path, args: &[&str]) {
-    let ok = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .status()
-        .expect("git runs")
-        .success();
-    assert!(ok, "git {args:?} failed");
-}
+use common::sh;
+use graft_core::{remote, snapshot};
 
 #[test]
 fn add_edit_and_remove() {
@@ -49,7 +38,7 @@ fn add_edit_and_remove() {
     );
     sh(&dir, &["push", "-q", server.to_str().unwrap(), "main"]);
 
-    let git = Git::new(&dir, Console::default());
+    let git = common::git(&dir);
     let url = server.to_string_lossy().into_owned();
     remote::save_remote(&git, None, "origin", &url, true).unwrap();
     let snap = snapshot::load(&git).unwrap();

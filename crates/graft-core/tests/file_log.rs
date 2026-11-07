@@ -1,36 +1,20 @@
 //! File history and blame against a real repository.
 
+mod common;
+
 use std::path::Path;
-use std::process::Command;
 
+use common::sh;
 use graft_core::file_log;
-use graft_core::{Console, Git};
-
-fn sh(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("git runs");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_owned()
-}
 
 fn commit(dir: &Path, author: &str, message: &str) {
     sh(dir, &["add", "-A"]);
     sh(
         dir,
         &[
-            "-c",
-            &format!("user.name={author}"),
-            "-c",
-            "user.email=x@example.com",
             "commit",
             "-q",
+            &format!("--author={author} <x@example.com>"),
             "-m",
             message,
         ],
@@ -40,8 +24,7 @@ fn commit(dir: &Path, author: &str, message: &str) {
 #[test]
 fn history_follows_renames_and_blame_names_authors() {
     let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path();
-    sh(dir, &["init", "-q", "-b", "main"]);
+    let dir = &common::init(&tmp.path().join("r"));
     std::fs::write(dir.join("old.txt"), "one\ntwo\nthree\n").unwrap();
     std::fs::write(dir.join("other.txt"), "x\n").unwrap();
     commit(dir, "Ada", "Add old");
@@ -52,7 +35,7 @@ fn history_follows_renames_and_blame_names_authors() {
     std::fs::write(dir.join("new.txt"), "one\nTWO\nthree\n").unwrap();
     commit(dir, "Grace", "Shout two");
 
-    let git = Git::new(dir, Console::default());
+    let git = common::git(dir);
     let log = file_log::log(&git, "new.txt", 100).unwrap();
     let summaries: Vec<&str> = log.iter().map(|c| c.summary.as_str()).collect();
     assert_eq!(summaries, ["Shout two", "Rename", "Add old"]);

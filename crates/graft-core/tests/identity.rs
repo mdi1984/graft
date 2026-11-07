@@ -1,22 +1,18 @@
 //! Commit identity, for this repository only (the test must not touch the
 //! user's global git config).
 
-use std::process::Command;
+mod common;
 
+use common::sh;
 use graft_core::identity::{self, Identity};
-use graft_core::{Console, Git};
 
 #[test]
 fn save_and_load_local() {
     let tmp = tempfile::tempdir().unwrap();
-    let ok = Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(tmp.path())
-        .status()
-        .unwrap()
-        .success();
-    assert!(ok);
-    let git = Git::new(tmp.path(), Console::default());
+    // A plain `git init`: the fixture's local identity would hide the
+    // fallback checked below.
+    sh(tmp.path(), &["init", "-q"]);
+    let git = common::git(tmp.path());
     let mine = Identity {
         name: "Ada Lovelace".into(),
         email: "ada@example.com".into(),
@@ -24,6 +20,11 @@ fn save_and_load_local() {
     };
     identity::save(&git, &mine).unwrap();
     assert_eq!(identity::load(&git).unwrap(), mine);
+    assert_eq!(
+        sh(tmp.path(), &["config", "--local", "user.name"]),
+        "Ada Lovelace",
+        "stored in this repository"
+    );
 
     // Clearing both local values falls back to whatever is global.
     identity::save(

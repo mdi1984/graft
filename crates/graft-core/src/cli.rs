@@ -515,24 +515,58 @@ pub(crate) fn failure_message(out: &Output) -> String {
 mod tests {
     use super::*;
 
+    /// What `git config --get key` answers for `cmd`.
+    fn config_value(mut cmd: Command, key: &str) -> String {
+        let out = cmd.args(["config", "--get", key]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
     #[test]
-    fn config_from_the_environment_is_kept() {
-        let env = extra_config(0);
-        assert_eq!(env[0], ("GIT_CONFIG_COUNT".to_owned(), "1".to_owned()));
-        assert_eq!(env[1].0, "GIT_CONFIG_KEY_0");
-        // The user already passes two settings: ours come after them.
-        assert!(inherited_config(0).is_empty());
-        assert_eq!(
-            inherited_config(1),
-            ["GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"]
-        );
-        let env = extra_config(2);
-        assert_eq!(env[0].1, "3");
-        assert_eq!(
-            env[1],
-            ("GIT_CONFIG_KEY_2".to_owned(), "core.longpaths".to_owned())
-        );
-        assert_eq!(env[2], ("GIT_CONFIG_VALUE_2".to_owned(), "true".to_owned()));
+    fn every_command_gets_our_settings() {
+        let git = Git::new(std::env::temp_dir(), Console::default());
+        let cmd = git.command("git").unwrap();
+        assert_eq!(config_value(cmd, "core.longpaths"), "true");
+    }
+
+    /// Settings the user passes in the environment (`GIT_CONFIG_COUNT`)
+    /// still reach git next to ours.
+    #[test]
+    fn settings_from_the_environment_are_kept() {
+        let user = |cmd: &mut Command| {
+            cmd.env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_CONFIG_KEY_0", "graft.test")
+                .env("GIT_CONFIG_VALUE_0", "mine")
+                .envs(extra_config(1));
+        };
+        let mut cmd = Command::new("git");
+        user(&mut cmd);
+        assert_eq!(config_value(cmd, "graft.test"), "mine");
+        let mut cmd = Command::new("git");
+        user(&mut cmd);
+        assert_eq!(config_value(cmd, "core.longpaths"), "true");
+    }
+
+    /// Linux only sees the variables `WSLENV` names, and a named but unset
+    /// one arrives empty (an empty `GIT_INDEX_FILE` breaks every command).
+    #[test]
+    fn wsl_gets_the_variables_that_are_set_and_only_those() {
+        let mut cmd = Command::new("wsl.exe");
+        cmd.env("GIT_INDEX_FILE", "/tmp/x.index")
+            .env("LC_ALL", "C")
+            .env_remove("GIT_DIR");
+        share_env(&mut cmd);
+        let wslenv = cmd
+            .get_envs()
+            .find(|(name, _)| *name == "WSLENV")
+            .and_then(|(_, value)| value)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let names: Vec<&str> = wslenv.split(':').collect();
+        assert!(names.contains(&"GIT_INDEX_FILE"), "{wslenv}");
+        assert!(names.contains(&"LC_ALL"), "{wslenv}");
+        assert!(!names.contains(&"GIT_DIR"), "{wslenv}");
+        assert!(!names.contains(&"WSLENV"), "{wslenv}");
     }
 
     #[test]
