@@ -48,8 +48,8 @@ impl ConsoleView {
     }
 }
 
-/// The bottom status bar: current activity on the left, console toggle right.
-/// The bottom status bar. Returns true when the user clicked "Cancel" on a
+/// The bottom status bar: current activity on the left, console toggle on
+/// the right. Returns true when the user clicked "Cancel" on a
 /// cancellable `activity`.
 pub fn status_bar(
     ui: &mut Ui,
@@ -105,7 +105,6 @@ pub fn status_bar(
         paint_galley_left(painter, x, y, text);
     }
 
-    // Console toggle on the right.
     let failures = view.unseen_failures();
     let label = if failures > 0 {
         format!("Console · {failures} failed")

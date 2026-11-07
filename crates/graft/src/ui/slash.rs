@@ -253,7 +253,10 @@ fn recent_ui(ui: &mut Ui, slashed: &[SlashedBranch], running: bool, actions: &mu
                     .font(theme::mono())
                     .color(color::text()),
             );
-            let sha: String = entry.target.chars().take(8).collect();
+            let sha = entry
+                .target
+                .parse()
+                .map_or_else(|_| entry.target.clone(), |oid| graft_core::short(&oid));
             small(
                 ui,
                 &format!("{sha} · {}", crate::time::relative(entry.at, now)),

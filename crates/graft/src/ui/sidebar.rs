@@ -2,7 +2,8 @@
 //! TAGS, and STASHES.
 
 use egui::{Id, Rect, Response, ScrollArea, Sense, Stroke, Ui, pos2, vec2};
-use graft_core::{Branch, RemoteBranch, RepoSnapshot, Upstream, Worktree, same_path};
+use graft_core::console::redact;
+use graft_core::{Branch, RemoteBranch, RepoSnapshot, Upstream, Worktree, same_path, wsl};
 
 use super::branch_menu;
 use super::icons::Icon;
@@ -385,7 +386,7 @@ fn worktree_menu(ui: &mut Ui, wt: &Worktree, busy: bool, actions: &mut Vec<Actio
         ui.close();
     }
     if ui.button("Copy path").clicked() {
-        ui.ctx().copy_text(wt.path.display().to_string());
+        ui.ctx().copy_text(wsl::display(&wt.path));
         ui.close();
     }
     if wt.is_main {
@@ -427,11 +428,14 @@ fn remove_confirm(wt: &Worktree) -> Confirm {
     let body = if dirty > 0 {
         format!(
             "The folder {} will be deleted, including {}, which will be lost. {branch}",
-            wt.path.display(),
+            wsl::display(&wt.path),
             plural(dirty, "uncommitted change")
         )
     } else {
-        format!("The folder {} will be deleted. {branch}", wt.path.display())
+        format!(
+            "The folder {} will be deleted. {branch}",
+            wsl::display(&wt.path)
+        )
     };
     Confirm {
         title: format!("Remove worktree {}?", wt.label()),
@@ -718,7 +722,10 @@ fn branch_row(
     };
     let tip = match checked_out {
         Some(wt) if wt.is_main => format!("{tip}\nChecked out in your main folder"),
-        Some(wt) => format!("{tip}\nChecked out in the worktree {}", wt.path.display()),
+        Some(wt) => format!(
+            "{tip}\nChecked out in the worktree {}",
+            wsl::display(&wt.path)
+        ),
         None => format!("{tip}\nDouble-click to check it out in the main folder"),
     };
     response.on_hover_text(tip)
@@ -769,7 +776,7 @@ fn remotes(
                             "Graft forgets {} and its remote branches. Nothing changes on the \
                              server, and your local branches keep their commits; branches that \
                              tracked it lose their upstream.",
-                            remote.fetch_url
+                            redact(&remote.fetch_url)
                         ),
                         confirm_label: "Remove remote".to_owned(),
                         action: Action::RemoveRemote(remote.name.clone()),

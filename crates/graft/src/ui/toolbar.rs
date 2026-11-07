@@ -9,7 +9,7 @@ use graft_core::{RepoSnapshot, Upstream, Worktree};
 
 use super::can::{self, Can, no, yes};
 use super::icons::Icon;
-use super::widgets::{Tone, tool_button, toolbar_divider};
+use super::widgets::{Tone, plural, tool_button, toolbar_divider};
 use crate::project::{Action, DialogKind, Project, RemoteOp, merge_dialog};
 
 /// Below this width, buttons with an icon drop their label.
@@ -260,8 +260,7 @@ fn can_push(snap: Option<&RepoSnapshot>, wt: Option<&Worktree>) -> Can {
             "Nothing to push: {branch} has no commits that {name} lacks"
         )),
         Ok((_, Upstream::Tracking { name, .. })) => {
-            let commits = if ahead == 1 { "commit" } else { "commits" };
-            yes(format!("Push {ahead} {commits} to {name}"))
+            yes(format!("Push {} to {name}", plural(ahead, "commit")))
         }
         Ok((branch, Upstream::None)) => yes(format!("Publish {branch} and track it")),
         Ok((branch, Upstream::Gone { name })) => yes(format!(

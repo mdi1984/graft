@@ -2,7 +2,7 @@
 //! screen for the current tab and view.
 
 use egui::{Frame, Margin, Panel, Rect, Sense, Ui, vec2};
-use graft_core::Worktree;
+use graft_core::{Worktree, wsl};
 
 use super::widgets::{
     ButtonKind, button, elided_path, error_label, loading, paint_galley_left, title,
@@ -41,11 +41,11 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
             }
         },
         Tab::Review => {
-            header(ui, "Review", worktree);
+            header(ui, Tab::Review.label(), worktree);
             review::show(ui, project, actions);
         }
         Tab::Stashes => {
-            header(ui, "Stashes", worktree);
+            header(ui, Tab::Stashes.label(), worktree);
             stashes::show(ui, project, actions);
         }
     }
@@ -61,7 +61,7 @@ fn preview_banner(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
         .worktrees
         .iter()
         .find(|wt| graft_core::same_path(&wt.path, &preview.source));
-    let name = source.map_or_else(|| preview.source.display().to_string(), |wt| wt.label());
+    let name = source.map_or_else(|| wsl::display(&preview.source), |wt| wt.label());
     let back = match &preview.restore {
         graft_core::preview::Restore::Branch(b) => b.clone(),
         graft_core::preview::Restore::Detached(id) => graft_core::short(id),
@@ -144,7 +144,7 @@ fn header(ui: &mut Ui, title: &str, worktree: Option<&Worktree>) {
             paint_galley_left(painter, chip.left() + 8.0, y, chip_text);
             x = chip.right() + 10.0;
 
-            let path = graft_core::wsl::display(&wt.path);
+            let path = wsl::display(&wt.path);
             let path = elided_path(
                 ui,
                 &path,
@@ -159,7 +159,7 @@ fn header(ui: &mut Ui, title: &str, worktree: Option<&Worktree>) {
 /// The project has no snapshot yet: loading, or it failed (folder gone?).
 fn not_loaded(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
     let Some(error) = &project.error else {
-        let path = graft_core::wsl::display(&project.root);
+        let path = wsl::display(&project.root);
         loading(ui, &format!("Opening {path}…"));
         return;
     };
@@ -168,9 +168,7 @@ fn not_loaded(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
     let area = Rect::from_center_size(rect.center(), vec2(width, 160.0));
     ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
         title(ui, &format!("Could not open {}", project.name));
-        ui.label(
-            egui::RichText::new(graft_core::wsl::display(&project.root)).color(color::text_weak()),
-        );
+        ui.label(egui::RichText::new(wsl::display(&project.root)).color(color::text_weak()));
         ui.add_space(4.0);
         error_label(ui, error);
         ui.add_space(8.0);

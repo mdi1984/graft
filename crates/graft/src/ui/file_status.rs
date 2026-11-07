@@ -426,7 +426,7 @@ fn commit_box(
         }
         ui.checkbox(&mut form.push_after, "Push after commit");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let ready = !form.summary.trim().is_empty() && (staged > 0 || form.amend) && !busy;
+            let ready = form.ready(staged) && !busy;
             let label = if form.amend { "Amend commit" } else { "Commit" };
             let keys = &project.settings.keys;
             let clicked = button(ui, label, ButtonKind::Primary, ready)

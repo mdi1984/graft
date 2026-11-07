@@ -8,7 +8,7 @@ use egui::{Color32, Frame, Margin, Panel, RichText, ScrollArea, Stroke, TextEdit
 use graft_core::Worktree;
 use graft_core::conflicts::{ConflictFile, InProgress, Kind, Resolution, Segment};
 
-use super::widgets::{ButtonKind, button, empty_state, waiting};
+use super::widgets::{ButtonKind, button, empty_state, plural, waiting};
 use crate::project::{Action, ConflictView, Project};
 use crate::theme::{self, RADIUS, color};
 
@@ -71,8 +71,7 @@ pub fn banner(ui: &mut Ui, project: &Project, wt: &Worktree, actions: &mut Vec<A
                     }
                     let text = match left {
                         0 => "All conflicts resolved".to_owned(),
-                        1 => "1 file with conflicts".to_owned(),
-                        n => format!("{n} files with conflicts"),
+                        n => format!("{} with conflicts", plural(n, "file")),
                     };
                     ui.label(RichText::new(text).color(if left == 0 {
                         color::added()

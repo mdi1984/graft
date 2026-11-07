@@ -5,7 +5,7 @@
 use egui::{Frame, Margin, Panel, RichText, ScrollArea, Sense, Ui, vec2};
 use graft_core::diff::Source;
 use graft_core::stash::Stash;
-use graft_core::{RepoSnapshot, short};
+use graft_core::{RepoSnapshot, short, wsl};
 
 use super::diff_view;
 use super::file_row::{FILE_ROW_HEIGHT, file_row};
@@ -220,7 +220,7 @@ fn details(
             ui.menu_button("Apply to…", |ui| {
                 for wt in others {
                     if ui
-                        .button(format!("{}  ({})", wt.label(), wt.path.display()))
+                        .button(format!("{}  ({})", wt.label(), wsl::display(&wt.path)))
                         .clicked()
                     {
                         actions.push(apply(stash, wt.path.clone(), false));
