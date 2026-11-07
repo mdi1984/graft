@@ -78,6 +78,12 @@ impl Pick {
         };
         lo <= at && at <= hi && on_side
     }
+
+    /// Like [`Self::contains`], for the column `side` of the side-by-side
+    /// view: a pick made in the other column is not in this one.
+    pub fn contains_in(&self, side: Side, at: (usize, usize), kind: Kind) -> bool {
+        self.side.is_none_or(|s| s == side) && self.contains(at, kind)
+    }
 }
 
 /// Every line of the diff with its (hunk, line) position.

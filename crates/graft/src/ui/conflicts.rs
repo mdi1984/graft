@@ -483,7 +483,7 @@ fn side(ui: &mut Ui, name: &str, text: &[u8], accent: Color32) {
 /// Lines of code, unwrapped; wide lines scroll sideways.
 fn code(ui: &mut Ui, text: &str, fg: Color32) {
     let text = text.strip_suffix('\n').unwrap_or(text);
-    let text = text.replace('\t', "    ");
+    let text = text.replace('\t', graft_core::diff::TAB);
     ScrollArea::horizontal()
         .id_salt(ui.next_auto_id())
         .auto_shrink([false, true])

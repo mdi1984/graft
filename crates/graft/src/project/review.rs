@@ -37,6 +37,20 @@ impl ReviewState {
         let notes = self.notes.values().filter(|n| !n.trim().is_empty()).count();
         notes + self.comments.len()
     }
+
+    /// Like [`Self::comment_count`], for the file at `path`.
+    pub fn file_comment_count(&self, path: &str) -> usize {
+        let note = self.notes.get(path).is_some_and(|n| !n.trim().is_empty());
+        self.comments.iter().filter(|c| c.path == path).count() + usize::from(note)
+    }
+
+    /// The note on the file at `path`, unless it is blank.
+    pub fn file_note(&self, path: &str) -> Option<&str> {
+        self.notes
+            .get(path)
+            .map(String::as_str)
+            .filter(|n| !n.trim().is_empty())
+    }
 }
 
 pub struct ReviewView {

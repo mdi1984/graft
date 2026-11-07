@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use egui::{Align2, Rect, ScrollArea, Sense, Stroke, StrokeKind, TextureHandle, Ui, pos2, vec2};
+use egui::{
+    Align2, Color32, Rect, ScrollArea, Sense, Stroke, StrokeKind, TextureHandle, Ui, pos2, vec2,
+};
 use graft_core::CancelToken;
 use graft_core::repo::{Progress, clone_folder_name, native};
 use graft_core::wsl::Wsl;
@@ -13,7 +15,7 @@ use graft_core::wsl::Wsl;
 use super::icons::{self, Icon};
 use super::widgets::{
     ButtonKind, button, elided, elided_path, field_label, paint_galley_left, paint_icon_button,
-    progress_bar, section_heading, text_field,
+    paint_placeholder_left, progress_bar, section_heading, text_field,
 };
 use crate::groups::{GroupId, TabGroup};
 use crate::theme::{self, RADIUS, color};
@@ -554,7 +556,7 @@ impl StartPage {
                 );
                 let prefix_width = prefix.size().x;
                 let y = rect.center().y;
-                paint_galley_left(ui.painter(), rect.left(), y, prefix, color::text_faint());
+                paint_galley_left(ui.painter(), rect.left(), y, prefix);
                 let dest = self.describe(dest);
                 let dest = elided_path(
                     ui,
@@ -563,13 +565,7 @@ impl StartPage {
                     color::text_weak(),
                     inner - prefix_width,
                 );
-                paint_galley_left(
-                    ui.painter(),
-                    rect.left() + prefix_width,
-                    y,
-                    dest,
-                    color::text_weak(),
-                );
+                paint_galley_left(ui.painter(), rect.left() + prefix_width, y, dest);
             }
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -679,13 +675,7 @@ fn card(
         color::text_weak(),
         rect.width() - 28.0,
     );
-    paint_galley_left(
-        painter,
-        rect.left() + 14.0,
-        rect.top() + 72.0,
-        detail,
-        color::text_weak(),
-    );
+    paint_galley_left(painter, rect.left() + 14.0, rect.top() + 72.0, detail);
     response
 }
 
@@ -717,9 +707,9 @@ fn busy_panel(ui: &mut Ui, busy: &Busy, width: f32, action: &mut Option<StartAct
 
 /// A toggle in the Location row.
 fn place_button(ui: &mut Ui, label: &str, selected: bool) -> egui::Response {
-    let galley = ui
-        .painter()
-        .layout_no_wrap(label.to_owned(), theme::small(), color::text());
+    let galley =
+        ui.painter()
+            .layout_no_wrap(label.to_owned(), theme::small(), Color32::PLACEHOLDER);
     let size = vec2(galley.size().x + 20.0, 24.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let (fill, border, fg) = if selected {
@@ -743,7 +733,7 @@ fn place_button(ui: &mut Ui, label: &str, selected: bool) -> egui::Response {
     };
     ui.painter()
         .rect(rect, 6, fill, Stroke::new(1.0, border), StrokeKind::Inside);
-    paint_galley_left(
+    paint_placeholder_left(
         ui.painter(),
         rect.left() + 10.0,
         rect.center().y,
@@ -800,7 +790,7 @@ impl StartPage {
                 fg,
                 width - 60.0,
             );
-            paint_galley_left(painter, rect.left() + 10.0, rect.top() + 14.0, name, fg);
+            paint_galley_left(painter, rect.left() + 10.0, rect.top() + 14.0, name);
             let detail = if exists {
                 self.describe(path)
             } else {
@@ -813,13 +803,7 @@ impl StartPage {
                 color::text_weak(),
                 width - 60.0,
             );
-            paint_galley_left(
-                painter,
-                rect.left() + 10.0,
-                rect.top() + 31.0,
-                detail,
-                color::text_weak(),
-            );
+            paint_galley_left(painter, rect.left() + 10.0, rect.top() + 31.0, detail);
             if hovered {
                 paint_icon_button(ui, close, &close_response, Icon::Close);
             }
@@ -858,21 +842,9 @@ fn group_list(ui: &mut Ui, groups: &[TabGroup], width: f32, action: &mut Option<
             width - 200.0,
         );
         let name_right = rect.left() + 26.0 + name.size().x;
-        paint_galley_left(
-            painter,
-            rect.left() + 26.0,
-            rect.top() + 14.0,
-            name,
-            color::text(),
-        );
+        paint_galley_left(painter, rect.left() + 26.0, rect.top() + 14.0, name);
         let count = elided(ui, &count, theme::small(), color::text_weak(), 160.0);
-        paint_galley_left(
-            painter,
-            name_right + 8.0,
-            rect.top() + 14.0,
-            count,
-            color::text_weak(),
-        );
+        paint_galley_left(painter, name_right + 8.0, rect.top() + 14.0, count);
         let names: Vec<String> = group
             .repos
             .iter()
@@ -889,13 +861,7 @@ fn group_list(ui: &mut Ui, groups: &[TabGroup], width: f32, action: &mut Option<
             color::text_weak(),
             width - 120.0,
         );
-        paint_galley_left(
-            painter,
-            rect.left() + 26.0,
-            rect.top() + 31.0,
-            names,
-            color::text_weak(),
-        );
+        paint_galley_left(painter, rect.left() + 26.0, rect.top() + 31.0, names);
         if response.hovered() {
             painter.text(
                 pos2(rect.right() - 12.0, rect.center().y),

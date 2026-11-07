@@ -6,11 +6,12 @@ use egui::{
     Align, Frame, Key, Layout, Margin, Modifiers, Panel, Rect, RichText, ScrollArea, Sense, Ui,
     pos2, vec2,
 };
+use graft_core::diff::{TAB, display_text};
 use graft_core::file_log::Blame;
 
 use super::diff_view;
 use super::widgets::{
-    ButtonKind, button, elided, empty_state, paint_galley_left, paint_row_bg, waiting,
+    ButtonKind, button, elided, empty_state, paint_galley_left, paint_row_bg, plural, waiting,
 };
 use crate::project::{Action, FileHistoryMode, FileHistoryView, Project};
 use crate::theme::{self, color};
@@ -93,14 +94,7 @@ fn toolbar(ui: &mut Ui, view: &FileHistoryView, actions: &mut Vec<Action>) {
                 );
                 if let Some(Ok(commits)) = &view.commits {
                     let n = commits.len();
-                    ui.label(
-                        RichText::new(if n == 1 {
-                            "1 commit".to_owned()
-                        } else {
-                            format!("{n} commits")
-                        })
-                        .color(color::text_faint()),
-                    );
+                    ui.label(RichText::new(plural(n, "commit")).color(color::text_faint()));
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     for (mode, label) in [
@@ -160,7 +154,7 @@ fn commit_list(
                 let x = rect.left() + 14.0;
                 let width = rect.width() - 28.0;
                 let summary = elided(ui, &commit.summary, theme::body(), color::text(), width);
-                paint_galley_left(ui.painter(), x, rect.top() + 15.0, summary, color::text());
+                paint_galley_left(ui.painter(), x, rect.top() + 15.0, summary);
                 let mut meta = format!(
                     "{} · {} · {}",
                     commit.author,
@@ -171,7 +165,7 @@ fn commit_list(
                     meta.push_str(&format!(" · as {}", commit.path));
                 }
                 let meta = elided(ui, &meta, theme::small(), color::text_weak(), width);
-                paint_galley_left(ui.painter(), x, rect.top() + 33.0, meta, color::text_weak());
+                paint_galley_left(ui.painter(), x, rect.top() + 33.0, meta);
                 if response.clicked() {
                     actions.push(Action::SelectFileCommit(i));
                 }
@@ -201,7 +195,7 @@ fn blame_view(
     let longest = blame
         .lines
         .iter()
-        .map(|l| l.text.chars().count() + l.text.matches('\t').count() * 3)
+        .map(|l| l.text.chars().count() + l.text.matches('\t').count() * (TAB.len() - 1))
         .max()
         .unwrap_or(0);
     let content_width = GUTTER + number_width + 24.0 + longest as f32 * char_width;
@@ -240,13 +234,7 @@ fn blame_view(
                     );
                     let galley =
                         elided(ui, &text, theme::small(), color::text_weak(), GUTTER - 16.0);
-                    paint_galley_left(
-                        painter,
-                        gutter.left() + 8.0,
-                        rect.center().y,
-                        galley,
-                        color::text_weak(),
-                    );
+                    paint_galley_left(painter, gutter.left() + 8.0, rect.center().y, galley);
                 }
                 let gutter_response = ui.interact(
                     gutter,
@@ -279,7 +267,7 @@ fn blame_view(
                     color::text_faint(),
                 );
                 let text = ui.painter().layout_no_wrap(
-                    line.text.replace('\t', "    "),
+                    display_text(line.text.as_bytes()),
                     theme::mono(),
                     color::text(),
                 );

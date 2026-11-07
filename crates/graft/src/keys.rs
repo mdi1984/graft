@@ -406,6 +406,11 @@ impl Keymap {
         ctx.input_mut(|i| consume_exact(i, shortcut, command.repeats()))
     }
 
+    /// The shortcut as the user reads it, e.g. "Ctrl+S".
+    pub fn text(&self, command: Command) -> Option<String> {
+        self.get(command).map(format)
+    }
+
     /// `text` with the shortcut, for a tooltip: "Stage all  (Ctrl+S)".
     pub fn tip(&self, text: &str, command: Command) -> String {
         match self.get(command) {

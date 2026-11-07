@@ -376,7 +376,6 @@ pub fn show(
                                     rect.left() + 8.0,
                                     rect.center().y,
                                     none,
-                                    color::text_faint(),
                                 );
                                 above = Some(top.union(rect));
                             }
@@ -463,7 +462,7 @@ fn row(ui: &mut Ui, hit: &Hit, selected: bool) -> egui::Response {
         color::text(),
         rect.width() - 80.0 - detail_width - 16.0,
     );
-    super::widgets::paint_galley_left(painter, rect.left() + 80.0, y, title, color::text());
+    super::widgets::paint_galley_left(painter, rect.left() + 80.0, y, title);
     let detail = super::widgets::elided_path(
         ui,
         &hit.detail,
@@ -472,7 +471,7 @@ fn row(ui: &mut Ui, hit: &Hit, selected: bool) -> egui::Response {
         detail_width,
     );
     let x = rect.right() - 8.0 - detail.size().x;
-    super::widgets::paint_galley_left(painter, x, y, detail, color::text_weak());
+    super::widgets::paint_galley_left(painter, x, y, detail);
     response
 }
 

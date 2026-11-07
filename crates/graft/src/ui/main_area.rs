@@ -128,7 +128,7 @@ fn header(ui: &mut Ui, title: &str, worktree: Option<&Worktree>) {
                 color::text(),
             );
             let mut x = rect.left() + title.size().x + 10.0;
-            paint_galley_left(painter, rect.left(), y, title, color::text());
+            paint_galley_left(painter, rect.left(), y, title);
 
             let Some(wt) = worktree else { return };
             let chip_text = painter.layout_no_wrap(wt.label(), theme::mono(), color::dirty_fg());
@@ -141,7 +141,7 @@ fn header(ui: &mut Ui, title: &str, worktree: Option<&Worktree>) {
                 5,
                 color::dirty_bg().lerp_to_gamma(color::app_bg(), 0.3),
             );
-            paint_galley_left(painter, chip.left() + 8.0, y, chip_text, color::dirty_fg());
+            paint_galley_left(painter, chip.left() + 8.0, y, chip_text);
             x = chip.right() + 10.0;
 
             let path = graft_core::wsl::display(&wt.path);
@@ -152,7 +152,7 @@ fn header(ui: &mut Ui, title: &str, worktree: Option<&Worktree>) {
                 color::text_weak(),
                 rect.right() - x,
             );
-            paint_galley_left(painter, x, y, path, color::text_weak());
+            paint_galley_left(painter, x, y, path);
         });
 }
 

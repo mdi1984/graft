@@ -13,8 +13,10 @@ use graft_core::{RepoSnapshot, Worktree, same_path};
 
 use super::can;
 use super::diff_view::{self, Marks};
-use super::history::{paint_change_letter, paint_path};
-use super::widgets::{Badge, ButtonKind, ahead, button, empty_state, progress_bar, waiting};
+use super::file_row;
+use super::widgets::{
+    Badge, ButtonKind, ahead, button, empty_state, paint_galley_left, plural, progress_bar, waiting,
+};
 use crate::keys::Command;
 use crate::project::comments::{self, LineComment};
 use crate::project::{Action, Confirm, Project};
@@ -221,14 +223,8 @@ const ONE_LINE_WIDTH: f32 = 1240.0;
 
 /// "12 commits · 30 files  +120 −45".
 fn stats(ui: &mut Ui, review: &Review) {
-    let commits = match review.commits {
-        1 => "1 commit".to_owned(),
-        n => format!("{n} commits"),
-    };
-    let files = match review.files.len() {
-        1 => "1 file".to_owned(),
-        n => format!("{n} files"),
-    };
+    let commits = plural(review.commits, "commit");
+    let files = plural(review.files.len(), "file");
     ui.label(
         RichText::new(format!("{commits} · {files}"))
             .color(color::text_weak())
@@ -389,14 +385,7 @@ fn file_list(
                 let path = &file.change.path;
                 let viewed = project.is_viewed(file);
                 let is_selected = selected == Some(path.as_str());
-                let (rect, response) =
-                    ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
-                let painter = ui.painter();
-                if is_selected {
-                    painter.rect_filled(rect, 4, color::selected_row_bg());
-                } else if response.hovered() {
-                    painter.rect_filled(rect, 4, color::hover_row_bg());
-                }
+                let (rect, response) = file_row::allocate(ui, is_selected, Sense::click());
                 let y = rect.center().y;
                 let check = Rect::from_center_size(pos2(rect.left() + 12.0, y), vec2(14.0, 14.0));
                 let check_response = ui.interact(
@@ -405,7 +394,6 @@ fn file_list(
                     Sense::click(),
                 );
                 paint_check(ui, check, viewed, check_response.hovered());
-                paint_change_letter(ui, rect.left() + 26.0, y, file.change.change);
 
                 let note = if file.untracked {
                     Some("untracked")
@@ -414,38 +402,35 @@ fn file_list(
                 } else {
                     None
                 };
-                let stats = match (note, file.change.added, file.change.removed) {
-                    (Some(n), _, _) => n.to_owned(),
-                    (None, Some(a), Some(r)) => format!("+{a} −{r}"),
-                    _ => "binary".to_owned(),
+                let (stats, stats_color) = match note {
+                    Some(note) => (note.to_owned(), color::dirty_fg()),
+                    None => (
+                        file_row::stats(file.change.added, file.change.removed),
+                        color::text_faint(),
+                    ),
                 };
-                let stats_galley = ui.painter().layout_no_wrap(
-                    stats,
-                    theme::small(),
-                    if note.is_some() {
-                        color::dirty_fg()
-                    } else {
-                        color::text_faint()
-                    },
-                );
-                let stats_x = rect.right() - 6.0 - stats_galley.size().x;
+                let stats = ui
+                    .painter()
+                    .layout_no_wrap(stats, theme::small(), stats_color);
+                let stats_x = rect.right() - 6.0 - stats.size().x;
+                paint_galley_left(ui.painter(), stats_x, y, stats);
                 // Comments on this file: a badge left of the stats.
-                let count = project.review_state().map_or(0, |s| {
-                    let note = s.notes.get(path).is_some_and(|n| !n.trim().is_empty());
-                    s.comments.iter().filter(|c| &c.path == path).count() + usize::from(note)
-                });
+                let count = project
+                    .review_state()
+                    .map_or(0, |s| s.file_comment_count(path));
                 let mut path_right = stats_x - 8.0;
                 if count > 0 {
                     let badge = Badge::new(ui, count.to_string(), ahead());
                     path_right -= badge.width() + 6.0;
                     badge.paint(ui.painter(), path_right + 6.0, y);
                 }
-                let path_x = rect.left() + 48.0;
-                paint_path(ui, path_x, y, path, path_right - path_x);
-                ui.painter().galley(
-                    pos2(stats_x, y - stats_galley.size().y / 2.0),
-                    stats_galley,
-                    color::text_faint(),
+                file_row::paint_file(
+                    ui,
+                    rect.left() + 26.0,
+                    y,
+                    file.change.change,
+                    path,
+                    path_right,
                 );
                 if viewed {
                     // Dim viewed files so what is left stands out.
@@ -461,11 +446,7 @@ fn file_list(
                 } else if response.clicked() {
                     actions.push(Action::SelectReviewFile(path.clone()));
                 }
-                let tip = match &file.change.orig_path {
-                    Some(orig) => format!("{orig} → {path}"),
-                    None => path.clone(),
-                };
-                response.on_hover_text(tip);
+                response.on_hover_text(file_row::tip(path, file.change.orig_path.as_deref()));
             }
         });
 }
@@ -512,7 +493,7 @@ fn file_header(
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(vec2(18.0, 30.0), Sense::hover());
-                paint_change_letter(ui, rect.left(), rect.center().y, file.change.change);
+                file_row::paint_change_letter(ui, rect.left(), rect.center().y, file.change.change);
                 ui.label(
                     RichText::new(&path)
                         .font(theme::semibold(theme::BODY_SIZE))
@@ -591,8 +572,7 @@ fn comments_bar(
             ui.horizontal(|ui| {
                 let label = match count {
                     0 => "No comments yet".to_owned(),
-                    1 => "1 comment".to_owned(),
-                    n => format!("{n} comments"),
+                    n => plural(n, "comment"),
                 };
                 ui.label(
                     RichText::new(label)
@@ -631,10 +611,10 @@ fn comments_bar(
             });
         });
     if copied {
-        project.infos.push(match count {
-            1 => "Copied 1 comment for your agent".to_owned(),
-            n => format!("Copied {n} comments for your agent"),
-        });
+        project.infos.push(format!(
+            "Copied {} for your agent",
+            plural(count, "comment")
+        ));
     }
 }
 
@@ -763,8 +743,8 @@ fn file_note(
 ) {
     let has_note = project
         .review_state()
-        .and_then(|s| s.notes.get(path))
-        .is_some_and(|n| !n.trim().is_empty());
+        .and_then(|s| s.file_note(path))
+        .is_some();
     let id = ui.make_persistent_id(("review-note-open", path));
     let mut open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(has_note);
     Panel::bottom("review-notes")

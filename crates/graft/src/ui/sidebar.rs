@@ -8,7 +8,7 @@ use super::branch_menu;
 use super::icons::Icon;
 use super::widgets::{
     self, Badge, ICON_SIZE, checkout_color, elided, elided_path, menu_item, paint_badges_right,
-    paint_galley_left, paint_icon, paint_row_bg, section_heading,
+    paint_galley_left, paint_icon, paint_row_bg, plural, section_heading,
 };
 use crate::project::{
     Action, CheckedOut, Confirm, DialogKind, Project, RemoteOp, Tab, WorkspaceView, merge_dialog,
@@ -207,7 +207,7 @@ fn folder_row(ui: &mut Ui, id: Id, name: &str, count: usize, indent: f32, marked
 
     let count = painter.layout_no_wrap(count.to_string(), theme::small(), color::text_faint());
     let count_x = rect.right() - PAD_X - count.size().x;
-    paint_galley_left(painter, count_x, y, count, color::text_faint());
+    paint_galley_left(painter, count_x, y, count);
     let x = rect.left() + indent + 32.0;
     let label = elided(
         ui,
@@ -216,7 +216,7 @@ fn folder_row(ui: &mut Ui, id: Id, name: &str, count: usize, indent: f32, marked
         color::text_mid(),
         count_x - 6.0 - x,
     );
-    paint_galley_left(ui.painter(), x, y, label, color::text_mid());
+    paint_galley_left(ui.painter(), x, y, label);
     if response.clicked() {
         open = !open;
         ui.data_mut(|d| d.insert_persisted(id, open));
@@ -265,7 +265,6 @@ fn collapsible(ui: &mut Ui, title: &str, count: usize, default_open: bool) -> bo
         rect.right() - PAD_X - count.size().x,
         y,
         count,
-        color::text_faint(),
     );
     if response.clicked() {
         open = !open;
@@ -294,7 +293,7 @@ fn nav_row(ui: &mut Ui, icon: Icon, label: &str, selected: bool, badge: Option<B
         color::text(),
         badges_x - 6.0 - text_x,
     );
-    paint_galley_left(painter, text_x, y, text, color::text());
+    paint_galley_left(painter, text_x, y, text);
     response
 }
 
@@ -347,7 +346,7 @@ fn worktree_row(ui: &mut Ui, wt: &Worktree, selected: bool) -> Response {
         color::text()
     };
     let branch = elided(ui, &wt.label(), theme::mono(), fg, badges_x - 6.0 - text_x);
-    paint_galley_left(painter, text_x, top_y, branch, fg);
+    paint_galley_left(painter, text_x, top_y, branch);
     let path = if wt.is_main {
         format!("{}  · main folder", graft_core::wsl::display(&wt.path))
     } else {
@@ -360,7 +359,7 @@ fn worktree_row(ui: &mut Ui, wt: &Worktree, selected: bool) -> Response {
         color::text_weak(),
         rect.right() - PAD_X - text_x,
     );
-    paint_galley_left(painter, text_x, bottom_y, path, color::text_weak());
+    paint_galley_left(painter, text_x, bottom_y, path);
 
     response.on_hover_text(graft_core::wsl::display(&wt.path))
 }
@@ -427,9 +426,9 @@ fn remove_confirm(wt: &Worktree) -> Confirm {
     };
     let body = if dirty > 0 {
         format!(
-            "The folder {} will be deleted, including {dirty} uncommitted change{}, which will be lost. {branch}",
+            "The folder {} will be deleted, including {}, which will be lost. {branch}",
             wt.path.display(),
-            if dirty == 1 { "" } else { "s" }
+            plural(dirty, "uncommitted change")
         )
     } else {
         format!("The folder {} will be deleted. {branch}", wt.path.display())
@@ -692,7 +691,7 @@ fn branch_row(
         .painter()
         .layout_no_wrap(meta, theme::small(), color::text_weak());
     let meta_x = rect.right() - PAD_X - meta.size().x;
-    paint_galley_left(painter, meta_x, y, meta, color::text_weak());
+    paint_galley_left(painter, meta_x, y, meta);
 
     let text_x = rect.left() + indent + 18.0;
     let fg = if in_main {
@@ -701,7 +700,7 @@ fn branch_row(
         color::text()
     };
     let name = elided(ui, label, theme::mono(), fg, meta_x - 6.0 - text_x);
-    paint_galley_left(painter, text_x, y, name, fg);
+    paint_galley_left(painter, text_x, y, name);
 
     let tip = match &branch.upstream {
         Upstream::None => "Not pushed anywhere yet".to_owned(),
@@ -827,7 +826,7 @@ fn remote_branch_row(
         color::text(),
         rect.right() - PAD_X - x,
     );
-    paint_galley_left(ui.painter(), x, y, name, color::text());
+    paint_galley_left(ui.painter(), x, y, name);
     let response = if label.len() < branch.branch_name().len() {
         response.on_hover_text(&branch.name)
     } else {
@@ -864,7 +863,7 @@ fn simple_row(ui: &mut Ui, icon: Icon, text: &str, fg: egui::Color32, indent: f3
         color::text(),
         rect.right() - PAD_X - x,
     );
-    paint_galley_left(ui.painter(), x, y, name, color::text());
+    paint_galley_left(ui.painter(), x, y, name);
     response
 }
 
@@ -873,13 +872,7 @@ fn faint_row(ui: &mut Ui, text: &str) {
     let galley = ui
         .painter()
         .layout_no_wrap(text.to_owned(), theme::small(), color::text_faint());
-    paint_galley_left(
-        ui.painter(),
-        rect.left() + 20.0,
-        rect.center().y,
-        galley,
-        color::text_faint(),
-    );
+    paint_galley_left(ui.painter(), rect.left() + 20.0, rect.center().y, galley);
 }
 
 fn footer_row(ui: &mut Ui, title: &str, value: &str) -> Response {
@@ -892,6 +885,6 @@ fn footer_row(ui: &mut Ui, title: &str, value: &str) -> Response {
         .painter()
         .layout_no_wrap(value.to_owned(), theme::small(), color::text_weak());
     let x = rect.right() - PAD_X - value.size().x;
-    paint_galley_left(painter, x, y, value, color::text_weak());
+    paint_galley_left(painter, x, y, value);
     response
 }

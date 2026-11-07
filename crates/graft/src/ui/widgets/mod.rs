@@ -56,7 +56,19 @@ pub fn elided_path(
 }
 
 /// Paint `galley` vertically centered on `y`, starting at `x`.
-pub fn paint_galley_left(painter: &Painter, x: f32, y: f32, galley: Arc<Galley>, color: Color32) {
+pub fn paint_galley_left(painter: &Painter, x: f32, y: f32, galley: Arc<Galley>) {
+    paint_placeholder_left(painter, x, y, galley, color::text());
+}
+
+/// Like [`paint_galley_left`], for a galley laid out in
+/// `Color32::PLACEHOLDER`: it gets `color` now, e.g. the hover color.
+pub fn paint_placeholder_left(
+    painter: &Painter,
+    x: f32,
+    y: f32,
+    galley: Arc<Galley>,
+    color: Color32,
+) {
     let pos = pos2(x, y - galley.size().y / 2.0);
     painter.galley(pos, galley, color);
 }
@@ -154,7 +166,7 @@ pub fn section_heading(ui: &Ui, painter: &Painter, x: f32, y: f32, title: &str) 
     let galley = ui
         .painter()
         .layout_job(LayoutJob::single_section(title.to_owned(), format));
-    paint_galley_left(painter, x, y, galley, color::text_weak());
+    paint_galley_left(painter, x, y, galley);
 }
 
 /// Row background: selected, hovered, or nothing.
@@ -252,7 +264,7 @@ pub fn tool_button(
         x += ICON_SIZE + icon_gap;
     }
     let text_width = text.size().x;
-    paint_galley_left(painter, x, y, text, fg);
+    paint_galley_left(painter, x, y, text);
     x += text_width;
     if let Some(badge) = badge {
         badge.paint(painter, x + GAP, y);
@@ -275,24 +287,26 @@ pub fn tab(ui: &mut Ui, label: &str, badge: Option<Badge>, selected: bool) -> Re
     const PAD_X: f32 = 12.0;
     const HEIGHT: f32 = 38.0;
 
-    let (font, fg) = if selected {
-        (theme::semibold(theme::BODY_SIZE), color::text())
+    let font = if selected {
+        theme::semibold(theme::BODY_SIZE)
     } else {
-        (theme::body(), color::text_weak())
+        theme::body()
     };
-    let text = ui.painter().layout_no_wrap(label.to_owned(), font, fg);
+    let text = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font, Color32::PLACEHOLDER);
     let badge_width = badge.as_ref().map_or(0.0, |b| b.width() + 6.0);
     let size = vec2(2.0 * PAD_X + text.size().x + badge_width, HEIGHT);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
 
-    let fg = if response.hovered() && !selected {
+    let fg = if selected || response.hovered() {
         color::text()
     } else {
-        fg
+        color::text_weak()
     };
     let painter = ui.painter();
     let text_width = text.size().x;
-    paint_galley_left(painter, rect.left() + PAD_X, rect.center().y, text, fg);
+    paint_placeholder_left(painter, rect.left() + PAD_X, rect.center().y, text, fg);
     if let Some(badge) = badge {
         badge.paint(
             painter,

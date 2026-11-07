@@ -269,7 +269,7 @@ pub fn show(
             (theme::body(), color::text_weak())
         };
         let name = elided(tab_ui, &tab.name, font, fg, text_right - text_x);
-        paint_galley_left(tab_ui.painter(), text_x, y, name, fg);
+        paint_galley_left(tab_ui.painter(), text_x, y, name);
         if show_close {
             paint_icon_button(tab_ui, close_rect, &close, Icon::Close);
         }
@@ -356,7 +356,6 @@ pub fn show(
             rect.left() + PAD_X,
             rect.center().y,
             galley,
-            color::text(),
         );
         if !tabs.is_empty() {
             paint_icon_button(tab_ui, close_rect, &close, Icon::Close);
@@ -646,7 +645,7 @@ fn list_row(
         let fg = color::group(g.color);
         let galley = elided(ui, &g.name, theme::small(), fg, 120.0);
         let x = name_right - galley.size().x;
-        paint_galley_left(painter, x, top_y, galley, fg);
+        paint_galley_left(painter, x, top_y, galley);
         name_right = x - 8.0;
     }
     let name = elided(
@@ -656,7 +655,7 @@ fn list_row(
         color::text(),
         name_right - text_x,
     );
-    paint_galley_left(painter, text_x, top_y, name, color::text());
+    paint_galley_left(painter, text_x, top_y, name);
     let path = elided_path(
         ui,
         &tab.tooltip,
@@ -664,7 +663,7 @@ fn list_row(
         color::text_weak(),
         rect.right() - 10.0 - left,
     );
-    paint_galley_left(painter, left, rect.top() + 29.0, path, color::text_weak());
+    paint_galley_left(painter, left, rect.top() + 29.0, path);
     response
 }
 

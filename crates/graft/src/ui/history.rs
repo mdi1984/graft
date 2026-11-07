@@ -3,20 +3,21 @@
 
 use egui::epaint::CubicBezierShape;
 use egui::{
-    Align2, Color32, Frame, Id, Key, Margin, Panel, Pos2, Rect, Response, RichText, ScrollArea,
-    Sense, Stroke, Ui, pos2, vec2,
+    Align2, Color32, Frame, Id, Key, Margin, Panel, Pos2, Rect, RichText, ScrollArea, Sense,
+    Stroke, Ui, pos2, vec2,
 };
-use graft_core::details::{CommitDetails, FileChange};
+use graft_core::details::CommitDetails;
 use graft_core::diff::Source;
 use graft_core::history::{Commit, GraphRow, History, LineKind};
 use graft_core::refs::ResetMode;
 use graft_core::short;
 use graft_core::status::Change;
 
+use super::file_row::{self, file_row, paint_file};
 use super::icons::Icon;
 use super::widgets::{
     ButtonKind, button, checkout_color, chip, elided, empty_state, icon_button, loading, menu_item,
-    paint_galley_left,
+    paint_galley_left, plural,
 };
 use super::{branch_menu, diff_view};
 use crate::project::{Action, DialogKind, FileKey, Project, RefKind, RefLabel};
@@ -341,7 +342,7 @@ fn paint_row(
     let mut right = rect.right() - cols.commit;
     if cols.commit > 0.0 && !commit.is_worktree() {
         let sha = painter.layout_no_wrap(short(&commit.id), theme::mono(), color::text_faint());
-        paint_galley_left(painter, right, y, sha, color::text_faint());
+        paint_galley_left(painter, right, y, sha);
     }
     right -= cols.date;
     if cols.date > 0.0 && !commit.is_worktree() {
@@ -353,7 +354,7 @@ fn paint_row(
             color::text_weak(),
             cols.date - 8.0,
         );
-        paint_galley_left(painter, right, y, date, color::text_weak());
+        paint_galley_left(painter, right, y, date);
     }
     if cols.author > 0.0 {
         right -= cols.author;
@@ -365,7 +366,7 @@ fn paint_row(
                 color::text_mid(),
                 cols.author - 10.0,
             );
-            paint_galley_left(painter, right, y, author, color::text_mid());
+            paint_galley_left(painter, right, y, author);
         }
     }
 
@@ -393,10 +394,7 @@ fn paint_row(
     }
 
     if commit.is_worktree() {
-        let text = format!(
-            "Uncommitted changes · {worktree_dirty} file{}",
-            if worktree_dirty == 1 { "" } else { "s" }
-        );
+        let text = format!("Uncommitted changes · {}", plural(worktree_dirty, "file"));
         let galley = elided(
             ui,
             &text,
@@ -404,7 +402,7 @@ fn paint_row(
             color::dirty_fg(),
             desc_right - x,
         );
-        paint_galley_left(painter, x, y, galley, color::dirty_fg());
+        paint_galley_left(painter, x, y, galley);
     } else {
         let fg = if commit.parents.len() > 1 {
             color::text_weak()
@@ -412,7 +410,7 @@ fn paint_row(
             color::text()
         };
         let summary = elided(ui, &commit.summary, theme::body(), fg, desc_right - x);
-        paint_galley_left(painter, x, y, summary, fg);
+        paint_galley_left(painter, x, y, summary);
     }
 }
 
@@ -741,13 +739,9 @@ fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &m
     let removed: usize = d.files.iter().filter_map(|f| f.removed).sum();
     ui.horizontal(|ui| {
         ui.label(
-            RichText::new(format!(
-                "{} file{} changed",
-                d.files.len(),
-                if d.files.len() == 1 { "" } else { "s" }
-            ))
-            .font(theme::semibold(theme::BODY_SIZE))
-            .color(color::text()),
+            RichText::new(format!("{} changed", plural(d.files.len(), "file")))
+                .font(theme::semibold(theme::BODY_SIZE))
+                .color(color::text()),
         );
         ui.label(RichText::new(format!("+{added}")).color(color::added()));
         ui.label(RichText::new(format!("−{removed}")).color(color::removed()));
@@ -766,16 +760,7 @@ fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &m
             path: file.path.clone(),
         };
         let response = file_row(ui, file, open == Some(&key), None);
-        response.context_menu(|ui| {
-            if ui.button("File history").clicked() {
-                actions.push(Action::OpenFileHistory(file.path.clone()));
-                ui.close();
-            }
-            if ui.button("Copy path").clicked() {
-                ui.ctx().copy_text(file.path.clone());
-                ui.close();
-            }
-        });
+        response.context_menu(|ui| file_row::menu_items(ui, &file.path, actions));
         if response.clicked() {
             actions.push(Action::SelectCommitFile(key));
         }
@@ -792,82 +777,6 @@ fn person(ui: &mut Ui, name: &str, email: &str) {
         ui.label(RichText::new(name).color(color::text()));
         ui.label(RichText::new(email).color(color::text_weak()));
     });
-}
-
-pub fn change_color(change: Change) -> Color32 {
-    match change {
-        Change::Added => color::added(),
-        Change::Deleted | Change::Unmerged => color::removed(),
-        Change::Renamed | Change::Copied => color::renamed(),
-        Change::TypeChanged => color::text_weak(),
-        Change::Modified | Change::None => color::dirty_fg(),
-    }
-}
-
-/// A file path as "name" in front and the folder faint behind it.
-pub fn paint_path(ui: &Ui, x: f32, y: f32, path: &str, max_width: f32) {
-    let (dir, name) = match path.rsplit_once('/') {
-        Some((dir, name)) => (dir, name),
-        None => ("", path),
-    };
-    let name = elided(ui, name, theme::body(), color::text(), max_width);
-    let name_width = name.size().x;
-    paint_galley_left(ui.painter(), x, y, name, color::text());
-    let room = max_width - name_width - 8.0;
-    if !dir.is_empty() && room > 30.0 {
-        let dir = elided(ui, dir, theme::small(), color::text_faint(), room);
-        paint_galley_left(
-            ui.painter(),
-            x + name_width + 8.0,
-            y,
-            dir,
-            color::text_faint(),
-        );
-    }
-}
-
-pub fn paint_change_letter(ui: &Ui, x: f32, y: f32, change: Change) {
-    let c = change_color(change);
-    let rect = Rect::from_min_size(pos2(x, y - 8.0), vec2(16.0, 16.0));
-    ui.painter().rect_filled(rect, 3, c.gamma_multiply(0.16));
-    ui.painter().text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        change.letter(),
-        theme::semibold(theme::SMALL_SIZE),
-        c,
-    );
-}
-
-/// A changed file of a commit or stash; `note` replaces the line counts.
-pub fn file_row(ui: &mut Ui, file: &FileChange, selected: bool, note: Option<&str>) -> Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
-    if selected {
-        ui.painter().rect_filled(rect, 4, color::selected_row_bg());
-    } else if response.hovered() {
-        ui.painter().rect_filled(rect, 4, color::hover_row_bg());
-    }
-    let y = rect.center().y;
-    paint_change_letter(ui, rect.left() + 4.0, y, file.change);
-
-    let stats = match (note, file.added, file.removed) {
-        (Some(note), _, _) => note.to_owned(),
-        (None, Some(a), Some(r)) => format!("+{a} −{r}"),
-        _ => "binary".to_owned(),
-    };
-    let stats = ui
-        .painter()
-        .layout_no_wrap(stats, theme::small(), color::text_faint());
-    let stats_x = rect.right() - 4.0 - stats.size().x;
-    paint_galley_left(ui.painter(), stats_x, y, stats, color::text_faint());
-
-    let x = rect.left() + 28.0;
-    paint_path(ui, x, y, &file.path, stats_x - 8.0 - x);
-    let tip = match &file.orig_path {
-        Some(orig) => format!("{orig} → {}", file.path),
-        None => file.path.clone(),
-    };
-    response.on_hover_text(tip)
 }
 
 fn uncommitted(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
@@ -900,11 +809,7 @@ fn uncommitted(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for entry in &status.entries {
-                let (rect, response) =
-                    ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
-                if response.hovered() {
-                    ui.painter().rect_filled(rect, 4, color::hover_row_bg());
-                }
+                let (rect, _) = file_row::allocate(ui, false, Sense::hover());
                 let change = if entry.is_conflicted() {
                     Change::Unmerged
                 } else if entry.is_staged() {
@@ -913,9 +818,14 @@ fn uncommitted(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
                     entry.unstaged_change()
                 };
                 let y = rect.center().y;
-                paint_change_letter(ui, rect.left() + 4.0, y, change);
-                let x = rect.left() + 28.0;
-                paint_path(ui, x, y, &entry.path, rect.right() - x - 4.0);
+                paint_file(
+                    ui,
+                    rect.left() + 4.0,
+                    y,
+                    change,
+                    &entry.path,
+                    rect.right() - 4.0,
+                );
             }
         });
 }

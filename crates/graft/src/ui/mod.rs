@@ -7,6 +7,7 @@ pub mod console;
 pub mod dialog;
 pub mod diff_view;
 pub mod file_history;
+mod file_row;
 pub mod file_status;
 pub mod group_dialog;
 pub mod history;
