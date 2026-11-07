@@ -28,7 +28,8 @@ use graft_core::ops::LineOp;
 use graft_core::stash::{Stash, StashFile};
 use graft_core::watch::Watcher;
 use graft_core::{
-    CancelToken, Console, Git, Oid, RepoSnapshot, Worktree, null_oid, same_path, snapshot,
+    CancelToken, Console, Git, JobError, Oid, Panicked, RepoSnapshot, Worktree, null_oid,
+    same_path, snapshot,
 };
 
 pub use changes::{CommitForm, Confirm, DiffView, FileKey, Operation, RemoteOp};
@@ -324,7 +325,7 @@ enum Event {
     Snapshot(Result<RepoSnapshot, String>),
     History {
         generation: u64,
-        result: Result<(Arc<Commits>, History), String>,
+        result: Result<(Arc<Commits>, History), JobError>,
     },
     Details(Oid, Result<CommitDetails, String>),
     Diff {
@@ -334,7 +335,7 @@ enum Event {
     LastMessage(Option<String>),
     OpDone {
         then: changes::Then,
-        result: Result<Option<String>, String>,
+        result: Result<Option<String>, JobError>,
     },
     CommitDiff {
         generation: u64,
@@ -355,7 +356,7 @@ enum Event {
         generation: u64,
         result: Result<graft_core::review::Review, String>,
     },
-    SlashPlan(Result<graft_core::slash::Plan, String>),
+    SlashPlan(Result<graft_core::slash::Plan, JobError>),
     SlashDone(graft_core::slash::Outcome),
     Identity(Result<graft_core::identity::Identity, String>),
     AutoFetched(Result<(), String>),
@@ -370,6 +371,14 @@ enum Event {
     /// The file watcher saw a change that matters.
     Changed,
     PickedFolder(Option<PathBuf>),
+    /// A job panicked instead of answering.
+    Panicked(String),
+}
+
+impl From<Panicked> for Event {
+    fn from(p: Panicked) -> Self {
+        Event::Panicked(p.0)
+    }
 }
 
 pub struct Project {
@@ -594,6 +603,10 @@ impl Project {
                     }
                 }
                 Event::PickedFolder(folder) => self.on_picked_folder(folder),
+                Event::Panicked(error) => {
+                    self.op = None;
+                    self.notices.push(error);
+                }
                 Event::Details(id, result) => {
                     if self.selected == Some(id) {
                         match result {
@@ -619,7 +632,7 @@ impl Project {
                 {
                     self.nav.worktree = main.path.clone();
                 }
-                let tips = collect_tips(&snap);
+                let tips = snap.tips();
                 let had_snapshot = self.snapshot.is_some();
                 let old_head = self.worktree().and_then(|wt| wt.head);
                 self.snapshot = Some(Arc::new(snap));
@@ -713,7 +726,7 @@ impl Project {
                     Some(c) => c,
                     None => Arc::new(
                         history::walk(&root, &tips, HISTORY_LIMIT, &cancel)
-                            .map_err(|e| format!("{e:#}"))?,
+                            .map_err(JobError::from)?,
                     ),
                 };
                 let history = History::build(&commits, parent);
@@ -723,7 +736,7 @@ impl Project {
         });
     }
 
-    fn on_history(&mut self, generation: u64, result: Result<(Arc<Commits>, History), String>) {
+    fn on_history(&mut self, generation: u64, result: Result<(Arc<Commits>, History), JobError>) {
         if generation != self.history_generation {
             return;
         }
@@ -740,10 +753,9 @@ impl Project {
                     self.select_head();
                 }
             }
-            Err(e) => {
-                if e != "Cancelled" {
-                    self.notices.push(format!("Could not load history: {e}"));
-                }
+            Err(JobError::Cancelled) => {}
+            Err(JobError::Failed(e)) => {
+                self.notices.push(format!("Could not load history: {e}"));
             }
         }
     }
@@ -932,20 +944,6 @@ impl Drop for Project {
 }
 
 /// Every commit a ref or worktree points at: the starting points of the walk.
-fn collect_tips(snap: &RepoSnapshot) -> Vec<Oid> {
-    let mut tips: Vec<Oid> = snap
-        .branches
-        .iter()
-        .map(|b| b.target)
-        .chain(snap.remote_branches.iter().map(|b| b.target))
-        .chain(snap.tags.iter().map(|t| t.target))
-        .chain(snap.worktrees.iter().filter_map(|wt| wt.head))
-        .collect();
-    tips.sort();
-    tips.dedup();
-    tips
-}
-
 fn build_labels(snap: &RepoSnapshot, selected: &Path) -> HashMap<Oid, Vec<RefLabel>> {
     let mut labels: HashMap<Oid, Vec<RefLabel>> = HashMap::new();
     let current = snap

@@ -20,7 +20,9 @@ use anyhow::Result;
 use notify_debouncer_full::notify::{self, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, Debouncer, NoCache, new_debouncer_opt};
 
-use crate::cli;
+use crate::cli::Git;
+use crate::conflicts::MARKERS;
+use crate::console::Console;
 use crate::wsl::Wsl;
 
 const DEBOUNCE: Duration = Duration::from_millis(300);
@@ -33,7 +35,6 @@ pub struct Watcher {
     _debouncer: Option<Debouncer<RecommendedWatcher, NoCache>>,
     /// Dropping it stops the WSL checks.
     _poll: Option<mpsc::Sender<()>>,
-    roots: Vec<PathBuf>,
 }
 
 impl Watcher {
@@ -42,7 +43,7 @@ impl Watcher {
     pub fn new(roots: Vec<PathBuf>, on_change: impl Fn() + Send + Sync + 'static) -> Result<Self> {
         let on_change = Arc::new(on_change);
         let (polled, watched): (Vec<PathBuf>, Vec<PathBuf>) =
-            roots.iter().cloned().partition(|r| Wsl::of(r).is_some());
+            roots.into_iter().partition(|r| Wsl::of(r).is_some());
         let poll = (!polled.is_empty()).then(|| {
             let on_change = on_change.clone();
             let (stop, stopped) = mpsc::channel();
@@ -57,12 +58,7 @@ impl Watcher {
         Ok(Self {
             _debouncer: debouncer,
             _poll: poll,
-            roots,
         })
-    }
-
-    pub fn roots(&self) -> &[PathBuf] {
-        &self.roots
     }
 }
 
@@ -121,11 +117,10 @@ fn poll(roots: &[PathBuf], stop: &mpsc::Receiver<()>, on_change: &dyn Fn()) {
         ; git for-each-ref --format='%(objectname) %(refname)' \
         && ls -a "$(git rev-parse --git-dir)" | grep -v '\.lock$'"#;
     let fingerprint = |root: &Path| {
-        let mut cmd = cli::program(root, "sh");
+        let mut cmd = unlogged(root).command("sh").ok()?;
         cmd.args(["-c", SCRIPT])
             .stdin(Stdio::null())
             .stderr(Stdio::null());
-        cli::share_env(&mut cmd);
         let out = cmd.output().ok()?;
         let mut hasher = DefaultHasher::new();
         out.stdout.hash(&mut hasher);
@@ -256,25 +251,33 @@ fn git_file_matters(inside: &Path) -> bool {
         Some(rest) => rest.split_once('/').map_or("", |(_, r)| r).to_owned(),
         None => text,
     };
-    matches!(
-        text.as_str(),
-        "HEAD" | "index" | "packed-refs" | "MERGE_HEAD" | "CHERRY_PICK_HEAD" | "REVERT_HEAD"
-    ) || text.starts_with("refs/")
-        || text.starts_with("rebase-merge")
-        || text.starts_with("rebase-apply")
+    let in_progress = MARKERS.iter().any(|(marker, _)| {
+        text.strip_prefix(marker)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    });
+    in_progress
+        || matches!(text.as_str(), "HEAD" | "index" | "packed-refs")
+        || text.starts_with("refs/")
+}
+
+/// Git for the watcher's own checks, which run all the time and would bury
+/// the user's commands in the console.
+fn unlogged(root: &Path) -> Git {
+    Git::new(root, Console::default())
 }
 
 /// Which of `paths` (relative to `root`) git ignores, or `None` if git could
 /// not tell.
 fn check_ignore(root: &Path, paths: &[PathBuf]) -> Option<HashSet<PathBuf>> {
-    let mut cmd = cli::command(root);
+    // check-ignore refuses literal pathspecs; it reads plain paths anyway.
+    let mut cmd = unlogged(root)
+        .without_literal_pathspecs()
+        .command("git")
+        .ok()?;
     cmd.args(["check-ignore", "-z", "--stdin"])
-        // check-ignore refuses literal pathspecs; it reads plain paths anyway.
-        .env_remove("GIT_LITERAL_PATHSPECS")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    cli::share_env(&mut cmd);
     let mut child = cmd.spawn().ok()?;
     let mut input = Vec::new();
     for p in paths {

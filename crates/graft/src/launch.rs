@@ -90,7 +90,7 @@ pub fn open_folder(dir: &Path) -> std::io::Result<()> {
 
 /// Show `path` selected in an Explorer window.
 pub fn reveal(path: &Path) -> std::io::Result<()> {
-    let full = graft_core::repo::native(&path.to_string_lossy());
+    let full = graft_core::paths::native(&path.to_string_lossy());
     let mut arg = std::ffi::OsString::from("/select,");
     arg.push(&full);
     Command::new("explorer").arg(arg).spawn().map(drop)
@@ -135,12 +135,7 @@ pub fn open_in_ide(path: &Path, command: &str) {
             };
             let mut cmd = Command::new(program);
             cmd.args(args).arg(&path);
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-                cmd.creation_flags(CREATE_NO_WINDOW);
-            }
+            graft_core::paths::no_window(&mut cmd);
             // A .cmd launcher (code.cmd) goes through cmd.exe; the standard
             // library escapes its arguments and refuses ones it cannot.
             cmd.status().is_ok_and(|s| s.success())

@@ -1,6 +1,6 @@
 //! App-wide preferences, saved with the rest of Graft's state.
 
-use graft_core::slash::PROTECTED;
+use graft_core::slash::default_protected;
 use graft_core::worktree::DEFAULT_COPY_PATTERNS;
 use serde::{Deserialize, Serialize};
 
@@ -34,7 +34,7 @@ impl Default for Settings {
             theme: ThemeChoice::System,
             ide_command: "code".to_owned(),
             auto_fetch_minutes: 10,
-            protected: PROTECTED.to_owned(),
+            protected: default_protected(),
             copy_patterns: DEFAULT_COPY_PATTERNS.to_owned(),
             check_updates: true,
             wrap_lines: false,

@@ -8,7 +8,7 @@ use std::path::Path;
 use anyhow::Result;
 use smallvec::SmallVec;
 
-use crate::cli::CancelToken;
+use crate::jobs::CancelToken;
 use crate::model::{Oid, null_oid};
 
 #[derive(Clone, Debug)]
@@ -35,8 +35,6 @@ impl Commit {
 #[derive(Clone, Debug, Default)]
 pub struct Commits {
     pub list: Vec<Commit>,
-    /// True if the walk stopped at the limit.
-    pub truncated: bool,
 }
 
 /// Walk all commits reachable from `tips`, newest first, up to `limit`.
@@ -54,11 +52,8 @@ pub fn walk(root: &Path, tips: &[Oid], limit: usize, cancel: &CancelToken) -> Re
         ))
         .all()?;
     for info in walk {
-        if cancel.is_cancelled() {
-            anyhow::bail!("Cancelled");
-        }
+        cancel.check()?;
         if commits.list.len() >= limit {
-            commits.truncated = true;
             break;
         }
         let info = info?;
@@ -95,7 +90,6 @@ pub struct History {
     pub rows: Vec<GraphRow>,
     pub lanes: usize,
     pub index: HashMap<Oid, usize>,
-    pub truncated: bool,
 }
 
 impl History {
@@ -122,7 +116,6 @@ impl History {
             rows,
             lanes,
             index,
-            truncated: commits.truncated,
         }
     }
 }
@@ -183,9 +176,8 @@ pub struct GraphRow {
 pub struct Line {
     pub kind: LineKind,
     /// Lane at the top of the row (`Pass`, `In`) or at the bottom (`Out`).
+    /// Lanes never shift, so a `Pass` line ends where it starts.
     pub lane: u16,
-    /// For `Pass`: lane at the bottom (equal to `lane`: lanes never shift).
-    pub to: u16,
     pub color: u8,
 }
 
@@ -237,7 +229,6 @@ pub fn layout(commits: &[Commit]) -> (Vec<GraphRow>, usize) {
             row.lines.push(Line {
                 kind: LineKind::In,
                 lane: i as u16,
-                to: node_lane as u16,
                 color,
             });
             lanes[i] = None;
@@ -247,7 +238,6 @@ pub fn layout(commits: &[Commit]) -> (Vec<GraphRow>, usize) {
                 row.lines.push(Line {
                     kind: LineKind::Pass,
                     lane: i as u16,
-                    to: i as u16,
                     color: *color,
                 });
             }
@@ -273,7 +263,6 @@ pub fn layout(commits: &[Commit]) -> (Vec<GraphRow>, usize) {
             row.lines.push(Line {
                 kind: LineKind::Out,
                 lane: target as u16,
-                to: target as u16,
                 color,
             });
         }
@@ -325,7 +314,6 @@ mod tests {
     fn linear_history_uses_one_lane() {
         let commits = Commits {
             list: vec![commit(3, &[2], 30), commit(2, &[1], 20), commit(1, &[], 10)],
-            truncated: false,
         };
         let h = History::build(&commits, None);
         assert_eq!(ids(&h), ["c3", "c2", "c1"]);
@@ -343,7 +331,6 @@ mod tests {
                 commit(2, &[1], 20),
                 commit(1, &[], 10),
             ],
-            truncated: false,
         };
         let h = History::build(&commits, None);
         assert_eq!(ids(&h), ["c4", "c3", "c2", "c1"]);
@@ -373,7 +360,6 @@ mod tests {
         // Child 2 has an older timestamp than its parent 1.
         let commits = Commits {
             list: vec![commit(1, &[], 50), commit(2, &[1], 10)],
-            truncated: false,
         };
         let h = History::build(&commits, None);
         assert_eq!(ids(&h), ["c2", "c1"]);
@@ -383,7 +369,6 @@ mod tests {
     fn worktree_row_sits_on_top_of_head() {
         let commits = Commits {
             list: vec![commit(2, &[1], 20), commit(1, &[], 10)],
-            truncated: false,
         };
         let h = History::build(&commits, Some(oid(2)));
         assert!(h.commits[0].is_worktree());

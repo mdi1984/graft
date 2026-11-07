@@ -5,6 +5,7 @@
 //! Everything else goes through `git.exe` with machine-readable output, so the
 //! results match git exactly and hooks, config and credentials keep working.
 
+pub mod changes;
 pub mod cli;
 pub mod conflicts;
 pub mod console;
@@ -16,6 +17,7 @@ pub mod identity;
 pub mod jobs;
 pub mod model;
 pub mod ops;
+pub mod paths;
 pub mod preview;
 pub mod refs;
 pub mod remote;
@@ -30,9 +32,10 @@ pub mod watch;
 pub mod worktree;
 pub mod wsl;
 
-pub use cli::{CancelToken, Git};
+pub use cli::{Git, Progress};
 pub use console::Console;
+pub use jobs::{CancelToken, Cancelled, JobError, Panicked, is_cancelled};
 pub use model::{
-    Branch, Oid, Remote, RemoteBranch, RepoSnapshot, Tag, Upstream, Worktree, null_oid, same_path,
-    short,
+    Branch, Oid, Remote, RemoteBranch, RepoSnapshot, Tag, Upstream, Worktree, null_oid, short,
 };
+pub use paths::same_path;

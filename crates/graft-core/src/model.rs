@@ -1,8 +1,15 @@
-use std::path::{Path, PathBuf};
+//! The plain data a repository snapshot is made of. Only data and the rules
+//! that read it; loading and changing it live in the feature modules.
+
+use std::path::PathBuf;
 
 pub use gix::ObjectId as Oid;
 
 use crate::status::WorktreeStatus;
+
+/// Names taken as the default branch, in this order, when origin/HEAD does
+/// not name one that exists locally.
+pub const DEFAULT_BRANCHES: [&str; 4] = ["main", "master", "trunk", "develop"];
 
 /// Everything the sidebar, toolbar and tabs need to know about one repository.
 #[derive(Clone, Debug, Default)]
@@ -19,7 +26,7 @@ pub struct RepoSnapshot {
     pub remote_default: Option<String>,
     pub stash_count: usize,
     /// Another worktree shown in the main worktree ("Preview in main").
-    pub preview: Option<crate::preview::Preview>,
+    pub preview: Option<Preview>,
 }
 
 impl RepoSnapshot {
@@ -38,27 +45,40 @@ impl RepoSnapshot {
             .find(|wt| wt.branch.as_deref() == Some(branch))
     }
 
-    /// The default branch: origin/HEAD's target if it exists locally, else
-    /// the first of main, master, trunk, develop.
-    pub fn default_branch(&self) -> Option<&str> {
-        let remote = self.remote_default.as_deref();
-        remote
+    /// Local branches that could be the default branch, best first:
+    /// origin/HEAD's target, then [`DEFAULT_BRANCHES`].
+    pub fn default_branches(&self) -> impl Iterator<Item = &str> {
+        self.remote_default
+            .as_deref()
             .into_iter()
-            .chain(["main", "master", "trunk", "develop"])
-            .find(|name| self.branch(name).is_some())
+            .chain(DEFAULT_BRANCHES)
+            .filter(|name| self.branch(name).is_some())
     }
 
-    /// The remote branch that `branch` tracks, if it still exists.
-    pub fn upstream_of(&self, branch: &str) -> Option<&str> {
-        match &self.branch(branch)?.upstream {
-            Upstream::Tracking { name, .. } => Some(name),
-            Upstream::None | Upstream::Gone { .. } => None,
-        }
+    /// The default branch: the first of [`Self::default_branches`].
+    pub fn default_branch(&self) -> Option<&str> {
+        self.default_branches().next()
     }
 
     /// True if any worktree has uncommitted changes.
     pub fn is_dirty(&self) -> bool {
-        self.worktrees.iter().any(|wt| wt.dirty() > 0)
+        self.worktrees.iter().any(Worktree::is_dirty)
+    }
+
+    /// Every commit a ref or worktree points at, sorted, without
+    /// duplicates: where the history walk starts.
+    pub fn tips(&self) -> Vec<Oid> {
+        let mut tips: Vec<Oid> = self
+            .branches
+            .iter()
+            .map(|b| b.target)
+            .chain(self.remote_branches.iter().map(|b| b.target))
+            .chain(self.tags.iter().map(|t| t.target))
+            .chain(self.worktrees.iter().filter_map(|wt| wt.head))
+            .collect();
+        tips.sort();
+        tips.dedup();
+        tips
     }
 }
 
@@ -75,7 +95,7 @@ pub struct Worktree {
     /// `None` if status could not be read (e.g. prunable worktree).
     pub status: Option<WorktreeStatus>,
     /// A merge, cherry-pick, revert or rebase that stopped part-way.
-    pub in_progress: Option<crate::conflicts::InProgress>,
+    pub in_progress: Option<InProgress>,
 }
 
 impl Worktree {
@@ -92,6 +112,10 @@ impl Worktree {
         self.status.as_ref().map_or(0, |s| s.entries.len())
     }
 
+    pub fn is_dirty(&self) -> bool {
+        self.dirty() > 0
+    }
+
     pub fn ahead(&self) -> usize {
         self.status.as_ref().map_or(0, |s| s.ahead)
     }
@@ -99,6 +123,62 @@ impl Worktree {
     pub fn behind(&self) -> usize {
         self.status.as_ref().map_or(0, |s| s.behind)
     }
+}
+
+/// An operation that stopped part-way, usually because of conflicts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Merge,
+    CherryPick,
+    Revert,
+    Rebase,
+}
+
+impl Kind {
+    /// The git command that runs, continues and aborts it.
+    pub(crate) fn command(self) -> &'static str {
+        match self {
+            Kind::Merge => "merge",
+            Kind::CherryPick => "cherry-pick",
+            Kind::Revert => "revert",
+            Kind::Rebase => "rebase",
+        }
+    }
+
+    pub fn noun(self) -> &'static str {
+        match self {
+            Kind::Merge => "Merge",
+            Kind::CherryPick => "Cherry-pick",
+            Kind::Revert => "Revert",
+            Kind::Rebase => "Rebase",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InProgress {
+    pub kind: Kind,
+    /// What is being done, e.g. "Merge branch 'feature/x'".
+    pub title: String,
+}
+
+/// What the main worktree goes back to after a preview.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Restore {
+    Branch(String),
+    Detached(Oid),
+}
+
+/// Another worktree shown in the main worktree ("Preview in main").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Preview {
+    pub restore: Restore,
+    /// The worktree being previewed.
+    pub source: PathBuf,
+    /// Its commit, now checked out (detached) in main.
+    pub head: Oid,
+    /// Files the preview created in main, removed again on restore.
+    pub added: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -164,31 +244,4 @@ pub fn short(oid: &Oid) -> String {
 /// The all-zero id. In the history it stands for "uncommitted changes".
 pub fn null_oid() -> Oid {
     Oid::null(gix::hash::Kind::Sha1)
-}
-
-/// Whether `rel` under `root` passes through a symlink or junction (or is
-/// one). Writing there could land outside the repository.
-pub fn through_link(root: &Path, rel: &Path) -> bool {
-    let mut at = root.to_path_buf();
-    rel.components().any(|part| {
-        at.push(part);
-        std::fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink())
-    })
-}
-
-/// Compare paths the way Windows does: case-insensitive, either slash, no
-/// trailing separator, `\\wsl$` and `\\wsl.localhost` alike.
-pub fn same_path(a: &Path, b: &Path) -> bool {
-    let norm = |p: &Path| {
-        let text = p
-            .to_string_lossy()
-            .replace('/', "\\")
-            .trim_end_matches('\\')
-            .to_lowercase();
-        match text.strip_prefix(r"\\wsl$\") {
-            Some(rest) => format!(r"\\wsl.localhost\{rest}"),
-            None => text,
-        }
-    };
-    norm(a) == norm(b)
 }

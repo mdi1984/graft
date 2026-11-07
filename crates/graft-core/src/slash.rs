@@ -10,14 +10,21 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
-use crate::cli::{CancelToken, Git};
-use crate::model::{Oid, RepoSnapshot, Upstream};
-use crate::repo::Progress;
+use crate::cli::{Git, Progress};
+use crate::jobs::CancelToken;
+use crate::model::{DEFAULT_BRANCHES, Oid, RepoSnapshot, Upstream};
+use crate::paths::folder_name;
 use crate::worktree::glob_match;
-use crate::{remote, snapshot, worktree};
+use crate::{refs, remote, snapshot, worktree};
 
-/// Branch names Slash never proposes, besides the default branch.
-pub const PROTECTED: &str = "main, master, develop, trunk, release/*";
+/// The branch name patterns Slash never proposes unless the user changes
+/// them, besides the default branch: the usual default branch names and
+/// release branches.
+pub fn default_protected() -> String {
+    let mut patterns = DEFAULT_BRANCHES.to_vec();
+    patterns.push("release/*");
+    patterns.join(", ")
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reason {
@@ -88,15 +95,13 @@ pub fn scan(
 ) -> Result<Plan> {
     let has_remotes = !git.read(["remote"])?.trim().is_empty();
     let fetch_error = if has_remotes {
-        remote::fetch_prune(git, cancel, on_progress)
+        remote::fetch(git, true, cancel, on_progress)
             .err()
             .map(|e| format!("{e:#}"))
     } else {
         None
     };
-    if cancel.is_cancelled() {
-        anyhow::bail!("Cancelled");
-    }
+    cancel.check()?;
     let snap = snapshot::load(git)?;
     let mut plan = plan(git, &snap, patterns)?;
     plan.fetch_error = fetch_error;
@@ -154,7 +159,7 @@ pub fn plan(git: &Git, snap: &RepoSnapshot, patterns: &str) -> Result<Plan> {
                 out.kept.push(keep("its worktree is locked"));
                 continue;
             }
-            Some(wt) if wt.dirty() > 0 => {
+            Some(wt) if wt.is_dirty() => {
                 out.kept.push(keep("its worktree has uncommitted changes"));
                 continue;
             }
@@ -221,22 +226,16 @@ pub fn execute(
             return false;
         }
         done += 1;
-        let line = format!("{what} ({done} of {total})");
-        on_progress(Progress {
-            phase: line.clone(),
-            fraction: Some((done - 1) as f32 / total.max(1) as f32),
-            line,
-        });
+        on_progress(Progress::step(
+            format!("{what} ({done} of {total})"),
+            (done - 1) as f32 / total.max(1) as f32,
+        ));
         true
     };
 
     let mut failed_worktrees = Vec::new();
     for path in removals {
-        let name = path
-            .file_name()
-            .unwrap_or(path.as_os_str())
-            .to_string_lossy();
-        if !step(format!("Removing worktree {name}")) {
+        if !step(format!("Removing worktree {}", folder_name(path))) {
             outcome.cancelled = true;
             return outcome;
         }
@@ -286,7 +285,7 @@ pub fn execute(
         if kept {
             continue;
         }
-        match git.run(["branch", "-D", "--end-of-options", branch]) {
+        match refs::delete_branch(git, branch, true) {
             Ok(_) => outcome.slashed.push(Slashed {
                 branch: branch.clone(),
                 target,
@@ -299,6 +298,5 @@ pub fn execute(
 
 /// Bring back a slashed branch at its old commit.
 pub fn restore(git: &Git, slashed: &Slashed) -> Result<()> {
-    git.run(["branch", &slashed.branch, &slashed.target.to_string()])?;
-    Ok(())
+    refs::create_branch(git, &slashed.branch, &slashed.target.to_string(), false)
 }

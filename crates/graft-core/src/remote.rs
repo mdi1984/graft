@@ -3,64 +3,95 @@
 
 use anyhow::{Result, bail};
 
-use crate::cli::{CancelToken, Git, failure_message};
-use crate::repo::{Progress, parse_progress};
+use crate::cli::{Git, Progress};
+use crate::jobs::CancelToken;
+use crate::model::Upstream;
 
-/// Fetch every remote.
-pub fn fetch(git: &Git, cancel: &CancelToken, on_progress: impl FnMut(Progress)) -> Result<()> {
-    run(git, &["fetch", "--all", "--progress"], cancel, on_progress)
-}
-
-/// Fetch every remote and drop remote branches that were deleted there, so
-/// local branches tracking them show as gone.
-pub fn fetch_prune(
+/// Fetch every remote. With `prune`, remote branches deleted there go too,
+/// so local branches tracking them show as gone.
+pub fn fetch(
     git: &Git,
+    prune: bool,
     cancel: &CancelToken,
     on_progress: impl FnMut(Progress),
 ) -> Result<()> {
-    run(
-        git,
-        &["fetch", "--all", "--prune", "--progress"],
-        cancel,
-        on_progress,
-    )
+    let mut args = vec!["fetch", "--all"];
+    if prune {
+        args.push("--prune");
+    }
+    args.push("--progress");
+    git.run_progress(&args, cancel, on_progress)
 }
 
-/// Pull the current branch from its upstream (merge or rebase, as configured).
-pub fn pull(git: &Git, cancel: &CancelToken, on_progress: impl FnMut(Progress)) -> Result<()> {
-    current_branch(git)?;
-    if upstream(git)?.is_none() {
-        bail!("This branch has no upstream yet, so there is nothing to pull. Push it first.");
-    }
-    run(git, &["pull", "--progress"], cancel, on_progress)
+/// Where a push of the current branch goes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PushPlan {
+    /// To the upstream it tracks.
+    Upstream,
+    /// Publish it on `remote` and track it there (no upstream, or the
+    /// upstream was deleted on the remote).
+    Publish { remote: String },
 }
 
-/// Push the current branch. A branch without upstream is pushed to `origin`
-/// (or the only remote) and starts tracking it.
-pub fn push(git: &Git, cancel: &CancelToken, on_progress: impl FnMut(Progress)) -> Result<()> {
-    let branch = current_branch(git)?;
-    if upstream(git)?.is_some() {
-        return run(git, &["push", "--progress"], cancel, on_progress);
+/// Where pushing a branch with this upstream goes, given the repository's
+/// remotes: a branch without upstream goes to `origin`, or the only remote.
+pub fn push_plan<'a>(
+    upstream: &Upstream,
+    remotes: impl IntoIterator<Item = &'a str>,
+) -> Result<PushPlan, &'static str> {
+    if matches!(upstream, Upstream::Tracking { .. }) {
+        return Ok(PushPlan::Upstream);
     }
-    let remotes = git.read(["remote"])?;
-    let remotes: Vec<&str> = remotes.lines().filter(|l| !l.is_empty()).collect();
+    let remotes: Vec<&str> = remotes.into_iter().filter(|r| !r.is_empty()).collect();
     let remote = if remotes.contains(&"origin") {
         "origin"
     } else if let [only] = remotes[..] {
         only
     } else if remotes.is_empty() {
-        bail!("There is no remote to push to. Add one first (e.g. origin).");
+        return Err("There is no remote to push to. Add one first (e.g. origin).");
     } else {
-        bail!(
-            "This branch has no upstream and there is no 'origin' remote. Pick a remote to push to."
+        return Err(
+            "This branch has no upstream and there is no 'origin' remote. Pick a remote to push to.",
         );
     };
-    run(
-        git,
-        &["push", "--progress", "--set-upstream", remote, &branch],
-        cancel,
-        on_progress,
-    )
+    Ok(PushPlan::Publish {
+        remote: remote.to_owned(),
+    })
+}
+
+/// The upstream a pull of `branch` takes from, or why there is none.
+pub fn pull_check<'a>(branch: &str, upstream: &'a Upstream) -> Result<&'a str, String> {
+    match upstream {
+        Upstream::Tracking { name, .. } => Ok(name),
+        Upstream::None => Err(format!(
+            "{branch} has no upstream yet, so there is nothing to pull. Push publishes it."
+        )),
+        Upstream::Gone { name } => Err(format!("{name} was deleted on the remote")),
+    }
+}
+
+/// Pull the current branch from its upstream (merge or rebase, as configured).
+pub fn pull(git: &Git, cancel: &CancelToken, on_progress: impl FnMut(Progress)) -> Result<()> {
+    let branch = current_branch(git)?;
+    if let Err(why) = pull_check(&branch, &upstream(git)?) {
+        bail!(why);
+    }
+    git.run_progress(&["pull", "--progress"], cancel, on_progress)
+}
+
+/// Push the current branch (see [`push_plan`]).
+pub fn push(git: &Git, cancel: &CancelToken, on_progress: impl FnMut(Progress)) -> Result<()> {
+    let branch = current_branch(git)?;
+    let remotes = git.read(["remote"])?;
+    match push_plan(&upstream(git)?, remotes.lines()) {
+        Ok(PushPlan::Upstream) => git.run_progress(&["push", "--progress"], cancel, on_progress),
+        Ok(PushPlan::Publish { remote }) => git.run_progress(
+            &["push", "--progress", "--set-upstream", &remote, &branch],
+            cancel,
+            on_progress,
+        ),
+        Err(why) => bail!(why),
+    }
 }
 
 /// Push the current branch over a diverged upstream, but only if the upstream
@@ -71,15 +102,40 @@ pub fn force_push(
     on_progress: impl FnMut(Progress),
 ) -> Result<()> {
     current_branch(git)?;
-    if upstream(git)?.is_none() {
+    if upstream(git)? == Upstream::None {
         return push(git, cancel, on_progress);
     }
-    run(
-        git,
+    git.run_progress(
         &["push", "--progress", "--force-with-lease"],
         cancel,
         on_progress,
     )
+}
+
+/// Delete a branch on its remote.
+pub fn delete_remote_branch(
+    git: &Git,
+    remote: &str,
+    branch: &str,
+    cancel: &CancelToken,
+    progress: impl FnMut(Progress),
+) -> Result<()> {
+    git.run_progress(
+        &["push", "--progress", remote, "--delete", branch],
+        cancel,
+        progress,
+    )
+}
+
+pub fn push_tag(
+    git: &Git,
+    remote: &str,
+    tag: &str,
+    cancel: &CancelToken,
+    progress: impl FnMut(Progress),
+) -> Result<()> {
+    let refspec = format!("refs/tags/{tag}");
+    git.run_progress(&["push", "--progress", remote, &refspec], cancel, progress)
 }
 
 /// Whether a push failed because the remote has commits we don't.
@@ -98,27 +154,20 @@ fn current_branch(git: &Git) -> Result<String> {
     Ok(branch)
 }
 
-fn upstream(git: &Git) -> Result<Option<String>> {
+/// The current branch's upstream as far as git can resolve it: one deleted
+/// on the remote counts as none.
+fn upstream(git: &Git) -> Result<Upstream> {
     let out = git.run_raw(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])?;
-    Ok(out
-        .success()
-        .then(|| out.stdout_str().trim().to_owned())
-        .filter(|s| !s.is_empty()))
-}
-
-pub(crate) fn run(
-    git: &Git,
-    args: &[&str],
-    cancel: &CancelToken,
-    mut on_progress: impl FnMut(Progress),
-) -> Result<()> {
-    let out = git.run_with_progress(args, cancel.flag(), |line| {
-        on_progress(parse_progress(line))
-    })?;
-    if !out.success() {
-        bail!(failure_message(&out));
-    }
-    Ok(())
+    let name = out.stdout_str().trim().to_owned();
+    Ok(if out.success() && !name.is_empty() {
+        Upstream::Tracking {
+            name,
+            ahead: 0,
+            behind: 0,
+        }
+    } else {
+        Upstream::None
+    })
 }
 
 /// Add a remote, or change one (`original` is its current name): rename it
@@ -156,4 +205,36 @@ pub fn save_remote(
 pub fn remove_remote(git: &Git, name: &str) -> Result<()> {
     git.run(["remote", "remove", name])?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn push_targets() {
+        let tracking = Upstream::Tracking {
+            name: "origin/x".into(),
+            ahead: 1,
+            behind: 0,
+        };
+        assert_eq!(push_plan(&tracking, []), Ok(PushPlan::Upstream));
+        let publish = |remote: &str| {
+            Ok(PushPlan::Publish {
+                remote: remote.to_owned(),
+            })
+        };
+        assert_eq!(
+            push_plan(&Upstream::None, ["backup", "origin"]),
+            publish("origin")
+        );
+        let gone = Upstream::Gone {
+            name: "origin/x".into(),
+        };
+        assert_eq!(push_plan(&gone, ["fork"]), publish("fork"));
+        assert!(push_plan(&Upstream::None, []).is_err());
+        assert!(push_plan(&Upstream::None, ["a", "b"]).is_err());
+        assert_eq!(pull_check("x", &tracking), Ok("origin/x"));
+        assert!(pull_check("x", &gone).is_err());
+    }
 }

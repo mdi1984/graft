@@ -30,8 +30,8 @@ impl Project {
         // A fetch can take a while; it must not hold up the pool that loads
         // diffs and status.
         self.pool.spawn_long(&self.tx, move |_| {
-            let result =
-                remote::fetch(&git, &CancelToken::default(), |_| {}).map_err(|e| format!("{e:#}"));
+            let result = remote::fetch(&git, false, &CancelToken::default(), |_| {})
+                .map_err(|e| format!("{e:#}"));
             Event::AutoFetched(result)
         });
     }

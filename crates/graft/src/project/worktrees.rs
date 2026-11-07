@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use graft_core::refs::{RefKind, check_ref_name};
 use graft_core::watch::Watcher;
 use graft_core::worktree::{self, Start};
 use graft_core::{RepoSnapshot, same_path};
@@ -68,12 +69,7 @@ impl NewWorktreeForm {
         match self.mode {
             BranchMode::New => {
                 let name = self.name.trim();
-                if name.is_empty() {
-                    return Err("Give the new branch a name.".to_owned());
-                }
-                if name.contains(char::is_whitespace) {
-                    return Err("Branch names cannot contain spaces.".to_owned());
-                }
+                check_ref_name(RefKind::Branch, name)?;
                 if snap.branch(name).is_some() {
                     return Err(format!(
                         "A branch named {name} already exists. Choose \"Existing branch\" to check it out."

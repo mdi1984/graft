@@ -4,11 +4,11 @@
 
 use std::io::Read;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
-use crate::cli::Git;
-use crate::details::{FileChange, apply_numstat, parse_name_status};
-use crate::model::Oid;
+use crate::changes::{FileChange, between, is_binary};
+use crate::cli::{Git, failure_message};
+use crate::model::{Oid, RepoSnapshot};
 use crate::status::Change;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,33 +46,18 @@ impl Review {
     }
 }
 
-/// The branch to review against when the user has not picked one: the local
-/// copy of the remote's default branch (origin/HEAD), else main, master,
-/// trunk or develop, else origin/HEAD itself.
-pub fn default_base(git: &Git, branches: &[String], current: Option<&str>) -> Option<String> {
-    // Exit code 1 just means there is no origin/HEAD.
-    let remote_head = git
-        .run_expecting(
-            ["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
-            None,
-            |o| o.status <= 1,
-        )
-        .ok()
-        .filter(|out| out.success())
-        .map(|out| out.stdout_str().trim().to_owned())
-        .filter(|head| !head.is_empty());
-    let remote_default = remote_head
-        .as_deref()
-        .and_then(|h| h.strip_prefix("origin/"));
-    for name in remote_default
-        .into_iter()
-        .chain(["main", "master", "trunk", "develop"])
-    {
-        if branches.iter().any(|b| b == name) && current != Some(name) {
-            return Some(name.to_owned());
-        }
-    }
-    remote_head
+/// The branch to review `current` against when the user has not picked
+/// one: the first default branch candidate that is not `current` itself,
+/// else origin/HEAD.
+pub fn default_base(snap: &RepoSnapshot, current: Option<&str>) -> Option<String> {
+    snap.default_branches()
+        .find(|name| current != Some(*name))
+        .map(str::to_owned)
+        .or_else(|| {
+            snap.remote_default
+                .as_ref()
+                .map(|branch| format!("origin/{branch}"))
+        })
 }
 
 /// Untracked files bigger than this are not read to count their lines.
@@ -86,11 +71,9 @@ pub fn load(git: &Git, base: &str) -> Result<Review> {
     let merge_base = merge_base.trim().to_owned();
     // The rest runs side by side: each git start costs tens of milliseconds
     // on Windows.
-    let common = ["-c", "core.quotepath=false", "diff", "-z", "-M"];
-    let (commits, status, numstat, untracked) = std::thread::scope(|s| {
+    let (commits, changes, untracked) = std::thread::scope(|s| {
         let range = format!("{merge_base}..HEAD");
         let commits = s.spawn(move || git.read(["rev-list", "--count", &range]));
-        let numstat = s.spawn(|| git.run(common.iter().copied().chain(["--numstat", &merge_base])));
         let untracked = s.spawn(|| {
             git.run([
                 "-c",
@@ -101,19 +84,15 @@ pub fn load(git: &Git, base: &str) -> Result<Review> {
                 "-z",
             ])
         });
-        let status = git.run(common.iter().copied().chain(["--name-status", &merge_base]));
+        let changes = between(git, &merge_base, None);
         (
             commits.join().expect("rev-list thread"),
-            status,
-            numstat.join().expect("numstat thread"),
+            changes,
             untracked.join().expect("ls-files thread"),
         )
     });
     let commits = commits?.trim().parse().unwrap_or(0);
-    let (status, numstat, untracked) = (status?, numstat?, untracked?);
-    let mut changes = parse_name_status(&status.stdout);
-    apply_numstat(&mut changes, &numstat.stdout);
-    let mut files: Vec<ReviewFile> = changes
+    let mut files: Vec<ReviewFile> = changes?
         .into_iter()
         .map(|change| ReviewFile {
             change,
@@ -122,7 +101,7 @@ pub fn load(git: &Git, base: &str) -> Result<Review> {
         })
         .collect();
 
-    for path in untracked
+    for path in untracked?
         .stdout
         .split(|b| *b == 0)
         .filter(|p| !p.is_empty())
@@ -134,12 +113,11 @@ pub fn load(git: &Git, base: &str) -> Result<Review> {
         let complete = std::fs::File::open(git.cwd().join(&path))
             .and_then(|f| f.take(MAX_COUNTED + 1).read_to_end(&mut bytes))
             .is_ok_and(|n| n as u64 <= MAX_COUNTED);
-        let binary = bytes.iter().take(8000).any(|b| *b == 0);
         let lines = bytes
             .split(|b| *b == b'\n')
             .filter(|l| !l.is_empty())
             .count();
-        let counted = complete && !binary;
+        let counted = complete && !is_binary(&bytes);
         files.push(ReviewFile {
             change: FileChange {
                 path,
@@ -165,6 +143,9 @@ pub fn load(git: &Git, base: &str) -> Result<Review> {
             input.push(b'\n');
         }
         let out = git.run_with_input(["hash-object", "--stdin-paths"], Some(&input))?;
+        if !out.success() {
+            bail!(failure_message(&out));
+        }
         for (&i, hash) in present.iter().zip(out.stdout_str().lines()) {
             files[i].content = hash.trim().to_owned();
         }

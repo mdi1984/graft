@@ -22,15 +22,6 @@ pub enum Start {
     Tracking { name: String, remote: String },
 }
 
-impl Start {
-    pub fn branch(&self) -> &str {
-        match self {
-            Start::NewBranch { name, .. } | Start::Tracking { name, .. } => name,
-            Start::Existing(name) => name,
-        }
-    }
-}
-
 pub fn add(git: &Git, path: &Path, start: &Start) -> Result<()> {
     if path.exists()
         && path
@@ -40,7 +31,7 @@ pub fn add(git: &Git, path: &Path, start: &Start) -> Result<()> {
     {
         bail!(
             "The folder {} already exists and is not empty. Pick another folder.",
-            path.display()
+            crate::paths::display(path)
         );
     }
     let path = git.path_arg(path)?;
@@ -142,7 +133,7 @@ pub fn copy_ignored(from: &Git, to: &Path, patterns: &str) -> Result<Vec<String>
         let dst = to.join(rel.as_ref());
         // A link in the new worktree (a checked-in symlink folder) must not
         // send the copy somewhere outside it.
-        if dst.exists() || !src.is_file() || crate::model::through_link(to, Path::new(rel.as_ref()))
+        if dst.exists() || !src.is_file() || crate::paths::through_link(to, Path::new(rel.as_ref()))
         {
             continue;
         }

@@ -49,11 +49,6 @@ fn branch_changes_since_fork_including_uncommitted() {
     std::fs::write(dir.join("d.txt"), "draft\nnotes\n").unwrap();
 
     let git = Git::new(dir, Console::default());
-    let branches = vec!["feature".to_owned(), "main".to_owned()];
-    assert_eq!(
-        review::default_base(&git, &branches, Some("feature")).as_deref(),
-        Some("main")
-    );
     let r = review::load(&git, "main").unwrap();
     assert_eq!(r.commits, 1);
     let paths: Vec<&str> = r.files.iter().map(|f| f.change.path.as_str()).collect();
@@ -84,7 +79,7 @@ fn branch_changes_since_fork_including_uncommitted() {
 }
 
 #[test]
-fn default_branch_follows_the_remote() {
+fn review_base_follows_the_remote_default_branch() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     sh(dir, &["init", "-q", "-b", "main"]);
@@ -93,6 +88,14 @@ fn default_branch_follows_the_remote() {
     sh(dir, &["commit", "-q", "--allow-empty", "-m", "base"]);
     sh(dir, &["branch", "development"]);
     sh(dir, &["switch", "-q", "-c", "feature"]);
+    let git = Git::new(dir, Console::default());
+    let base = |current: &str| {
+        let snap = graft_core::snapshot::load(&git).unwrap();
+        review::default_base(&snap, Some(current))
+    };
+    // No remote: the usual names.
+    assert_eq!(base("feature").as_deref(), Some("main"));
+
     // As after cloning a repository whose default branch is development.
     sh(
         dir,
@@ -106,18 +109,12 @@ fn default_branch_follows_the_remote() {
             "refs/remotes/origin/development",
         ],
     );
+    assert_eq!(base("feature").as_deref(), Some("development"));
+    // Reviewing the default branch itself: the next candidate.
+    assert_eq!(base("development").as_deref(), Some("main"));
 
-    let git = Git::new(dir, Console::default());
-    let snap = graft_core::snapshot::load(&git).unwrap();
-    assert_eq!(snap.remote_default.as_deref(), Some("development"));
-    assert_eq!(snap.default_branch(), Some("development"));
-    let branches = vec![
-        "development".to_owned(),
-        "feature".to_owned(),
-        "main".to_owned(),
-    ];
-    assert_eq!(
-        review::default_base(&git, &branches, Some("feature")).as_deref(),
-        Some("development")
-    );
+    // Without a local copy of it, origin/HEAD itself.
+    sh(dir, &["switch", "-q", "development"]);
+    sh(dir, &["branch", "-q", "-D", "main", "feature"]);
+    assert_eq!(base("development").as_deref(), Some("origin/development"));
 }

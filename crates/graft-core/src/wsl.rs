@@ -8,6 +8,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+pub use crate::paths::display;
+use crate::paths::{native, no_window, wsl_parts};
+
 /// A distro, as the user's path names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Wsl {
@@ -88,7 +91,7 @@ impl Wsl {
     pub fn resolve(&self, text: &str, home: Option<&str>) -> Option<PathBuf> {
         let text = text.trim();
         if text.contains('\\') || text.chars().nth(1) == Some(':') {
-            return Some(crate::repo::native(text));
+            return Some(native(text));
         }
         let linux = if text == "~" {
             home?.to_owned()
@@ -141,14 +144,6 @@ impl Wsl {
         }
         cmd.args(["--exec", program]);
         cmd
-    }
-}
-
-/// A path for showing: `/home/x/app (Ubuntu)` for one inside WSL.
-pub fn display(path: &Path) -> String {
-    match split(path) {
-        Some((wsl, linux)) => format!("{linux} ({})", wsl.distro),
-        None => path.display().to_string(),
     }
 }
 
@@ -210,39 +205,15 @@ fn parse_list(text: &str) -> Vec<String> {
     list
 }
 
-fn no_window(cmd: &mut Command) -> &mut Command {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    cmd
-}
-
-/// `\\wsl.localhost\<distro>\rest` (or `\\wsl$\...`, either slash, with or
-/// without `\\?\UNC\`) into the distro and the Linux path `/rest`.
+/// A path into WSL as its distro and the Linux path `/rest`.
 fn split(path: &Path) -> Option<(Wsl, String)> {
-    let text = path.to_string_lossy().replace('/', "\\");
-    let unc = if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
-        rest
-    } else {
-        text.strip_prefix(r"\\")?
-    };
-    let mut parts = unc.splitn(3, '\\');
-    let host = parts.next()?;
-    if !host.eq_ignore_ascii_case("wsl.localhost") && !host.eq_ignore_ascii_case("wsl$") {
-        return None;
-    }
-    let distro = parts.next().filter(|d| !d.is_empty())?;
-    let rest = parts.next().unwrap_or("").trim_end_matches('\\');
-    let linux = format!("/{}", rest.replace('\\', "/"));
+    let parts = wsl_parts(path)?;
     Some((
         Wsl {
-            prefix: format!(r"\\{host}\{distro}"),
-            distro: distro.to_owned(),
+            prefix: format!(r"\\{}\{}", parts.host, parts.distro),
+            distro: parts.distro,
         },
-        linux,
+        parts.linux,
     ))
 }
 
@@ -331,18 +302,6 @@ mod tests {
         let other = Path::new(r"\\WSL.LOCALHOST\ubuntu\home\mdi\app\");
         assert_eq!(wsl.to_linux(other).unwrap(), "/home/mdi/app");
         assert_eq!(wsl.to_windows("/"), Path::new(r"\\wsl.localhost\Ubuntu\"));
-    }
-
-    #[test]
-    fn both_names_are_the_same_folder() {
-        assert!(crate::model::same_path(
-            Path::new(r"\\wsl$\Ubuntu\home\app"),
-            Path::new(r"\\wsl.localhost\Ubuntu\home\app\")
-        ));
-        assert!(!crate::model::same_path(
-            Path::new(r"\\wsl$\Ubuntu\home\app"),
-            Path::new(r"\\wsl.localhost\Debian\home\app")
-        ));
     }
 
     #[test]

@@ -6,6 +6,7 @@ use std::ops::Range;
 
 use anyhow::{Result, bail};
 
+use crate::changes::EMPTY_TREE;
 use crate::cli::{Git, Output, failure_message};
 use crate::model::Oid;
 
@@ -147,8 +148,6 @@ pub fn load(git: &Git, source: &Source, path: &str) -> Result<FileDiff> {
     }
     Ok(diff)
 }
-
-const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /// A commit's first parent, or `None` for a root commit.
 fn parent(git: &Git, id: &Oid) -> Result<Option<String>> {

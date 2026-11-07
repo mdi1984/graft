@@ -11,31 +11,87 @@ use anyhow::{Result, bail};
 
 use crate::cli::{Git, failure_message};
 use crate::conflicts;
-use crate::model::{Oid, same_path};
+use crate::model::{Oid, RepoSnapshot, Worktree};
+pub use crate::model::{Preview, Restore};
+use crate::paths::same_path;
+use crate::repo::git_dir;
 
 const MARKER: &str = "graft-preview";
 
-/// What main goes back to.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Restore {
-    Branch(String),
-    Detached(Oid),
-}
-
-/// A preview shown in the main worktree.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Preview {
-    pub restore: Restore,
-    /// The worktree being previewed.
-    pub source: PathBuf,
-    /// Its commit, now checked out (detached) in main.
-    pub head: Oid,
-    /// Files the preview created in main, removed again on restore.
-    pub added: Vec<String>,
-}
-
 fn marker_path(main: &Path) -> Option<PathBuf> {
-    conflicts::git_dir(main).map(|d| d.join(MARKER))
+    git_dir(main).map(|d| d.join(MARKER))
+}
+
+/// What "Preview in main" does for a worktree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    /// Show it in main.
+    Start,
+    /// Main already shows it: show its current state again.
+    Update,
+}
+
+/// Why a worktree cannot be shown in main right now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Blocked {
+    /// Main shows another worktree.
+    OtherPreview,
+    IsMain,
+    MainInProgress,
+    MainDirty,
+}
+
+impl Blocked {
+    pub fn message(self) -> &'static str {
+        match self {
+            Blocked::OtherPreview => "The main folder already shows a preview. Restore it first.",
+            Blocked::IsMain => "Select another worktree to show its state in the main folder",
+            Blocked::MainInProgress => {
+                "The main folder has a merge or rebase in progress. Finish or abort it first."
+            }
+            Blocked::MainDirty => {
+                "The main folder has uncommitted changes. Commit or stash them first."
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for Blocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+impl std::error::Error for Blocked {}
+
+/// The rules for showing a worktree in main, from what is known about both.
+fn rules(
+    preview: Option<&Path>,
+    source: &Path,
+    main: &Path,
+    main_in_progress: bool,
+    main_dirty: bool,
+) -> Result<Step, Blocked> {
+    match preview {
+        Some(shown) if same_path(shown, source) => Ok(Step::Update),
+        Some(_) => Err(Blocked::OtherPreview),
+        None if same_path(main, source) => Err(Blocked::IsMain),
+        None if main_in_progress => Err(Blocked::MainInProgress),
+        None if main_dirty => Err(Blocked::MainDirty),
+        None => Ok(Step::Start),
+    }
+}
+
+/// What "Preview in main" would do for `wt`, judged from the snapshot.
+pub fn check(snap: &RepoSnapshot, wt: &Worktree) -> Result<Step, Blocked> {
+    let main = snap.main_worktree();
+    rules(
+        snap.preview.as_ref().map(|p| p.source.as_path()),
+        &wt.path,
+        main.map_or(snap.root.as_path(), |m| m.path.as_path()),
+        main.is_some_and(|m| m.in_progress.is_some()),
+        main.is_some_and(Worktree::is_dirty),
+    )
 }
 
 /// The preview shown in the main worktree at `main`, if any.
@@ -104,7 +160,7 @@ fn uncommitted_patch(source: &Git) -> Result<(Vec<u8>, Vec<String>)> {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos())
     );
-    let git_dir = conflicts::git_dir(source.cwd());
+    let git_dir = git_dir(source.cwd());
     // Git inside WSL reads the copy best from its own disk.
     let tmp = match &git_dir {
         Some(dir) if crate::wsl::Wsl::of(dir).is_some() => dir.join(name),
@@ -165,7 +221,13 @@ fn show(main: &Git, source: &Git, restore: Restore) -> Result<Preview> {
         let out = main.run_with_input(["apply", "--whitespace=nowarn", "-"], Some(&patch))?;
         if !out.success() {
             let message = failure_message(&out);
-            let _ = restore_main(main);
+            if let Err(rollback) = restore_main(main) {
+                bail!(
+                    "The worktree's changes could not be applied in main: {message}\n\
+                     Going back failed too, so main still shows the worktree's commit: \
+                     {rollback:#}. Use Restore main to try again."
+                );
+            }
             bail!("The worktree's changes could not be applied in main: {message}");
         }
     }
@@ -174,18 +236,19 @@ fn show(main: &Git, source: &Git, restore: Restore) -> Result<Preview> {
 
 /// Show the worktree at `source` in the main worktree (`main`).
 pub fn start(main: &Git, source: &Git) -> Result<Preview> {
+    // Any preview blocks a new one here, even of the same worktree: that is
+    // `update`.
     if active(main.cwd()).is_some() {
-        bail!("Main already shows a preview. Restore main first.");
+        bail!(Blocked::OtherPreview);
     }
-    if same_path(main.cwd(), source.cwd()) {
-        bail!("That is the main worktree itself.");
-    }
-    if conflicts::in_progress(main.cwd()).is_some() {
-        bail!("Main has a merge or rebase in progress. Finish or abort it first.");
-    }
-    if !main.read(["status", "--porcelain", "-z"])?.is_empty() {
-        bail!("Main has uncommitted changes. Commit or stash them first.");
-    }
+    let dirty = !main.read(["status", "--porcelain", "-z"])?.is_empty();
+    rules(
+        None,
+        source.cwd(),
+        main.cwd(),
+        conflicts::in_progress(main.cwd()).is_some(),
+        dirty,
+    )?;
     let out = main.run_expecting(["symbolic-ref", "-q", "--short", "HEAD"], None, |o| {
         o.status <= 1
     })?;

@@ -1,11 +1,16 @@
-//! Finding, creating and cloning repositories.
+//! Finding, creating and cloning repositories, and finding a worktree's git
+//! dir.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::cli::{CancelToken, Git, failure_message};
+pub use crate::cli::Progress;
+use crate::cli::{Git, failure_message};
 use crate::console::Console;
+use crate::jobs::CancelToken;
+use crate::paths::display;
+pub use crate::paths::native;
 
 /// Where a repository lives on disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -20,7 +25,7 @@ pub struct Location {
 /// to its main repository, so each repository gets one project tab.
 pub fn locate(path: &Path, console: &Console) -> Result<Location> {
     if !path.is_dir() {
-        bail!("{} is not a folder", crate::wsl::display(path));
+        bail!("{} is not a folder", display(path));
     }
     let git = Git::new(path, console.clone());
     let out = git.run_raw([
@@ -33,7 +38,7 @@ pub fn locate(path: &Path, console: &Console) -> Result<Location> {
     if !out.success() {
         let msg = failure_message(&out);
         if msg.contains("not a git repository") {
-            bail!("{} is not a git repository", crate::wsl::display(path));
+            bail!("{} is not a git repository", display(path));
         }
         bail!(msg);
     }
@@ -59,36 +64,9 @@ pub fn locate(path: &Path, console: &Console) -> Result<Location> {
 
 /// `git init` a new repository in `path` (created if missing).
 pub fn init(path: &Path, console: &Console) -> Result<Location> {
-    std::fs::create_dir_all(path)
-        .with_context(|| format!("Could not create {}", crate::wsl::display(path)))?;
+    std::fs::create_dir_all(path).with_context(|| format!("Could not create {}", display(path)))?;
     Git::new(path, console.clone()).run(["init"])?;
     locate(path, console)
-}
-
-/// Progress of a clone (or fetch), parsed from git's stderr.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Progress {
-    /// E.g. "Receiving objects".
-    pub phase: String,
-    /// 0.0..=1.0 if git reported a percentage.
-    pub fraction: Option<f32>,
-    /// The raw line, for display.
-    pub line: String,
-}
-
-pub fn parse_progress(line: &str) -> Progress {
-    let line = line.trim().trim_start_matches("remote:").trim();
-    let (phase, rest) = line.split_once(':').unwrap_or((line, ""));
-    let fraction = rest
-        .split_whitespace()
-        .find_map(|w| w.strip_suffix('%'))
-        .and_then(|p| p.parse::<f32>().ok())
-        .map(|p| (p / 100.0).clamp(0.0, 1.0));
-    Progress {
-        phase: phase.trim().to_owned(),
-        fraction,
-        line: line.to_owned(),
-    }
 }
 
 /// Folder name git would pick for a clone of `url`.
@@ -103,72 +81,98 @@ pub fn clone_folder_name(url: &str) -> String {
     }
 }
 
-/// `git clone` `url` into `dest`, reporting progress. Cancelling deletes the
-/// partial clone.
+/// `git clone` `url` into `dest`, reporting progress. When the clone fails
+/// or is cancelled, what it created goes again; an empty `dest` that was
+/// already there stays.
 pub fn clone(
     url: &str,
     dest: &Path,
     console: &Console,
     cancel: &CancelToken,
-    mut on_progress: impl FnMut(Progress),
+    on_progress: impl FnMut(Progress),
 ) -> Result<Location> {
     if dest.exists() && std::fs::read_dir(dest)?.next().is_some() {
         bail!(
             "The folder {} already exists and is not empty. Pick another folder name.",
-            crate::wsl::display(dest)
+            display(dest)
         );
     }
     let parent = dest
         .parent()
         .context("destination has no parent folder")?
         .to_path_buf();
+    let created = first_missing(dest);
     std::fs::create_dir_all(&parent)
-        .with_context(|| format!("Could not create {}", crate::wsl::display(&parent)))?;
+        .with_context(|| format!("Could not create {}", display(&parent)))?;
     let git = Git::new(&parent, console.clone());
-    let dest_arg = git.path_arg(dest)?;
-    let result = git.run_with_progress(
-        ["clone", "--progress", "--", url, &dest_arg],
-        cancel.flag(),
-        |line| on_progress(parse_progress(line)),
-    );
-    let out = match result {
-        Ok(out) => out,
-        Err(err) => {
-            let _ = std::fs::remove_dir_all(dest);
-            return Err(err);
+    let result = git.path_arg(dest).and_then(|dest_arg| {
+        git.run_progress(
+            &["clone", "--progress", "--", url, &dest_arg],
+            cancel,
+            on_progress,
+        )
+    });
+    if let Err(error) = result {
+        match &created {
+            Some(top) => {
+                let _ = std::fs::remove_dir_all(top);
+            }
+            None => empty_folder(dest),
         }
-    };
-    if !out.success() {
-        let _ = std::fs::remove_dir_all(dest);
-        bail!(failure_message(&out));
+        return Err(error);
     }
     locate(dest, console)
 }
 
-/// Paths from git use forward slashes; show them the Windows way.
-pub fn native(path: &str) -> PathBuf {
-    if cfg!(windows) {
-        PathBuf::from(path.replace('/', "\\"))
-    } else {
-        PathBuf::from(path)
+/// The outermost folder of `path` (or `path` itself) that does not exist yet.
+fn first_missing(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .take_while(|p| !p.as_os_str().is_empty() && !p.exists())
+        .last()
+        .map(Path::to_path_buf)
+}
+
+/// Remove everything inside `dir`, keeping `dir`.
+fn empty_folder(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let _ = if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
     }
+}
+
+/// The git dir of a worktree: `.git` itself, or what a linked worktree's
+/// `.git` file points at.
+pub(crate) fn git_dir(worktree: &Path) -> Option<PathBuf> {
+    let dot = worktree.join(".git");
+    if dot.is_dir() {
+        return Some(dot);
+    }
+    let text = std::fs::read_to_string(&dot).ok()?;
+    let target = text.trim().strip_prefix("gitdir:")?.trim();
+    // In WSL git writes a Linux path.
+    if let Some(wsl) = crate::wsl::Wsl::of(worktree)
+        && target.starts_with('/')
+    {
+        return Some(wsl.to_windows(target));
+    }
+    let path = PathBuf::from(target);
+    Some(if path.is_absolute() {
+        path
+    } else {
+        worktree.join(path)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn progress_lines() {
-        let p = parse_progress("Receiving objects:  45% (450/1000), 1.20 MiB | 2.00 MiB/s");
-        assert_eq!(p.phase, "Receiving objects");
-        assert_eq!(p.fraction, Some(0.45));
-        let p = parse_progress("remote: Counting objects: 100% (12/12), done.");
-        assert_eq!(p.phase, "Counting objects");
-        assert_eq!(p.fraction, Some(1.0));
-        let p = parse_progress("Cloning into 'graft'...");
-        assert_eq!(p.fraction, None);
-    }
 
     #[test]
     fn folder_names() {
@@ -182,5 +186,22 @@ mod tests {
         );
         assert_eq!(clone_folder_name("https://example.com/a/b/"), "b");
         assert_eq!(clone_folder_name(r"C:\repos\thing"), "thing");
+    }
+
+    #[test]
+    fn a_failed_clone_keeps_a_folder_that_was_there() {
+        let tmp = tempfile::tempdir().unwrap();
+        let console = Console::default();
+        let missing = tmp.path().join("no-such-repo");
+        let url = missing.to_str().unwrap();
+
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        assert!(clone(url, &empty, &console, &CancelToken::default(), |_| {}).is_err());
+        assert!(empty.is_dir(), "the user's folder stays");
+
+        let new = tmp.path().join("new").join("deeper");
+        assert!(clone(url, &new, &console, &CancelToken::default(), |_| {}).is_err());
+        assert!(!tmp.path().join("new").exists(), "what the clone made goes");
     }
 }

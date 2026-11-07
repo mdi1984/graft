@@ -7,10 +7,10 @@ use std::sync::{Arc, Mutex};
 
 use graft_core::diff::{self, FileDiff, Gap, Source};
 use graft_core::ops::{self, LineOp};
+use graft_core::remote;
 use graft_core::repo::Progress;
 use graft_core::status::{EntryKind, StatusEntry};
-use graft_core::{CancelToken, Git};
-use graft_core::{refs, remote};
+use graft_core::{CancelToken, Git, JobError};
 
 use super::comments::{Pick, Side};
 use super::{Action, Event, Project};
@@ -749,20 +749,20 @@ impl Project {
                 waker();
             };
             let result = match op {
-                RemoteOp::Fetch => remote::fetch(&git, &cancel, report),
+                RemoteOp::Fetch => remote::fetch(&git, false, &cancel, report),
                 RemoteOp::Pull => remote::pull(&git, &cancel, report),
                 RemoteOp::Push => remote::push(&git, &cancel, report),
                 RemoteOp::ForcePush => remote::force_push(&git, &cancel, report),
                 RemoteOp::PushTag { remote, tag } => {
-                    refs::push_tag(&git, &remote, &tag, &cancel, report)
+                    remote::push_tag(&git, &remote, &tag, &cancel, report)
                 }
                 RemoteOp::DeleteRemoteBranch { remote, branch } => {
-                    refs::delete_remote_branch(&git, &remote, &branch, &cancel, report)
+                    remote::delete_remote_branch(&git, &remote, &branch, &cancel, report)
                 }
             };
             Event::OpDone {
                 then,
-                result: result.map(|()| None).map_err(|e| format!("{e:#}")),
+                result: result.map(|()| None).map_err(JobError::from),
             }
         });
     }
@@ -797,16 +797,16 @@ impl Project {
         });
         self.pool.spawn(&self.tx, move || Event::OpDone {
             then,
-            result: job(git).map_err(|e| format!("{e:#}")),
+            result: job(git).map_err(JobError::from),
         });
     }
 
-    pub(super) fn on_op_done(&mut self, then: Then, result: Result<Option<String>, String>) {
+    pub(super) fn on_op_done(&mut self, then: Then, result: Result<Option<String>, JobError>) {
         self.op = None;
         self.refresh();
         match result {
-            Err(e) if e == "Cancelled" => {}
-            Err(e) => self.on_op_error(then, e),
+            Err(JobError::Cancelled) => {}
+            Err(JobError::Failed(e)) => self.on_op_error(then, e),
             Ok(extra) => match then {
                 Then::Nothing | Then::DeletedBranch(_) => self.infos.extend(extra),
                 Then::Pushed => self.infos.push("Pushed".to_owned()),

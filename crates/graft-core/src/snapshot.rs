@@ -6,9 +6,8 @@ use anyhow::Result;
 
 use crate::cli::Git;
 use crate::conflicts;
-use crate::model::{
-    Branch, Oid, Remote, RemoteBranch, RepoSnapshot, Tag, Upstream, Worktree, same_path,
-};
+use crate::model::{Branch, Oid, Remote, RemoteBranch, RepoSnapshot, Tag, Upstream, Worktree};
+use crate::paths::{folder_name, same_path};
 use crate::status;
 
 /// Read the whole snapshot. `git` must point at the main worktree. The git
@@ -37,10 +36,7 @@ pub fn load(git: &Git) -> Result<RepoSnapshot> {
         }
         let refs = refs.join().expect("refs thread")?;
         Ok(RepoSnapshot {
-            name: root
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| root.display().to_string()),
+            name: folder_name(&root),
             root: root.clone(),
             worktrees,
             branches: refs.branches,
@@ -256,7 +252,7 @@ fn load_stash_count(git: &Git) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo::native;
+    use crate::paths::native;
 
     #[test]
     fn refs_git_would_read_as_options_are_left_out() {

@@ -9,7 +9,7 @@ use crossbeam_channel::{Receiver, Sender};
 use egui::{CentralPanel, Frame, Key, KeyboardShortcut, Margin, Modifiers, Panel};
 use graft_core::jobs::{JobPool, Waker};
 use graft_core::repo::{self, Location, Progress};
-use graft_core::{CancelToken, Console, same_path};
+use graft_core::{CancelToken, Console, JobError, Panicked, same_path};
 use serde::{Deserialize, Serialize};
 
 use crate::groups::{self, GroupId, TabGroup};
@@ -58,7 +58,7 @@ enum AppEvent {
     Picked(Pick, Option<PathBuf>),
     Distros(Vec<String>),
     Home(String, Option<String>),
-    Opened(Result<Location, String>),
+    Opened(Result<Location, JobError>),
     /// `manual` when the user asked (About), so failures are shown.
     UpdateChecked {
         result: Result<Release, String>,
@@ -66,6 +66,14 @@ enum AppEvent {
     },
     /// The new program, ready to start.
     UpdateInstalled(Result<update::Installed, String>),
+    /// A job panicked instead of answering.
+    Panicked(String),
+}
+
+impl From<Panicked> for AppEvent {
+    fn from(p: Panicked) -> Self {
+        AppEvent::Panicked(p.0)
+    }
 }
 
 pub struct GraftApp {
@@ -215,11 +223,9 @@ impl GraftApp {
                 AppEvent::Distros(distros) => self.start.set_distros(distros),
                 AppEvent::Home(distro, home) => self.start.set_home(distro, home),
                 AppEvent::Opened(Ok(location)) => self.add_project(location),
-                AppEvent::Opened(Err(error)) => {
+                AppEvent::Opened(Err(JobError::Cancelled)) => self.start.busy = None,
+                AppEvent::Opened(Err(JobError::Failed(error))) | AppEvent::Panicked(error) => {
                     self.start.busy = None;
-                    if error == "Cancelled" {
-                        continue;
-                    }
                     if self.active.is_none() {
                         self.start.error = Some(error);
                     } else {
@@ -274,7 +280,7 @@ impl GraftApp {
     fn open_folder(&mut self, path: PathBuf) {
         let console = self.console.clone();
         self.pool.spawn(&self.tx, move || {
-            AppEvent::Opened(repo::locate(&path, &console).map_err(|e| format!("{e:#}")))
+            AppEvent::Opened(repo::locate(&path, &console).map_err(JobError::from))
         });
     }
 
@@ -613,7 +619,7 @@ impl GraftApp {
                         }
                         waker();
                     });
-                    AppEvent::Opened(result.map_err(|e| format!("{e:#}")))
+                    AppEvent::Opened(result.map_err(JobError::from))
                 });
             }
             StartAction::Init(path) => {
@@ -624,7 +630,7 @@ impl GraftApp {
                 });
                 let console = self.console.clone();
                 self.pool.spawn(&self.tx, move || {
-                    AppEvent::Opened(repo::init(&path, &console).map_err(|e| format!("{e:#}")))
+                    AppEvent::Opened(repo::init(&path, &console).map_err(JobError::from))
                 });
             }
             StartAction::Cancel => {

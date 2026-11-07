@@ -2,7 +2,10 @@
 //! and what happens when git says no (unmerged branch, rejected push).
 
 use graft_core::Oid;
-use graft_core::refs::{self, NOT_MERGED, ResetMode};
+use graft_core::refs::{
+    self, NOT_MERGED, RefKind, ResetMode, blocked_by_changes, blocked_by_untracked, check_ref_name,
+    files_in_the_way, no_identity, no_remote,
+};
 use graft_core::remote::{self, is_rejected_push};
 use graft_core::stash;
 
@@ -102,8 +105,8 @@ impl Project {
             | DialogKind::RenameBranch { name, .. }
             | DialogKind::StashBranch { name, .. } => {
                 let name = name.trim();
-                if name.is_empty() {
-                    Some("Give the branch a name.".to_owned())
+                if let Err(problem) = check_ref_name(RefKind::Branch, name) {
+                    Some(problem)
                 } else if self
                     .snapshot
                     .as_ref()
@@ -116,8 +119,8 @@ impl Project {
             }
             DialogKind::NewTag { name, .. } => {
                 let name = name.trim();
-                if name.is_empty() {
-                    Some("Give the tag a name.".to_owned())
+                if let Err(problem) = check_ref_name(RefKind::Tag, name) {
+                    Some(problem)
                 } else if self
                     .snapshot
                     .as_ref()
@@ -145,8 +148,8 @@ impl Project {
                         .snapshot
                         .as_ref()
                         .is_some_and(|s| s.remotes.iter().any(|r| r.name == name));
-                if name.is_empty() || name.contains(char::is_whitespace) {
-                    Some("Give the remote a name without spaces, e.g. origin.".to_owned())
+                if let Err(problem) = check_ref_name(RefKind::Remote, name) {
+                    Some(problem)
                 } else if taken {
                     Some(format!("A remote named {name} already exists."))
                 } else if url.trim().is_empty() {
@@ -295,7 +298,7 @@ impl Project {
                 });
             }
             Then::Switched(branch) if blocked_by_changes(&error) => {
-                let untracked = error.contains("untracked working tree files");
+                let untracked = blocked_by_untracked(&error);
                 self.confirm = Some(Confirm {
                     title: format!("Your changes are in the way of {branch}"),
                     body: format!(
@@ -319,18 +322,14 @@ impl Project {
                     action: Action::Remote(RemoteOp::ForcePush),
                 });
             }
-            _ if error.contains("No configured push destination")
-                || error.contains("No remote repository specified") =>
-            {
+            _ if no_remote(&error) => {
                 self.notices.push(
                     "This repository has no remote yet. Add one under REMOTES in the sidebar \
                      (Add remote…)."
                         .to_owned(),
                 );
             }
-            _ if error.contains("Please tell me who you are")
-                || error.contains("Author identity unknown") =>
-            {
+            _ if no_identity(&error) => {
                 self.notices.push(
                     "Git doesn't know who you are yet. Set your name and email in Settings \
                      (the gear at the top right)."
@@ -485,30 +484,6 @@ impl Project {
         }
         // `self.git` works in the main folder.
         self.run_op_at(self.git.clone(), label, then, job);
-    }
-}
-
-/// Git refused to switch branches because local changes would be lost.
-fn blocked_by_changes(error: &str) -> bool {
-    error.contains("would be overwritten by checkout")
-        || error.contains("Please commit your changes or stash them")
-}
-
-/// The files git lists between "…would be overwritten by checkout:" and
-/// "Please …", joined for a sentence.
-fn files_in_the_way(error: &str) -> String {
-    let files: Vec<&str> = error
-        .lines()
-        .skip_while(|l| !l.contains("would be overwritten"))
-        .skip(1)
-        .map(str::trim)
-        .take_while(|l| !l.starts_with("Please") && !l.starts_with("Aborting"))
-        .filter(|l| !l.is_empty())
-        .collect();
-    match files.len() {
-        0 => "some files".to_owned(),
-        1..=5 => files.join(", "),
-        n => format!("{} and {} more", files[..4].join(", "), n - 4),
     }
 }
 

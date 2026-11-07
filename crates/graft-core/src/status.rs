@@ -4,13 +4,9 @@
 use anyhow::Result;
 
 use crate::cli::Git;
-use crate::model::Oid;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WorktreeStatus {
-    pub branch: Option<String>,
-    pub head: Option<Oid>,
-    pub upstream: Option<String>,
     pub ahead: usize,
     pub behind: usize,
     pub entries: Vec<StatusEntry>,
@@ -26,7 +22,6 @@ pub struct StatusEntry {
     /// Change between the index and the working tree (the "unstaged" side).
     pub worktree: Change,
     pub kind: EntryKind,
-    pub submodule: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,7 +45,8 @@ pub enum Change {
 }
 
 impl Change {
-    fn from_code(c: u8) -> Self {
+    /// A status letter as git prints it (porcelain `XY`, `--name-status`).
+    pub(crate) fn from_code(c: u8) -> Self {
         match c {
             b'M' => Self::Modified,
             b'T' => Self::TypeChanged,
@@ -142,8 +138,8 @@ pub fn parse(bytes: &[u8]) -> WorktreeStatus {
             b'1' => {
                 // 1 XY sub mH mI mW hH hI path
                 let parts: Vec<&str> = text.splitn(9, ' ').collect();
-                if let [_, xy, sub, _, _, _, _, _, path] = parts[..] {
-                    status.entries.push(tracked(xy, sub, path, None));
+                if let [_, xy, _, _, _, _, _, _, path] = parts[..] {
+                    status.entries.push(tracked(xy, path, None));
                 }
             }
             b'2' => {
@@ -152,15 +148,15 @@ pub fn parse(bytes: &[u8]) -> WorktreeStatus {
                 let orig = fields
                     .next()
                     .map(|f| String::from_utf8_lossy(f).into_owned());
-                if let [_, xy, sub, _, _, _, _, _, _, path] = parts[..] {
-                    status.entries.push(tracked(xy, sub, path, orig));
+                if let [_, xy, _, _, _, _, _, _, _, path] = parts[..] {
+                    status.entries.push(tracked(xy, path, orig));
                 }
             }
             b'u' => {
                 // u XY sub m1 m2 m3 mW h1 h2 h3 path
                 let parts: Vec<&str> = text.splitn(11, ' ').collect();
-                if let [_, xy, sub, .., path] = parts[..] {
-                    let mut entry = tracked(xy, sub, path, None);
+                if let [_, xy, .., path] = parts[..] {
+                    let mut entry = tracked(xy, path, None);
                     entry.kind = EntryKind::Conflicted;
                     status.entries.push(entry);
                 }
@@ -171,7 +167,6 @@ pub fn parse(bytes: &[u8]) -> WorktreeStatus {
                 index: Change::None,
                 worktree: Change::Added,
                 kind: EntryKind::Untracked,
-                submodule: false,
             }),
             _ => {}
         }
@@ -179,7 +174,7 @@ pub fn parse(bytes: &[u8]) -> WorktreeStatus {
     status
 }
 
-fn tracked(xy: &str, sub: &str, path: &str, orig_path: Option<String>) -> StatusEntry {
+fn tracked(xy: &str, path: &str, orig_path: Option<String>) -> StatusEntry {
     let xy = xy.as_bytes();
     StatusEntry {
         path: path.to_owned(),
@@ -187,34 +182,20 @@ fn tracked(xy: &str, sub: &str, path: &str, orig_path: Option<String>) -> Status
         index: Change::from_code(xy[0]),
         worktree: Change::from_code(xy[1]),
         kind: EntryKind::Tracked,
-        submodule: sub.starts_with('S'),
     }
 }
 
+/// `# branch.ab +ahead -behind`. Branch and HEAD come from `worktree list`.
 fn parse_header(line: &str, status: &mut WorktreeStatus) {
-    let mut words = line.split(' ');
-    let _hash = words.next();
-    match words.next() {
-        Some("branch.oid") => {
-            status.head = words.next().and_then(|s| Oid::from_hex(s.as_bytes()).ok());
+    let Some(counts) = line.strip_prefix("# branch.ab ") else {
+        return;
+    };
+    for w in counts.split(' ') {
+        if let Some(n) = w.strip_prefix('+') {
+            status.ahead = n.parse().unwrap_or(0);
+        } else if let Some(n) = w.strip_prefix('-') {
+            status.behind = n.parse().unwrap_or(0);
         }
-        Some("branch.head") => {
-            status.branch = words
-                .next()
-                .filter(|s| *s != "(detached)")
-                .map(str::to_owned);
-        }
-        Some("branch.upstream") => status.upstream = words.next().map(str::to_owned),
-        Some("branch.ab") => {
-            for w in words {
-                if let Some(n) = w.strip_prefix('+') {
-                    status.ahead = n.parse().unwrap_or(0);
-                } else if let Some(n) = w.strip_prefix('-') {
-                    status.behind = n.parse().unwrap_or(0);
-                }
-            }
-        }
-        _ => {}
     }
 }
 
@@ -232,8 +213,6 @@ mod tests {
 u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
 ? untracked.txt\0";
         let s = parse(raw);
-        assert_eq!(s.branch.as_deref(), Some("main"));
-        assert_eq!(s.upstream.as_deref(), Some("origin/main"));
         assert_eq!((s.ahead, s.behind), (2, 1));
         assert_eq!(s.entries.len(), 5);
         assert!(s.entries[0].is_unstaged() && !s.entries[0].is_staged());
@@ -245,14 +224,5 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
         assert_eq!(s.entries[4].kind, EntryKind::Untracked);
         assert_eq!(s.staged().count(), 2);
         assert_eq!(s.unstaged().count(), 2);
-    }
-
-    #[test]
-    fn detached_head_has_no_branch() {
-        let s = parse(
-            b"# branch.oid 1111111111111111111111111111111111111111\0# branch.head (detached)\0",
-        );
-        assert!(s.branch.is_none());
-        assert!(s.head.is_some());
     }
 }

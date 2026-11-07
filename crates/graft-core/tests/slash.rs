@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use graft_core::slash::{self, PROTECTED, Reason};
+use graft_core::slash::{self, Reason, default_protected};
 use graft_core::worktree::{self, Start};
 use graft_core::{CancelToken, Console, Git, snapshot};
 
@@ -77,7 +77,7 @@ fn scan_execute_and_restore() {
     .unwrap();
     std::fs::remove_dir_all(&gone_folder).unwrap();
 
-    let plan = slash::scan(&git, PROTECTED, &CancelToken::default(), |_| {}).unwrap();
+    let plan = slash::scan(&git, &default_protected(), &CancelToken::default(), |_| {}).unwrap();
     assert_eq!(plan.default_branch.as_deref(), Some("main"));
     assert_eq!(plan.fetch_error, None);
     let find = |name: &str| {
@@ -173,7 +173,7 @@ fn worktrees_with_very_long_paths_are_slashed() {
     let (git, wt) = repo_with_merged_branch(tmp.path());
 
     let snap = snapshot::load(&git).unwrap();
-    let plan = slash::plan(&git, &snap, PROTECTED).unwrap();
+    let plan = slash::plan(&git, &snap, &default_protected()).unwrap();
     let chosen: Vec<_> = plan
         .candidates
         .into_iter()
@@ -194,7 +194,7 @@ fn a_worktree_that_cannot_be_removed_keeps_its_branch() {
     let tmp = tempfile::tempdir().unwrap();
     let (git, wt) = repo_with_merged_branch(tmp.path());
     let snap = snapshot::load(&git).unwrap();
-    let plan = slash::plan(&git, &snap, PROTECTED).unwrap();
+    let plan = slash::plan(&git, &snap, &default_protected()).unwrap();
     let chosen: Vec<_> = plan
         .candidates
         .into_iter()
@@ -231,7 +231,9 @@ fn repo_with_merged_branches(tmp: &Path, count: usize) -> (Git, Vec<slash::Candi
     }
     let git = Git::new(&main, Console::default());
     let snap = snapshot::load(&git).unwrap();
-    let mut chosen = slash::plan(&git, &snap, PROTECTED).unwrap().candidates;
+    let mut chosen = slash::plan(&git, &snap, &default_protected())
+        .unwrap()
+        .candidates;
     chosen.sort_by(|a, b| a.branch.cmp(&b.branch));
     assert_eq!(chosen.len(), count);
     (git, chosen)

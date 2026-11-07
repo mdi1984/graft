@@ -158,7 +158,7 @@ fn commit_amend_and_push() {
         sh(&dir, &["rev-parse", "--abbrev-ref", "@{u}"]).trim(),
         "origin/main"
     );
-    remote::fetch(&git, &CancelToken::default(), |_| {}).unwrap();
+    remote::fetch(&git, false, &CancelToken::default(), |_| {}).unwrap();
     remote::pull(&git, &CancelToken::default(), |_| {}).unwrap();
 }
 

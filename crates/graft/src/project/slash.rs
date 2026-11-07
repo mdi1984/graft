@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use graft_core::repo::Progress;
 use graft_core::slash::{self, Candidate, Outcome, Plan, Slashed};
-use graft_core::{CancelToken, Oid};
+use graft_core::{CancelToken, JobError, Oid};
 use serde::{Deserialize, Serialize};
 
 use super::changes::{Operation, Then};
@@ -76,20 +76,23 @@ impl Project {
                 }
                 waker();
             };
-            let result =
-                slash::scan(&git, &protected, &cancel, report).map_err(|e| format!("{e:#}"));
+            let result = slash::scan(&git, &protected, &cancel, report).map_err(JobError::from);
             Event::SlashPlan(result)
         });
     }
 
-    pub(super) fn on_slash_plan(&mut self, result: Result<Plan, String>) {
+    pub(super) fn on_slash_plan(&mut self, result: Result<Plan, JobError>) {
         self.op = None;
         self.refresh();
         let Some(view) = &mut self.slash else { return };
-        if result.as_ref().is_err_and(|e| e == "Cancelled") {
-            self.slash = None;
-            return;
-        }
+        let result = match result {
+            Ok(plan) => Ok(plan),
+            Err(JobError::Failed(e)) => Err(e),
+            Err(JobError::Cancelled) => {
+                self.slash = None;
+                return;
+            }
+        };
         if let Ok(plan) = &result {
             view.checked = plan.candidates.iter().map(|c| c.suggested).collect();
         }

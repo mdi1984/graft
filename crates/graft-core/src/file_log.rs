@@ -95,7 +95,7 @@ fn parse_blame(bytes: &[u8]) -> Blame {
     let mut pending: Option<(Oid, BlameCommit)> = None;
     for raw in bytes.split(|&b| b == b'\n') {
         if let Some(content) = raw.strip_prefix(b"\t") {
-            if content.contains(&0) {
+            if crate::changes::is_binary(content) {
                 blame.binary = true;
             }
             if let Some((id, info)) = pending.take() {

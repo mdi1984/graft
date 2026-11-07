@@ -14,41 +14,45 @@ use crate::theme::{self, color};
 pub const STATUS_HEIGHT: f32 = 26.0;
 
 /// The latest console entries, re-read only when the console changed.
+/// Entries are told apart by their `seq`, which stays put when old ones
+/// drop out of the console.
 #[derive(Default)]
 pub struct ConsoleView {
-    generation: u64,
+    next_seq: u64,
     pub entries: Vec<Entry>,
-    /// Number of entries the user has seen (console open).
-    seen: usize,
-    cleared_at: usize,
+    /// Entries before this `seq` were seen (console open).
+    seen: u64,
+    /// Entries before this `seq` are hidden ("Clear").
+    cleared: u64,
 }
 
 impl ConsoleView {
     pub fn sync(&mut self, console: &graft_core::Console) {
-        let generation = console.generation();
-        if generation != self.generation {
-            self.generation = generation;
+        let next_seq = console.next_seq();
+        if next_seq != self.next_seq {
+            self.next_seq = next_seq;
             self.entries = console.snapshot();
-            self.seen = self.seen.min(self.entries.len());
-            self.cleared_at = self.cleared_at.min(self.entries.len());
         }
     }
 
     pub fn unseen_failures(&self) -> usize {
-        self.entries[self.seen.min(self.entries.len())..]
+        self.entries
             .iter()
-            .filter(|e| e.failed())
+            .filter(|e| e.seq >= self.seen && e.failed())
             .count()
     }
 
     pub fn mark_seen(&mut self) {
-        self.seen = self.entries.len();
+        self.seen = self.next_seq;
+    }
+
+    fn shown(&self) -> impl Iterator<Item = &Entry> {
+        self.entries.iter().filter(|e| e.seq >= self.cleared)
     }
 }
 
 /// The bottom status bar: current activity on the left, console toggle right.
-/// The bottom status bar. Returns true when the user clicked "Cancel" on a
-/// cancellable `activity`.
+/// Returns true when the user clicked "Cancel" on a cancellable `activity`.
 pub fn status_bar(
     ui: &mut Ui,
     activity: Option<&str>,
@@ -157,7 +161,7 @@ pub fn console(ui: &mut Ui, view: &mut ConsoleView, open: &mut bool) {
                 *open = false;
             }
             if ui.button("Clear").clicked() {
-                view.cleared_at = view.entries.len();
+                view.cleared = view.next_seq;
             }
         });
     });
@@ -168,18 +172,19 @@ pub fn console(ui: &mut Ui, view: &mut ConsoleView, open: &mut bool) {
         .stick_to_bottom(true)
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
-            let start = view.cleared_at.min(view.entries.len());
-            if start == view.entries.len() {
-                ui.label(RichText::new("No commands yet.").color(color::text_faint()));
+            let mut any = false;
+            for entry in view.shown() {
+                any = true;
+                entry_row(ui, entry);
             }
-            for (i, entry) in view.entries.iter().enumerate().skip(start) {
-                entry_row(ui, i, entry);
+            if !any {
+                ui.label(RichText::new("No commands yet.").color(color::text_faint()));
             }
         });
 }
 
-fn entry_row(ui: &mut Ui, index: usize, entry: &Entry) {
-    let id = ui.scope_id().with(("console-entry", index, entry.at));
+fn entry_row(ui: &mut Ui, entry: &Entry) {
+    let id = ui.scope_id().with(("console-entry", entry.seq));
     let mut expanded = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
     if response.hovered() {

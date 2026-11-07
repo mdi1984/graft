@@ -121,22 +121,22 @@ impl Project {
         view.loading = true;
         view.generation = generation;
 
-        let base = self.review_state().and_then(|s| s.base.clone());
-        let snap = self.snapshot.as_ref();
-        let branches: Vec<String> = snap
-            .map(|s| s.branches.iter().map(|b| b.name.clone()).collect())
-            .unwrap_or_default();
-        let current = self.worktree().and_then(|wt| wt.branch.clone());
+        let current = self.worktree().and_then(|wt| wt.branch.as_deref());
+        let base = self
+            .review_state()
+            .and_then(|s| s.base.clone())
+            .or_else(|| {
+                let snap = self.snapshot.as_ref()?;
+                review::default_base(snap, current)
+            });
         let git = self.wt_git();
         self.pool.spawn(&self.tx, move || {
             let result = (|| {
-                let base = base
-                    .or_else(|| review::default_base(&git, &branches, current.as_deref()))
-                    .ok_or_else(|| {
-                        "There is no main or master branch to review against. Pick a base \
+                let base = base.ok_or_else(|| {
+                    "There is no main or master branch to review against. Pick a base \
                          branch above."
-                            .to_owned()
-                    })?;
+                        .to_owned()
+                })?;
                 review::load(&git, &base).map_err(|e| format!("{e:#}"))
             })();
             Event::Review { generation, result }
