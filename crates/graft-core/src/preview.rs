@@ -153,12 +153,12 @@ fn write_marker(main: &Path, preview: &Preview) -> Result<()> {
 /// binary patch against its HEAD, and the files that patch creates. Uses a
 /// copy of the index, so the worktree's own staging is left alone.
 fn uncommitted_patch(source: &Git) -> Result<(Vec<u8>, Vec<String>)> {
+    // Unique per call: the clock alone repeats between threads on Windows.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let name = format!(
         "graft-preview-{}-{}.index",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos())
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
     let git_dir = git_dir(source.cwd());
     // Git inside WSL reads the copy best from its own disk.
@@ -208,8 +208,11 @@ fn uncommitted_patch(source: &Git) -> Result<(Vec<u8>, Vec<String>)> {
 fn show(main: &Git, source: &Git, restore: Restore) -> Result<Preview> {
     let head = source.read(["rev-parse", "--verify", "HEAD"])?;
     let head = Oid::from_hex(head.trim().as_bytes())?;
-    let (patch, added) = uncommitted_patch(source)?;
+    let (patch, mut added) = uncommitted_patch(source)?;
     main.run(["checkout", "-q", "--detach", &head.to_string()])?;
+    // Only files the preview creates are its to remove later: main may
+    // already have one by that name (an ignored local config, say).
+    added.retain(|p| std::fs::symlink_metadata(main.cwd().join(p)).is_err());
     let preview = Preview {
         restore,
         source: source.cwd().to_path_buf(),

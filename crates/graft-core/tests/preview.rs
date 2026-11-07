@@ -153,7 +153,6 @@ fn a_failed_apply_puts_main_back() {
 /// way: the rollback removes every file the preview meant to add, also
 /// ones it never wrote.
 #[test]
-#[ignore = "known bug: a failed preview's rollback deletes main's ignored file in the way"]
 fn a_failed_apply_keeps_main_files() {
     let tmp = tempfile::tempdir().unwrap();
     let main = failed_preview(tmp.path());

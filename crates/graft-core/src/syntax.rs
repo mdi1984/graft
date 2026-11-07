@@ -88,7 +88,6 @@ fn language(path: &str) -> Option<&'static SyntaxReference> {
         "ts" | "tsx" | "mts" | "cts" | "jsx" | "mjs" | "cjs" => "js",
         "cshtml" | "razor" | "vue" | "svelte" => "html",
         "csproj" | "props" | "targets" | "xaml" | "svg" | "resx" => "xml",
-        "kts" => "kt",
         _ => ext,
     };
     set.find_syntax_by_extension(ext)
