@@ -9,6 +9,7 @@ use anyhow::{Result, bail};
 use crate::changes::EMPTY_TREE;
 use crate::cli::{Git, Output, failure_message};
 use crate::model::Oid;
+use crate::status::Change;
 
 /// Which pair of trees a diff compares.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -66,11 +67,20 @@ pub struct Line {
     pub no_newline: bool,
 }
 
+/// How a tab shows on screen.
+pub const TAB: &str = "    ";
+
+/// A line of a file for display: lossy UTF-8, no trailing `\r`, tabs as
+/// spaces.
+pub fn display_text(line: &[u8]) -> String {
+    let bytes = line.strip_suffix(b"\r").unwrap_or(line);
+    String::from_utf8_lossy(bytes).replace('\t', TAB)
+}
+
 impl Line {
-    /// Content for display: lossy UTF-8, no trailing `\r`, tabs as spaces.
+    /// Content for display, see [`display_text`].
     pub fn text(&self) -> String {
-        let bytes = self.content.strip_suffix(b"\r").unwrap_or(&self.content);
-        String::from_utf8_lossy(bytes).replace('\t', "    ")
+        display_text(&self.content)
     }
 
     pub fn is_change(&self) -> bool {
@@ -98,6 +108,22 @@ impl FileDiff {
     /// Number of added or removed lines (the selectable ones).
     pub fn changed_lines(&self) -> usize {
         self.added() + self.removed()
+    }
+
+    /// What happened to the file, as far as this diff of `source` tells.
+    pub fn change(&self, source: &Source) -> Change {
+        match source {
+            Source::Untracked => Change::Added,
+            _ if self.new_file => Change::Added,
+            _ if self.deleted_file => Change::Deleted,
+            _ => Change::Modified,
+        }
+    }
+
+    /// A combined diff (`diff --cc`), the kind shown for a file with
+    /// conflicts.
+    pub fn is_combined(&self) -> bool {
+        self.header.starts_with(b"diff --cc")
     }
 }
 

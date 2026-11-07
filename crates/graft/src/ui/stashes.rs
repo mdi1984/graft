@@ -5,12 +5,12 @@
 use egui::{Frame, Margin, Panel, RichText, ScrollArea, Sense, Ui, vec2};
 use graft_core::diff::Source;
 use graft_core::stash::Stash;
-use graft_core::{RepoSnapshot, short};
+use graft_core::{RepoSnapshot, short, wsl};
 
 use super::diff_view;
-use super::history::file_row;
+use super::file_row::{FILE_ROW_HEIGHT, file_row};
 use super::widgets::{
-    ButtonKind, button, elided, empty_state, paint_galley_left, paint_row_bg, spinner,
+    ButtonKind, button, elided, empty_state, paint_galley_left, paint_row_bg, waiting,
 };
 use crate::project::{Action, Confirm, DialogKind, FileKey, Project};
 use crate::theme::{self, color};
@@ -18,8 +18,7 @@ use crate::time;
 
 pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
     let Some(stashes) = &project.stashes else {
-        let rect = ui.available_rect_before_wrap();
-        spinner(ui, rect.center(), 9.0, color::text_weak());
+        waiting(ui);
         return;
     };
     let stashes = match stashes {
@@ -64,7 +63,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
         Some(Ok(files)) => files.len(),
         _ => 1,
     };
-    let height = (128.0 + files as f32 * 25.0).min(ui.available_height() * 0.5);
+    let height = (128.0 + files as f32 * (FILE_ROW_HEIGHT + 1.0)).min(ui.available_height() * 0.5);
     Panel::top("stash-details")
         .exact_size(height)
         .frame(
@@ -115,14 +114,14 @@ fn list(
                 let x = rect.left() + 10.0;
                 let width = rect.width() - 20.0;
                 let title = elided(ui, &stash.message, theme::body(), color::text(), width);
-                paint_galley_left(painter, x, rect.top() + 15.0, title, color::text());
+                paint_galley_left(painter, x, rect.top() + 15.0, title);
                 let meta = format!(
                     "{} · {}",
                     origin(snap, stash),
                     time::relative(stash.time, now)
                 );
                 let meta = elided(ui, &meta, theme::small(), color::text_weak(), width);
-                paint_galley_left(painter, x, rect.top() + 33.0, meta, color::text_weak());
+                paint_galley_left(painter, x, rect.top() + 33.0, meta);
                 if response.clicked() {
                     actions.push(Action::SelectStash(stash.id));
                 }
@@ -181,7 +180,7 @@ fn details(
     ui.spacing_mut().item_spacing.y = 6.0;
     ui.label(
         RichText::new(&stash.message)
-            .font(theme::semibold(15.0))
+            .font(theme::title())
             .color(color::text()),
     );
     ui.label(
@@ -221,7 +220,7 @@ fn details(
             ui.menu_button("Apply to…", |ui| {
                 for wt in others {
                     if ui
-                        .button(format!("{}  ({})", wt.label(), wt.path.display()))
+                        .button(format!("{}  ({})", wt.label(), wsl::display(&wt.path)))
                         .clicked()
                     {
                         actions.push(apply(stash, wt.path.clone(), false));
@@ -275,8 +274,7 @@ fn details(
                     source: Source::Commit(file.commit),
                     path: file.change.path.clone(),
                 };
-                let untracked = file.commit != stash.id;
-                let note = untracked.then_some("untracked");
+                let note = file.is_untracked(stash).then_some("untracked");
                 if file_row(ui, &file.change, open == Some(&key), note).clicked() {
                     actions.push(Action::SelectCommitFile(key));
                 }

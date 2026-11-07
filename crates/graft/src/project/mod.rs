@@ -50,6 +50,16 @@ pub enum Tab {
     Stashes,
 }
 
+impl Tab {
+    pub fn label(self) -> &'static str {
+        match self {
+            Tab::Workspace => "Workspace",
+            Tab::Review => "Review",
+            Tab::Stashes => "Stashes",
+        }
+    }
+}
+
 /// What the Workspace tab shows in its main area.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkspaceView {
@@ -312,7 +322,7 @@ pub enum CheckedOut {
 }
 
 impl CheckedOut {
-    fn of(wt: Option<&graft_core::Worktree>) -> Self {
+    pub fn of(wt: Option<&graft_core::Worktree>) -> Self {
         match wt {
             None => Self::Nowhere,
             Some(wt) if wt.is_main => Self::Main,

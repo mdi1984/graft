@@ -6,6 +6,7 @@
 //! Unchanged lines between hunks show as gap rows that open up on a click;
 //! with "Whole file" every line shows.
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use egui::style::ScrollStyle;
@@ -14,14 +15,14 @@ use egui::{
     Align, Align2, Color32, Frame, Galley, Key, Margin, Painter, Panel, Pos2, Rect, RichText,
     ScrollArea, Sense, Stroke, StrokeKind, Ui, pos2, vec2,
 };
-use graft_core::diff::{FileDiff, Gap, Kind, Source};
+use graft_core::diff::{FileDiff, Gap, Hunk, Kind, Line, Source};
 use graft_core::ops::LineOp;
 use graft_core::syntax::{Spans, Token};
 
-use super::history::paint_change_letter;
+use super::file_row::paint_change_letter;
 use super::icons::Icon;
 use super::widgets::{
-    ButtonKind, button, elided_path, empty_state, icon_button, paint_galley_left, spinner,
+    ButtonKind, button, elided_path, empty_state, icon_button, paint_galley_left, plural, waiting,
 };
 use crate::keys::Command;
 use crate::project::comments::{LineComment, Pick, Placed, Side};
@@ -402,8 +403,7 @@ pub fn body(
         if let Some(error) = &view.error {
             empty_state(ui, "Could not load the diff", error);
         } else {
-            let rect = ui.available_rect_before_wrap();
-            spinner(ui, rect.center(), 9.0, color::text_weak());
+            waiting(ui);
         }
         return;
     };
@@ -416,8 +416,7 @@ pub fn body(
         return;
     }
     if diff.hunks.is_empty() {
-        let detail = if view.key.source == Source::Unstaged && diff.header.starts_with(b"diff --cc")
-        {
+        let detail = if view.key.source == Source::Unstaged && diff.is_combined() {
             "This file has a merge conflict."
         } else {
             "Only the file mode or whitespace changed, or the file is empty."
@@ -436,14 +435,18 @@ pub fn body(
     }
 }
 
-/// A row of the side-by-side view: old line on the left, new on the right.
+type At = (usize, usize);
+
+/// A row of the diff. In the side-by-side view a line row has the old line
+/// on the left and the new one on the right; in the unified view both are
+/// the same line.
 #[derive(Clone, Copy)]
-enum Pair {
+enum Row {
     /// Hidden unchanged lines: gap `.0` of the view.
     Gap(usize),
     Hunk(usize),
     /// Row `.2` of an old and a new line (more than one when they wrap).
-    Lines(Option<(usize, usize)>, Option<(usize, usize)>, usize),
+    Lines(Option<At>, Option<At>, usize),
     /// Row `.1` of comment block `.0`.
     Comment(usize, usize),
 }
@@ -474,39 +477,36 @@ fn layout(diff: &FileDiff, gaps: Option<&[Gap]>, editable: bool) -> Layout {
     }
 }
 
-/// The rows of the side-by-side view; `rows_of` says how many rows a line
-/// takes.
-fn pair_rows(
+/// The rows of the diff, side by side with `split`; `rows_of` says how many
+/// rows a line takes.
+fn rows(
     diff: &FileDiff,
     layout: &Layout,
     blocks: &[Block],
-    rows_of: impl Fn((usize, usize)) -> usize,
-) -> Vec<Pair> {
+    split: bool,
+    rows_of: impl Fn(At) -> usize,
+) -> Vec<Row> {
     let mut rows = Vec::new();
-    let push = |rows: &mut Vec<Pair>, pair: Pair| {
-        let Pair::Lines(left, right, _) = pair else {
-            rows.push(pair);
-            return;
-        };
+    let push = |rows: &mut Vec<Row>, left: Option<At>, right: Option<At>| {
         let parts = [left, right].into_iter().flatten().map(&rows_of).max();
-        rows.extend((0..parts.unwrap_or(1)).map(|part| Pair::Lines(left, right, part)));
+        rows.extend((0..parts.unwrap_or(1)).map(|part| Row::Lines(left, right, part)));
         for (b, block) in blocks.iter().enumerate() {
             if left == Some(block.at) || right == Some(block.at) {
-                rows.extend((0..block.rows).map(|part| Pair::Comment(b, part)));
+                rows.extend((0..block.rows).map(|part| Row::Comment(b, part)));
             }
         }
     };
     for (h, hunk) in diff.hunks.iter().enumerate() {
         if let Some(g) = layout.gap_above[h] {
-            rows.push(Pair::Gap(g));
+            rows.push(Row::Gap(g));
         }
         if layout.header[h] {
-            rows.push(Pair::Hunk(h));
+            rows.push(Row::Hunk(h));
         }
         let mut l = 0;
         while l < hunk.lines.len() {
-            if hunk.lines[l].kind == Kind::Context {
-                push(&mut rows, Pair::Lines(Some((h, l)), Some((h, l)), 0));
+            if !split || hunk.lines[l].kind == Kind::Context {
+                push(&mut rows, Some((h, l)), Some((h, l)));
                 l += 1;
                 continue;
             }
@@ -521,15 +521,12 @@ fn pair_rows(
                 l += 1;
             }
             for i in 0..removed.len().max(added.len()) {
-                push(
-                    &mut rows,
-                    Pair::Lines(removed.get(i).copied(), added.get(i).copied(), 0),
-                );
+                push(&mut rows, removed.get(i).copied(), added.get(i).copied());
             }
         }
     }
     if let Some(g) = layout.gap_after {
-        rows.push(Pair::Gap(g));
+        rows.push(Row::Gap(g));
     }
     rows
 }
@@ -549,7 +546,7 @@ fn side_by_side(
     let char_width = char_width(ui);
     let painter = ui.painter().clone();
     let layout = layout(diff, view.gaps.as_deref(), !view.read_only);
-    let rows = pair_rows(diff, &layout, &blocks, |at| {
+    let rows = rows(diff, &layout, &blocks, true, |at| {
         line_rows(&painter, view, diff, at, wrap_width, char_width)
     });
     ui.spacing_mut().item_spacing.y = 0.0;
@@ -562,30 +559,9 @@ fn side_by_side(
                 let (rect, _) =
                     ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
                 match *row {
-                    Pair::Gap(g) => gap_row(ui, rect, view, g, actions),
-                    Pair::Hunk(h) => {
-                        let hunk = &diff.hunks[h];
-                        let painter = ui.painter();
-                        painter.rect_filled(rect, 0, color::sidebar_bg());
-                        let header = format!(
-                            "@@ -{},{} +{},{} @@ {}",
-                            hunk.old_start,
-                            hunk.old_count,
-                            hunk.new_start,
-                            hunk.new_count,
-                            hunk.section
-                        );
-                        let galley =
-                            painter.layout_no_wrap(header, theme::mono(), color::text_faint());
-                        paint_galley_left(
-                            painter,
-                            rect.left() + 8.0,
-                            rect.center().y,
-                            galley,
-                            color::text_faint(),
-                        );
-                    }
-                    Pair::Lines(left, right, part) => {
+                    Row::Gap(g) => gap_row(ui, rect, view, g, actions),
+                    Row::Hunk(h) => paint_hunk_header(ui, rect, &diff.hunks[h], 8.0),
+                    Row::Lines(left, right, part) => {
                         let mid = rect.center().x;
                         let left_rect = Rect::from_min_max(rect.min, pos2(mid - 1.0, rect.max.y));
                         let right_rect = Rect::from_min_max(pos2(mid + 1.0, rect.min.y), rect.max);
@@ -594,17 +570,13 @@ fn side_by_side(
                             let (Some(marks), Some(at)) = (marks, at) else {
                                 continue;
                             };
-                            let side = Some(if old { Side::Old } else { Side::New });
+                            let side = if old { Side::Old } else { Side::New };
                             let kind = diff.hunks[at.0].lines[at.1].kind;
-                            let picked = marks
-                                .pick
-                                .is_some_and(|p| p.side.is_none_or(|s| Some(s) == side))
-                                && marks.pick.is_some_and(|p| p.contains(at, kind));
-                            if picked {
+                            if marks.pick.is_some_and(|p| p.contains_in(side, at, kind)) {
                                 paint_picked(ui, r);
                             }
                             if ui.rect_contains_pointer(r) {
-                                pick_on_hover(ui, marks, at, side, p, actions);
+                                pick_on_hover(ui, marks, at, Some(side), p, actions);
                             }
                         }
                         ui.painter().line_segment(
@@ -612,7 +584,7 @@ fn side_by_side(
                             Stroke::new(1.0, color::border()),
                         );
                     }
-                    Pair::Comment(b, part) => comment_row(ui, rect, &blocks[b], part, actions),
+                    Row::Comment(b, part) => comment_row(ui, rect, &blocks[b], part, actions),
                 }
             }
         });
@@ -633,20 +605,11 @@ fn half(
 ) {
     let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
     let Some((h, l)) = at else {
-        painter.rect_filled(
-            rect,
-            0,
-            color::sidebar_bg().lerp_to_gamma(color::app_bg(), 0.4),
-        );
+        painter.rect_filled(rect, 0, color::muted_bg());
         return;
     };
     let line = &diff.hunks[h].lines[l];
-    let tint = match line.kind {
-        Kind::Added => Some(color::added()),
-        Kind::Removed => Some(color::removed()),
-        Kind::Context => None,
-    };
-    if let Some(tint) = tint {
+    if let Some(tint) = tint(line.kind) {
         painter.rect_filled(rect, 0, color::app_bg().lerp_to_gamma(tint, 0.09));
     }
     let y = rect.center().y;
@@ -662,38 +625,8 @@ fn half(
             color::text_faint(),
         );
     }
-    let (text, kept) = shown(line.text());
-    let text_color = if tint.is_some() {
-        color::text()
-    } else {
-        color::text_mid()
-    };
-    let galley = code_galley(
-        &painter,
-        text.clone(),
-        spans_at(view, h, l),
-        text_color,
-        wrap,
-    );
-    let origin = match wrap {
-        Some(_) => pos2(rect.left() + NUM + 8.0, rect.top() - part as f32 * ROW),
-        None => pos2(rect.left() + NUM + 8.0, y - galley.size().y / 2.0),
-    };
-    let word = view
-        .highlights
-        .words
-        .get(h)
-        .and_then(|w| w.get(l))
-        .cloned()
-        .flatten();
-    if let (Some(range), Some(tint)) = (word, tint)
-        && !range.is_empty()
-        && range.end <= kept
-    {
-        paint_word(&painter, &galley, origin, &text, range, tint);
-    }
-    let too_wide = wrap.is_none() && origin.x + galley.size().x > rect.right();
-    painter.galley(origin, galley, text_color);
+    let code = paint_code(&painter, rect, NUM + 8.0, view, line, (h, l), part, wrap);
+    let too_wide = wrap.is_none() && code.end.x > rect.right();
     if too_wide && ui.rect_contains_pointer(rect) {
         egui::Tooltip::always_open(
             ui.ctx().clone(),
@@ -701,7 +634,77 @@ fn half(
             ui.scope_id().with(("line-tip", h, l, old)),
             egui::PopupAnchor::Pointer,
         )
-        .show(|ui| ui.label(RichText::new(&text).font(theme::mono())));
+        .show(|ui| ui.label(RichText::new(&code.text).font(theme::mono())));
+    }
+}
+
+/// The background tint of a changed line.
+fn tint(kind: Kind) -> Option<Color32> {
+    match kind {
+        Kind::Added => Some(color::added()),
+        Kind::Removed => Some(color::removed()),
+        Kind::Context => None,
+    }
+}
+
+fn word_at(view: &DiffView, (h, l): At) -> Option<Range<usize>> {
+    view.highlights.words.get(h)?.get(l)?.clone()
+}
+
+/// What [`paint_code`] drew.
+struct Code {
+    text: String,
+    /// The end of its last row.
+    end: Pos2,
+}
+
+/// The text of the line at `at`, from `x` in `rect`: its syntax colors and
+/// changed words. Row `part` of it when it wraps at `wrap`; a wrapped line
+/// paints all of its text, clipped to this row.
+#[allow(clippy::too_many_arguments)]
+fn paint_code(
+    painter: &Painter,
+    rect: Rect,
+    x: f32,
+    view: &DiffView,
+    line: &Line,
+    at: At,
+    part: usize,
+    wrap: Option<f32>,
+) -> Code {
+    let (text, kept) = shown(line.text());
+    let text_color = if line.is_change() {
+        color::text()
+    } else {
+        color::text_mid()
+    };
+    let galley = code_galley(
+        painter,
+        text.clone(),
+        spans_at(view, at.0, at.1),
+        text_color,
+        wrap,
+    );
+    let origin = match wrap {
+        Some(_) => pos2(rect.left() + x, rect.top() - part as f32 * ROW),
+        None => pos2(rect.left() + x, rect.center().y - galley.size().y / 2.0),
+    };
+    if let (Some(range), Some(tint)) = (word_at(view, at), tint(line.kind))
+        && !range.is_empty()
+        && range.end <= kept
+    {
+        paint_word(painter, &galley, origin, &text, range, tint);
+    }
+    let end = galley
+        .rows
+        .last()
+        .map_or(pos2(0.0, galley.size().y / 2.0), |row| {
+            row.rect().right_center()
+        });
+    painter.galley(origin, galley, text_color);
+    Code {
+        text,
+        end: origin + end.to_vec2(),
     }
 }
 
@@ -721,15 +724,12 @@ fn header(
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 let path = view.key.path.clone();
-                let (stats, change) = match &view.diff {
-                    Some(d) => (format!("+{}  −{}", d.added(), d.removed()), d),
-                    None => (String::new(), &FileDiff::default()),
-                };
-                let letter = match view.key.source {
-                    Source::Untracked => graft_core::status::Change::Added,
-                    _ if change.new_file => graft_core::status::Change::Added,
-                    _ if change.deleted_file => graft_core::status::Change::Deleted,
-                    _ => graft_core::status::Change::Modified,
+                let (stats, letter) = match &view.diff {
+                    Some(d) => (
+                        format!("+{}  −{}", d.added(), d.removed()),
+                        d.change(&view.key.source),
+                    ),
+                    None => (String::new(), FileDiff::default().change(&view.key.source)),
                 };
                 let (rect, _) = ui.allocate_exact_size(vec2(18.0, 30.0), Sense::hover());
                 paint_change_letter(ui, rect.left(), rect.center().y, letter);
@@ -751,13 +751,7 @@ fn header(
                     room,
                 );
                 let (rect, _) = ui.allocate_exact_size(vec2(galley.size().x, 30.0), Sense::hover());
-                paint_galley_left(
-                    ui.painter(),
-                    rect.left(),
-                    rect.center().y,
-                    galley,
-                    color::text(),
-                );
+                paint_galley_left(ui.painter(), rect.left(), rect.center().y, galley);
                 ui.label(
                     RichText::new(side)
                         .color(color::text_faint())
@@ -862,11 +856,15 @@ fn selection_bar(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Act
             ui.horizontal(|ui| {
                 let n = view.selection.len();
                 ui.label(
-                    RichText::new(format!("{n} line{} selected", if n == 1 { "" } else { "s" }))
+                    RichText::new(format!("{} selected", plural(n, "line")))
                         .font(theme::semibold(theme::BODY_SIZE))
                         .color(color::text()),
                 );
-                ui.label(RichText::new("Shift-click or drag to select more · Esc clears").color(color::text_faint()).size(theme::SMALL_SIZE));
+                ui.label(
+                    RichText::new("Shift-click or drag to select more · Esc clears")
+                        .color(color::text_faint())
+                        .size(theme::SMALL_SIZE),
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     match view.key.source {
                         Source::Staged => {
@@ -878,12 +876,13 @@ fn selection_bar(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Act
                             if button(ui, "Stage lines", ButtonKind::Primary, !busy).clicked() {
                                 actions.push(Action::LinesOp(LineOp::Stage));
                             }
-                            if button(ui, "Discard lines…", ButtonKind::Secondary, !busy).clicked() {
+                            if button(ui, "Discard lines…", ButtonKind::Secondary, !busy).clicked()
+                            {
                                 actions.push(Action::Ask(Box::new(Confirm {
                                     title: "Discard the selected lines?".to_owned(),
                                     body: format!(
-                                        "{n} selected line{} in {} will be reverted. This cannot be undone.",
-                                        if n == 1 { "" } else { "s" },
+                                        "{} in {} will be reverted. This cannot be undone.",
+                                        plural(n, "selected line"),
                                         view.key.path
                                     ),
                                     confirm_label: "Discard lines".to_owned(),
@@ -899,17 +898,6 @@ fn selection_bar(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Vec<Act
                 });
             });
         });
-}
-
-#[derive(Clone, Copy)]
-enum Row {
-    /// Hidden unchanged lines: gap `.0` of the view.
-    Gap(usize),
-    Hunk(usize),
-    /// Row `.2` of a line (more than one when it wraps).
-    Line(usize, usize, usize),
-    /// Row `.1` of comment block `.0`.
-    Comment(usize, usize),
 }
 
 fn lines(
@@ -928,27 +916,9 @@ fn lines(
     let char_width = char_width(ui);
     let painter = ui.painter().clone();
     let layout = layout(diff, view.gaps.as_deref(), !view.read_only);
-    let mut rows = Vec::new();
-    for (h, hunk) in diff.hunks.iter().enumerate() {
-        if let Some(g) = layout.gap_above[h] {
-            rows.push(Row::Gap(g));
-        }
-        if layout.header[h] {
-            rows.push(Row::Hunk(h));
-        }
-        for l in 0..hunk.lines.len() {
-            let parts = line_rows(&painter, view, diff, (h, l), wrap_width, char_width);
-            rows.extend((0..parts).map(|part| Row::Line(h, l, part)));
-            for (b, block) in blocks.iter().enumerate() {
-                if block.at == (h, l) {
-                    rows.extend((0..block.rows).map(|part| Row::Comment(b, part)));
-                }
-            }
-        }
-    }
-    if let Some(g) = layout.gap_after {
-        rows.push(Row::Gap(g));
-    }
+    let rows = rows(diff, &layout, &blocks, false, |at| {
+        line_rows(&painter, view, diff, at, wrap_width, char_width)
+    });
     let content_width = if wrap {
         width
     } else {
@@ -956,7 +926,8 @@ fn lines(
             .hunks
             .iter()
             .flat_map(|h| &h.lines)
-            .map(|l| l.content.len())
+            // Cut lines end in "… N more characters".
+            .map(|l| l.content.len().min(MAX_SHOWN_CHARS + 30))
             .max()
             .unwrap_or(0);
         (text_x + longest as f32 * char_width + 40.0).max(width)
@@ -979,62 +950,38 @@ fn lines(
                     Row::Gap(g) => gap_row(ui, rect, view, g, actions),
                     Row::Hunk(h) => hunk_row(ui, rect, view, diff, h, busy, actions),
                     Row::Comment(b, part) => comment_row(ui, rect, &blocks[b], part, actions),
-                    Row::Line(h, l, part) if marks.is_some() => {
-                        let marks = marks.expect("checked");
-                        let line = &diff.hunks[h].lines[l];
-                        let word = view
-                            .highlights
-                            .words
-                            .get(h)
-                            .and_then(|w| w.get(l))
-                            .cloned()
-                            .flatten();
-                        let text = LineText {
-                            spans: spans_at(view, h, l),
-                            word,
-                            x: text_x,
-                            part,
-                            wrap: wrap_width,
-                        };
-                        paint_line(ui, rect, line, &text, false, false);
-                        if marks.pick.is_some_and(|p| p.contains((h, l), line.kind)) {
-                            paint_picked(ui, rect);
-                        }
-                        if ui.rect_contains_pointer(rect) && ui.is_rect_visible(rect) {
-                            pick_on_hover(ui, marks, (h, l), None, p, actions);
-                        }
-                    }
-                    Row::Line(h, l, part) => {
-                        let line = &diff.hunks[h].lines[l];
-                        let selected = view.selection.contains(&(h, l));
-                        let word = view
-                            .highlights
-                            .words
-                            .get(h)
-                            .and_then(|w| w.get(l))
-                            .cloned()
-                            .flatten();
-                        let editable = !view.read_only;
-                        let text = LineText {
-                            spans: spans_at(view, h, l),
-                            word,
-                            x: text_x,
-                            part,
-                            wrap: wrap_width,
-                        };
-                        paint_line(ui, rect, line, &text, selected, editable);
+                    Row::Lines(None, None, _) => {}
+                    Row::Lines(left, right, part) => {
+                        let at = left.or(right).expect("one side");
+                        let line = &diff.hunks[at.0].lines[at.1];
+                        // Review picks lines to comment on; File status
+                        // selects them to stage.
+                        let editable = marks.is_none() && !view.read_only;
+                        let selected = editable && view.selection.contains(&at);
+                        paint_line(
+                            ui, rect, view, line, at, part, text_x, wrap_width, selected, editable,
+                        );
                         let hovered = ui.rect_contains_pointer(rect) && ui.is_rect_visible(rect);
-                        let selectable = line.is_change() && editable;
-                        if selectable && hovered {
+                        if let Some(marks) = marks {
+                            if marks.pick.is_some_and(|p| p.contains(at, line.kind)) {
+                                paint_picked(ui, rect);
+                            }
+                            if hovered {
+                                pick_on_hover(ui, marks, at, None, p, actions);
+                            }
+                        } else if editable && line.is_change() && hovered {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                             if p.pressed {
                                 actions.push(Action::ClickLine {
-                                    hunk: h,
-                                    line: l,
+                                    hunk: at.0,
+                                    line: at.1,
                                     shift: p.shift,
                                 });
-                            } else if p.down && view.anchor.is_some_and(|a| a != (h, l)) {
-                                actions.push(Action::DragLine { hunk: h, line: l });
+                            } else if p.down && view.anchor.is_some_and(|a| a != at) {
+                                actions.push(Action::DragLine {
+                                    hunk: at.0,
+                                    line: at.1,
+                                });
                             }
                         }
                     }
@@ -1052,21 +999,7 @@ fn hunk_row(
     busy: bool,
     actions: &mut Vec<Action>,
 ) {
-    let hunk = &diff.hunks[h];
-    let painter = ui.painter();
-    painter.rect_filled(rect, 0, color::sidebar_bg());
-    let header = format!(
-        "@@ -{},{} +{},{} @@ {}",
-        hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count, hunk.section
-    );
-    let galley = painter.layout_no_wrap(header, theme::mono(), color::text_faint());
-    paint_galley_left(
-        painter,
-        rect.left() + GUTTER,
-        rect.center().y,
-        galley,
-        color::text_faint(),
-    );
+    paint_hunk_header(ui, rect, &diff.hunks[h], GUTTER);
 
     if view.read_only {
         return;
@@ -1108,9 +1041,22 @@ fn hunk_row(
     }
 }
 
+/// "@@ -1,4 +1,5 @@ fn main", at `x` in `rect`.
+fn paint_hunk_header(ui: &Ui, rect: Rect, hunk: &Hunk, x: f32) {
+    let painter = ui.painter();
+    painter.rect_filled(rect, 0, color::sidebar_bg());
+    let header = format!(
+        "@@ -{},{} +{},{} @@ {}",
+        hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count, hunk.section
+    );
+    let galley = painter.layout_no_wrap(header, theme::mono(), color::text_faint());
+    paint_galley_left(painter, rect.left() + x, rect.center().y, galley);
+}
+
+/// A label for [`small_button`], which picks its color.
 fn small_galley(ui: &Ui, label: &str) -> Arc<Galley> {
     ui.painter()
-        .layout_no_wrap(label.to_owned(), theme::small(), color::text())
+        .layout_no_wrap(label.to_owned(), theme::small(), Color32::PLACEHOLDER)
 }
 
 /// A small button inside a diff row.
@@ -1157,17 +1103,13 @@ fn gap_row(ui: &mut Ui, rect: Rect, view: &DiffView, g: usize, actions: &mut Vec
         return;
     };
     let painter = ui.painter();
-    painter.rect_filled(
-        rect,
-        0,
-        color::sidebar_bg().lerp_to_gamma(color::app_bg(), 0.5),
-    );
+    painter.rect_filled(rect, 0, color::muted_bg());
     let n = gap.len();
-    let label = format!("{n} unchanged line{}", if n == 1 { "" } else { "s" });
+    let label = plural(n as usize, "unchanged line");
     let galley = painter.layout_no_wrap(label, theme::small(), color::text_faint());
     let left = ui.clip_rect().left().max(rect.left()) + GUTTER;
     let mut x = left + galley.size().x + 12.0;
-    paint_galley_left(painter, left, rect.center().y, galley, color::text_faint());
+    paint_galley_left(painter, left, rect.center().y, galley);
 
     let lines = gap.lines.clone();
     let mut buttons = Vec::new();
@@ -1212,38 +1154,28 @@ fn gap_row(ui: &mut Ui, rect: Rect, view: &DiffView, g: usize, actions: &mut Vec
     }
 }
 
-/// What to draw as a line's text: its syntax colors and changed words,
-/// where the text starts, and which of its wrapped rows this is.
-struct LineText<'a> {
-    spans: Option<&'a Spans>,
-    word: Option<std::ops::Range<usize>>,
-    x: f32,
-    part: usize,
-    wrap: Option<f32>,
-}
-
-/// Row `text.part` of a line. The gutter shows on its first row only; a
-/// wrapped line paints all of its text, clipped to this row.
+/// Row `part` of the line at `at` in the unified view, its text at `text_x`.
+/// The gutter shows on its first row only.
+#[allow(clippy::too_many_arguments)]
 fn paint_line(
     ui: &Ui,
     rect: Rect,
-    line: &graft_core::diff::Line,
-    text: &LineText,
+    view: &DiffView,
+    line: &Line,
+    at: At,
+    part: usize,
+    text_x: f32,
+    wrap: Option<f32>,
     selected: bool,
     selectable: bool,
 ) {
     let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
-    let tint = match line.kind {
-        Kind::Added => Some(color::added()),
-        Kind::Removed => Some(color::removed()),
-        Kind::Context => None,
-    };
-    if let Some(tint) = tint {
+    if let Some(tint) = tint(line.kind) {
         let strength = if selected { 0.22 } else { 0.09 };
         painter.rect_filled(rect, 0, color::app_bg().lerp_to_gamma(tint, strength));
     }
     let y = rect.center().y;
-    let first = text.part == 0;
+    let first = part == 0;
 
     // Selection box in the gutter.
     if line.is_change() && selectable && first {
@@ -1258,20 +1190,13 @@ fn paint_line(
                 ],
                 Stroke::new(1.6, color::on_accent()),
             );
-        } else if ui.rect_contains_pointer(rect) {
-            painter.rect_stroke(
-                b,
-                3,
-                Stroke::new(1.0, color::text_weak()),
-                StrokeKind::Inside,
-            );
         } else {
-            painter.rect_stroke(
-                b,
-                3,
-                Stroke::new(1.0, color::control_border()),
-                StrokeKind::Inside,
-            );
+            let border = if ui.rect_contains_pointer(rect) {
+                color::text_weak()
+            } else {
+                color::control_border()
+            };
+            painter.rect_stroke(b, 3, Stroke::new(1.0, border), StrokeKind::Inside);
         }
     }
 
@@ -1303,40 +1228,10 @@ fn paint_line(
         );
     }
 
-    let (shown_text, kept) = shown(line.text());
-    let text_color = if line.kind == Kind::Context {
-        color::text_mid()
-    } else {
-        color::text()
-    };
-    let galley = code_galley(
-        &painter,
-        shown_text.clone(),
-        text.spans,
-        text_color,
-        text.wrap,
-    );
-    let origin = match text.wrap {
-        Some(_) => pos2(rect.left() + text.x, rect.top() - text.part as f32 * ROW),
-        None => pos2(rect.left() + text.x, y - galley.size().y / 2.0),
-    };
-    if let (Some(range), Some(tint)) = (text.word.clone(), tint)
-        && !range.is_empty()
-        && range.end <= kept
-    {
-        paint_word(&painter, &galley, origin, &shown_text, range, tint);
-    }
-    // The note goes after the end of the text, on its last row.
-    let end = galley
-        .rows
-        .last()
-        .map_or(pos2(0.0, galley.size().y / 2.0), |row| {
-            row.rect().right_center()
-        });
-    painter.galley(origin, galley, text_color);
+    let code = paint_code(&painter, rect, text_x, view, line, at, part, wrap);
     if line.no_newline {
         painter.text(
-            origin + end.to_vec2() + vec2(8.0, 0.0),
+            code.end + vec2(8.0, 0.0),
             Align2::LEFT_CENTER,
             "no newline at end of file",
             theme::small(),
@@ -1374,14 +1269,20 @@ mod tests {
             ..Default::default()
         };
         let layout = layout(&diff, None, false);
-        let rows = pair_rows(&diff, &layout, &[], |(_, l)| if l == 1 { 3 } else { 1 });
+        let rows = rows(
+            &diff,
+            &layout,
+            &[],
+            true,
+            |(_, l)| if l == 1 { 3 } else { 1 },
+        );
         let shape: Vec<String> = rows
             .iter()
             .map(|row| match row {
-                Pair::Gap(g) => format!("gap {g}"),
-                Pair::Hunk(h) => format!("hunk {h}"),
-                Pair::Lines(old, new, part) => format!("{old:?} {new:?} {part}"),
-                Pair::Comment(b, part) => format!("comment {b} {part}"),
+                Row::Gap(g) => format!("gap {g}"),
+                Row::Hunk(h) => format!("hunk {h}"),
+                Row::Lines(old, new, part) => format!("{old:?} {new:?} {part}"),
+                Row::Comment(b, part) => format!("comment {b} {part}"),
             })
             .collect();
         assert_eq!(

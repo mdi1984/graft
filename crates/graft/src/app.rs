@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::{Receiver, Sender};
-use egui::{CentralPanel, Frame, Key, KeyboardShortcut, Margin, Modifiers, Panel};
+use egui::{CentralPanel, Frame, Margin, Panel};
 use graft_core::jobs::{JobPool, Waker};
 use graft_core::repo::{self, Location, Progress};
 use graft_core::{CancelToken, Console, JobError, Panicked, same_path};
@@ -144,7 +144,7 @@ impl GraftApp {
                     .and_then(|p| p.parent())
                     .map(Path::to_path_buf)
             })
-            .unwrap_or_else(default_clone_parent);
+            .unwrap_or_else(crate::settings::default_clone_parent);
         let mut reviews = persisted.reviews;
         let mut slashed = persisted.slashed;
         let settings = persisted.settings;
@@ -419,7 +419,7 @@ impl GraftApp {
         let name = form.name.trim().to_owned();
         match form.target {
             GroupTarget::New(root) => {
-                let (id, _) = groups::next_id_and_color(&self.groups, color::lanes().len());
+                let (id, _) = groups::next_id_and_color(&self.groups, color::GROUP_COUNT);
                 self.groups.push(TabGroup {
                     id,
                     name,
@@ -544,7 +544,7 @@ impl GraftApp {
             TabAction::ToggleGroup(id) => self.toggle_group(id),
             TabAction::NewGroup(i) => {
                 if let Some(p) = self.projects.get(i) {
-                    let (_, color) = groups::next_id_and_color(&self.groups, color::lanes().len());
+                    let (_, color) = groups::next_id_and_color(&self.groups, color::GROUP_COUNT);
                     self.group_form = Some(GroupForm::new(
                         GroupTarget::New(p.root.clone()),
                         String::new(),
@@ -747,11 +747,8 @@ impl GraftApp {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        let ctrl = Modifiers::COMMAND;
         let keys = self.settings.keys.clone();
         let pressed = |command| keys.pressed(ctx, command);
-        // Fixed extras next to the configurable shortcuts (keys::FIXED).
-        let fixed = |mods, key| keys::fixed_pressed(ctx, KeyboardShortcut::new(mods, key));
 
         if pressed(Command::Settings) {
             self.open_settings();
@@ -772,9 +769,9 @@ impl GraftApp {
         let count = self.projects.len();
         if count > 0 {
             let current = self.active.unwrap_or(count - 1);
-            if pressed(Command::PreviousTab) || fixed(ctrl, Key::PageUp) {
+            if pressed(Command::PreviousTab) {
                 self.activate(Some((current + count - 1) % count));
-            } else if pressed(Command::NextTab) || fixed(ctrl, Key::PageDown) {
+            } else if pressed(Command::NextTab) {
                 let next = if self.active.is_some() {
                     (current + 1) % count
                 } else {
@@ -782,29 +779,16 @@ impl GraftApp {
                 };
                 self.activate(Some(next));
             }
-            let digits = [
-                Key::Num1,
-                Key::Num2,
-                Key::Num3,
-                Key::Num4,
-                Key::Num5,
-                Key::Num6,
-                Key::Num7,
-                Key::Num8,
-                Key::Num9,
-            ];
-            for (n, key) in digits.into_iter().enumerate() {
-                if n < count && fixed(ctrl, key) {
-                    self.activate(Some(n));
-                }
+            if let Some(n) = keys::go_to_tab(ctx, count) {
+                self.activate(Some(n));
             }
         }
-        if (pressed(Command::Refresh) || fixed(ctrl, Key::R))
+        if pressed(Command::Refresh)
             && let Some(i) = self.active
         {
             self.projects[i].refresh();
         }
-        if pressed(Command::Console) || fixed(ctrl, Key::Backtick) {
+        if pressed(Command::Console) {
             self.console_open = !self.console_open;
         }
         if pressed(Command::WrapLines) {
@@ -1104,7 +1088,10 @@ impl eframe::App for GraftApp {
                 }
                 let action = CentralPanel::no_frame()
                     .frame(Frame::new().fill(color::app_bg()))
-                    .show(ui, |ui| self.start.show(ui, &self.recent, &self.groups))
+                    .show(ui, |ui| {
+                        self.start
+                            .show(ui, &self.recent, &self.groups, &self.settings.keys)
+                    })
                     .inner;
                 if let Some(action) = action {
                     self.on_start_action(action);
@@ -1155,11 +1142,4 @@ impl eframe::App for GraftApp {
 fn take_reviews<T: Default>(reviews: &mut HashMap<PathBuf, T>, root: &Path) -> T {
     let key = reviews.keys().find(|k| same_path(k, root)).cloned();
     key.and_then(|k| reviews.remove(&k)).unwrap_or_default()
-}
-
-/// Where clones go when the user has not picked a folder yet.
-pub fn default_clone_parent() -> PathBuf {
-    std::env::var_os("USERPROFILE")
-        .map(|home| PathBuf::from(home).join("source").join("repos"))
-        .unwrap_or_else(|| PathBuf::from(r"C:\dev"))
 }

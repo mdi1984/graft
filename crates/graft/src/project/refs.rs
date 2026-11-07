@@ -70,6 +70,46 @@ pub enum DialogKind {
     },
 }
 
+impl DialogKind {
+    /// A new branch at `start`, checked out once created.
+    pub fn new_branch(start: impl Into<String>, start_label: impl Into<String>) -> Self {
+        Self::NewBranch {
+            name: String::new(),
+            start: start.into(),
+            start_label: start_label.into(),
+            checkout: true,
+        }
+    }
+
+    pub fn stash() -> Self {
+        Self::Stash {
+            message: String::new(),
+            include_untracked: true,
+            keep_index: false,
+            staged_only: false,
+        }
+    }
+
+    /// Add a remote; the first one is suggested as `origin`.
+    pub fn add_remote(first: bool) -> Self {
+        Self::Remote {
+            original: None,
+            name: if first { "origin" } else { "" }.to_owned(),
+            url: String::new(),
+            fetch: true,
+        }
+    }
+
+    pub fn edit_remote(name: &str, url: &str) -> Self {
+        Self::Remote {
+            original: Some(name.to_owned()),
+            name: name.to_owned(),
+            url: url.to_owned(),
+            fetch: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Dialog {
     pub kind: DialogKind,

@@ -176,6 +176,12 @@ pub struct CommitForm {
 }
 
 impl CommitForm {
+    /// Can it be committed, with `staged` files staged? Amending needs no
+    /// staged files.
+    pub fn ready(&self, staged: usize) -> bool {
+        !self.summary.trim().is_empty() && (staged > 0 || self.amend)
+    }
+
     pub fn message(&self) -> String {
         let summary = self.summary.trim();
         let body = self.body.trim();

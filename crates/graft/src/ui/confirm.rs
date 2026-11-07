@@ -1,20 +1,16 @@
 //! A modal question before destructive actions (discard, delete).
 
-use egui::{Id, Key, RichText};
+use egui::RichText;
 
-use super::widgets::{ButtonKind, button};
+use super::widgets::dialog;
+use super::widgets::{ButtonKind, button, title};
 use crate::project::{Action, Confirm};
 use crate::theme::{self, color};
 
 pub fn show(ctx: &egui::Context, confirm: &Confirm, actions: &mut Vec<Action>) {
-    let response = super::widgets::modal(ctx, Id::unique("confirm-modal")).show(ctx, |ui| {
-        ui.set_width(420.0);
+    let shown = dialog::show(ctx, "confirm-modal", 420.0, false, |ui| {
         ui.spacing_mut().item_spacing.y = 8.0;
-        ui.label(
-            RichText::new(&confirm.title)
-                .font(theme::semibold(15.0))
-                .color(color::text()),
-        );
+        title(ui, &confirm.title);
         ui.add_space(2.0);
         ui.add(egui::Label::new(RichText::new(&confirm.body).color(color::text_mid())).wrap());
         ui.add_space(10.0);
@@ -29,7 +25,7 @@ pub fn show(ctx: &egui::Context, confirm: &Confirm, actions: &mut Vec<Action>) {
             });
         });
     });
-    if response.should_close() || ctx.input(|i| i.key_pressed(Key::Escape)) {
+    if shown.cancel {
         actions.push(Action::ConfirmNo);
     }
 }

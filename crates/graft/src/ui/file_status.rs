@@ -1,13 +1,15 @@
 //! File status: staged files above unstaged files on the left, the selected
 //! file's diff on the right, and the commit box across the bottom.
 
-use egui::{Frame, Margin, Panel, Rect, RichText, ScrollArea, Sense, Stroke, Ui, pos2, vec2};
+use egui::{
+    Color32, Frame, Margin, Panel, Rect, RichText, ScrollArea, Sense, Stroke, Ui, pos2, vec2,
+};
 use graft_core::status::{Change, StatusEntry, WorktreeStatus};
 
-use super::history::{paint_change_letter, paint_path};
+use super::file_row;
 use super::icons::Icon;
 use super::widgets::{
-    ButtonKind, button, empty_state, paint_icon_button, section_heading, text_field,
+    ButtonKind, button, empty_state, hint, paint_icon_button, plural, section_heading, text_field,
 };
 use super::{conflicts, diff_view};
 use crate::keys::{Command, Keymap};
@@ -170,7 +172,7 @@ fn file_lists(ui: &mut Ui, project: &Project, status: &WorktreeStatus, actions: 
                 actions.push(Action::UnstageFiles(all_staged));
             }
             if staged.is_empty() {
-                hint(ui, "Stage files, hunks or lines to commit them.");
+                list_hint(ui, "Stage files, hunks or lines to commit them.");
             }
             for entry in &staged {
                 let key = FileKey::of(entry, true);
@@ -200,7 +202,7 @@ fn file_lists(ui: &mut Ui, project: &Project, status: &WorktreeStatus, actions: 
                 actions.push(Action::StageFiles(all_unstaged));
             }
             if unstaged.is_empty() {
-                hint(ui, "No unstaged changes.");
+                list_hint(ui, "No unstaged changes.");
             }
             for entry in &unstaged {
                 let key = FileKey::of(entry, false);
@@ -236,7 +238,7 @@ fn section(ui: &mut Ui, title: &str, count: usize, link: Option<(&str, &str)>, b
     };
     let galley = ui
         .painter()
-        .layout_no_wrap(link.to_owned(), theme::small(), color::ahead_fg());
+        .layout_no_wrap(link.to_owned(), theme::small(), Color32::PLACEHOLDER);
     let r = Rect::from_min_size(
         pos2(rect.right() - galley.size().x - 8.0, rect.top() + 3.0),
         vec2(galley.size().x + 6.0, 18.0),
@@ -260,13 +262,10 @@ fn section(ui: &mut Ui, title: &str, count: usize, link: Option<(&str, &str)>, b
     response.clicked() && !busy
 }
 
-fn hint(ui: &mut Ui, text: &str) {
+/// A note in an empty section.
+fn list_hint(ui: &mut Ui, text: &str) {
     ui.add_space(2.0);
-    ui.label(
-        RichText::new(text)
-            .color(color::text_faint())
-            .size(theme::SMALL_SIZE),
-    );
+    hint(ui, text);
     ui.add_space(2.0);
 }
 
@@ -283,25 +282,16 @@ fn file_row(
     keys: &Keymap,
     actions: &mut Vec<Action>,
 ) {
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
-    let painter = ui.painter();
-    if selected {
-        painter.rect_filled(rect, RADIUS, color::selected_row_bg());
-    } else if response.hovered() {
-        painter.rect_filled(rect, RADIUS, color::hover_row_bg());
-    }
+    let (rect, response) = file_row::allocate(ui, selected, Sense::click());
     let y = rect.center().y;
-    paint_change_letter(ui, rect.left() + 6.0, y, change);
-
     let button_rect = Rect::from_center_size(pos2(rect.right() - 14.0, y), vec2(20.0, 20.0));
     let show_button = stage.is_some() && (response.hovered() || selected) && !busy;
-    let x = rect.left() + 30.0;
     let right = if show_button {
         button_rect.left() - 6.0
     } else {
         rect.right() - 6.0
     };
-    paint_path(ui, x, y, &entry.path, right - x);
+    file_row::paint_file(ui, rect.left() + 6.0, y, change, &entry.path, right);
 
     let paths = vec![entry.path.clone()];
     let toggle = |actions: &mut Vec<Action>| match stage {
@@ -344,14 +334,9 @@ fn file_row(
             actions.push(Action::SelectFile(key.clone()));
         }
     }
-    let tip = match &entry.orig_path {
-        Some(orig) => format!("{orig} → {}", entry.path),
-        None => entry.path.clone(),
-    };
-    let response = response.on_hover_text(tip);
+    let response = response.on_hover_text(file_row::tip(&entry.path, entry.orig_path.as_deref()));
     let item = |label: &str, command| {
-        let shortcut = keys.get(command).map(crate::keys::format);
-        egui::Button::new(label).shortcut_text(shortcut.unwrap_or_default())
+        egui::Button::new(label).shortcut_text(keys.text(command).unwrap_or_default())
     };
     response.context_menu(|ui| {
         match stage {
@@ -375,14 +360,7 @@ fn file_row(
             _ => {}
         }
         ui.separator();
-        if ui.button("File history").clicked() {
-            actions.push(Action::OpenFileHistory(entry.path.clone()));
-            ui.close();
-        }
-        if ui.button("Copy path").clicked() {
-            ui.ctx().copy_text(entry.path.clone());
-            ui.close();
-        }
+        file_row::menu_items(ui, &entry.path, actions);
         if ui.button("Open file").clicked() {
             actions.push(Action::OpenPath(entry.path.clone()));
             ui.close();
@@ -448,7 +426,7 @@ fn commit_box(
         }
         ui.checkbox(&mut form.push_after, "Push after commit");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let ready = !form.summary.trim().is_empty() && (staged > 0 || form.amend) && !busy;
+            let ready = form.ready(staged) && !busy;
             let label = if form.amend { "Amend commit" } else { "Commit" };
             let keys = &project.settings.keys;
             let clicked = button(ui, label, ButtonKind::Primary, ready)
@@ -461,7 +439,7 @@ fn commit_box(
             let note = match (staged, form.amend) {
                 (0, false) => "Nothing staged yet".to_owned(),
                 (0, true) => "Rewords the last commit".to_owned(),
-                (n, _) => format!("{n} file{} staged", if n == 1 { "" } else { "s" }),
+                (n, _) => format!("{} staged", plural(n, "file")),
             };
             ui.label(RichText::new(note).color(color::text_weak()));
         });

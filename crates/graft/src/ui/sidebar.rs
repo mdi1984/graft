@@ -2,15 +2,17 @@
 //! TAGS, and STASHES.
 
 use egui::{Id, Rect, Response, ScrollArea, Sense, Stroke, Ui, pos2, vec2};
-use graft_core::{Branch, RemoteBranch, RepoSnapshot, Upstream, Worktree, same_path};
+use graft_core::console::redact;
+use graft_core::{Branch, RemoteBranch, RepoSnapshot, Upstream, Worktree, same_path, wsl};
 
+use super::branch_menu;
 use super::icons::Icon;
 use super::widgets::{
-    self, Badge, ICON_SIZE, elided, elided_path, paint_badges_right, paint_galley_left, paint_icon,
-    paint_row_bg, section_heading,
+    self, Badge, ICON_SIZE, checkout_color, elided, elided_path, menu_item, paint_badges_right,
+    paint_galley_left, paint_icon, paint_row_bg, plural, section_heading,
 };
 use crate::project::{
-    Action, Confirm, DialogKind, Project, RemoteOp, Tab, WorkspaceView, merge_dialog,
+    Action, CheckedOut, Confirm, DialogKind, Project, RemoteOp, Tab, WorkspaceView, merge_dialog,
 };
 use crate::theme::{self, color};
 
@@ -206,7 +208,7 @@ fn folder_row(ui: &mut Ui, id: Id, name: &str, count: usize, indent: f32, marked
 
     let count = painter.layout_no_wrap(count.to_string(), theme::small(), color::text_faint());
     let count_x = rect.right() - PAD_X - count.size().x;
-    paint_galley_left(painter, count_x, y, count, color::text_faint());
+    paint_galley_left(painter, count_x, y, count);
     let x = rect.left() + indent + 32.0;
     let label = elided(
         ui,
@@ -215,7 +217,7 @@ fn folder_row(ui: &mut Ui, id: Id, name: &str, count: usize, indent: f32, marked
         color::text_mid(),
         count_x - 6.0 - x,
     );
-    paint_galley_left(ui.painter(), x, y, label, color::text_mid());
+    paint_galley_left(ui.painter(), x, y, label);
     if response.clicked() {
         open = !open;
         ui.data_mut(|d| d.insert_persisted(id, open));
@@ -264,7 +266,6 @@ fn collapsible(ui: &mut Ui, title: &str, count: usize, default_open: bool) -> bo
         rect.right() - PAD_X - count.size().x,
         y,
         count,
-        color::text_faint(),
     );
     if response.clicked() {
         open = !open;
@@ -293,7 +294,7 @@ fn nav_row(ui: &mut Ui, icon: Icon, label: &str, selected: bool, badge: Option<B
         color::text(),
         badges_x - 6.0 - text_x,
     );
-    paint_galley_left(painter, text_x, y, text, color::text());
+    paint_galley_left(painter, text_x, y, text);
     response
 }
 
@@ -308,10 +309,8 @@ fn worktree_row(ui: &mut Ui, wt: &Worktree, selected: bool) -> Response {
     // branch dots below); the row background shows which one is selected.
     let icon_color = if wt.prunable {
         color::text_faint()
-    } else if wt.is_main {
-        color::accent()
     } else {
-        color::branch_dot_agent()
+        checkout_color(CheckedOut::of(Some(wt)))
     };
     paint_icon(
         painter,
@@ -348,7 +347,7 @@ fn worktree_row(ui: &mut Ui, wt: &Worktree, selected: bool) -> Response {
         color::text()
     };
     let branch = elided(ui, &wt.label(), theme::mono(), fg, badges_x - 6.0 - text_x);
-    paint_galley_left(painter, text_x, top_y, branch, fg);
+    paint_galley_left(painter, text_x, top_y, branch);
     let path = if wt.is_main {
         format!("{}  · main folder", graft_core::wsl::display(&wt.path))
     } else {
@@ -361,7 +360,7 @@ fn worktree_row(ui: &mut Ui, wt: &Worktree, selected: bool) -> Response {
         color::text_weak(),
         rect.right() - PAD_X - text_x,
     );
-    paint_galley_left(painter, text_x, bottom_y, path, color::text_weak());
+    paint_galley_left(painter, text_x, bottom_y, path);
 
     response.on_hover_text(graft_core::wsl::display(&wt.path))
 }
@@ -387,7 +386,7 @@ fn worktree_menu(ui: &mut Ui, wt: &Worktree, busy: bool, actions: &mut Vec<Actio
         ui.close();
     }
     if ui.button("Copy path").clicked() {
-        ui.ctx().copy_text(wt.path.display().to_string());
+        ui.ctx().copy_text(wsl::display(&wt.path));
         ui.close();
     }
     if wt.is_main {
@@ -428,12 +427,15 @@ fn remove_confirm(wt: &Worktree) -> Confirm {
     };
     let body = if dirty > 0 {
         format!(
-            "The folder {} will be deleted, including {dirty} uncommitted change{}, which will be lost. {branch}",
-            wt.path.display(),
-            if dirty == 1 { "" } else { "s" }
+            "The folder {} will be deleted, including {}, which will be lost. {branch}",
+            wsl::display(&wt.path),
+            plural(dirty, "uncommitted change")
         )
     } else {
-        format!("The folder {} will be deleted. {branch}", wt.path.display())
+        format!(
+            "The folder {} will be deleted. {branch}",
+            wsl::display(&wt.path)
+        )
     };
     Confirm {
         title: format!("Remove worktree {}?", wt.label()),
@@ -450,13 +452,6 @@ fn remove_confirm(wt: &Worktree) -> Confirm {
     }
 }
 
-fn menu_item(ui: &mut Ui, label: &str, enabled: bool, actions: &mut Vec<Action>, action: Action) {
-    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
-        actions.push(action);
-        ui.close();
-    }
-}
-
 fn branch_menu(
     ui: &mut Ui,
     project: &Project,
@@ -470,37 +465,7 @@ fn branch_menu(
     let busy = project.is_operating();
     let name = branch.name.as_str();
     let is_head = head == Some(name);
-    let elsewhere = repo.worktree_for_branch(name).filter(|_| !is_head);
-    match elsewhere {
-        Some(wt) => menu_item(
-            ui,
-            if wt.is_main {
-                "Go to the main folder"
-            } else {
-                "Open its worktree"
-            },
-            true,
-            actions,
-            Action::OpenWorktree(wt.path.clone()),
-        ),
-        None if !is_head => {
-            menu_item(
-                ui,
-                &format!("Check out {name}{}", project.in_main_suffix()),
-                !busy,
-                actions,
-                Action::Checkout(name.to_owned()),
-            );
-            menu_item(
-                ui,
-                "New worktree for this branch…",
-                !busy,
-                actions,
-                Action::NewWorktree(Some(name.to_owned())),
-            );
-        }
-        None => {}
-    }
+    branch_menu::local_items(ui, project, repo, name, false, actions);
     if !is_head {
         merge_items(ui, project, name, true, actions);
     }
@@ -509,12 +474,7 @@ fn branch_menu(
         "New branch from here…",
         !busy,
         actions,
-        Action::OpenDialog(DialogKind::NewBranch {
-            name: String::new(),
-            start: name.to_owned(),
-            start_label: name.to_owned(),
-            checkout: true,
-        }),
+        Action::OpenDialog(DialogKind::new_branch(name, name)),
     );
     menu_item(
         ui,
@@ -526,7 +486,7 @@ fn branch_menu(
             name: name.to_owned(),
         }),
     );
-    let deletable = !is_head && elsewhere.is_none();
+    let deletable = repo.worktree_for_branch(name).is_none();
     let delete = ui.add_enabled(!busy && deletable, egui::Button::new("Delete…"));
     let delete = if deletable {
         delete
@@ -623,37 +583,14 @@ fn remote_branch_menu(
             Action::Checkout(local.to_owned()),
         ),
         Some(_) => {}
-        None => {
-            menu_item(
-                ui,
-                &format!("Check out as {local}{}", project.in_main_suffix()),
-                !busy,
-                actions,
-                Action::CheckoutRemote {
-                    local: local.to_owned(),
-                    remote: branch.name.clone(),
-                },
-            );
-            menu_item(
-                ui,
-                "New worktree for this branch…",
-                !busy,
-                actions,
-                Action::NewWorktree(Some(branch.name.clone())),
-            );
-        }
+        None => branch_menu::tracking_items(ui, project, branch, false, actions),
     }
     menu_item(
         ui,
         "New branch from here…",
         !busy,
         actions,
-        Action::OpenDialog(DialogKind::NewBranch {
-            name: String::new(),
-            start: branch.name.clone(),
-            start_label: branch.name.clone(),
-            checkout: true,
-        }),
+        Action::OpenDialog(DialogKind::new_branch(&branch.name, &branch.name)),
     );
     menu_item(
         ui,
@@ -737,16 +674,10 @@ fn branch_row(
 
     let checked_out = repo.worktree_for_branch(&branch.name);
     let in_main = checked_out.is_some_and(|wt| wt.is_main);
-    let in_worktree = checked_out.is_some_and(|wt| !wt.is_main);
     let gone = matches!(branch.upstream, Upstream::Gone { .. });
-    let dot = if in_main {
-        color::accent()
-    } else if in_worktree {
-        color::branch_dot_agent()
-    } else if gone {
-        color::text_faint()
-    } else {
-        color::ahead_fg()
+    let dot = match CheckedOut::of(checked_out) {
+        CheckedOut::Nowhere if gone => color::text_faint(),
+        place => checkout_color(place),
     };
     painter.circle_filled(pos2(rect.left() + indent + 7.0, y), 3.0, dot);
 
@@ -764,7 +695,7 @@ fn branch_row(
         .painter()
         .layout_no_wrap(meta, theme::small(), color::text_weak());
     let meta_x = rect.right() - PAD_X - meta.size().x;
-    paint_galley_left(painter, meta_x, y, meta, color::text_weak());
+    paint_galley_left(painter, meta_x, y, meta);
 
     let text_x = rect.left() + indent + 18.0;
     let fg = if in_main {
@@ -773,7 +704,7 @@ fn branch_row(
         color::text()
     };
     let name = elided(ui, label, theme::mono(), fg, meta_x - 6.0 - text_x);
-    paint_galley_left(painter, text_x, y, name, fg);
+    paint_galley_left(painter, text_x, y, name);
 
     let tip = match &branch.upstream {
         Upstream::None => "Not pushed anywhere yet".to_owned(),
@@ -791,7 +722,10 @@ fn branch_row(
     };
     let tip = match checked_out {
         Some(wt) if wt.is_main => format!("{tip}\nChecked out in your main folder"),
-        Some(wt) => format!("{tip}\nChecked out in the worktree {}", wt.path.display()),
+        Some(wt) => format!(
+            "{tip}\nChecked out in the worktree {}",
+            wsl::display(&wt.path)
+        ),
         None => format!("{tip}\nDouble-click to check it out in the main folder"),
     };
     response.on_hover_text(tip)
@@ -815,16 +749,7 @@ fn remotes(
     busy: bool,
     actions: &mut Vec<Action>,
 ) {
-    let add = Action::OpenDialog(DialogKind::Remote {
-        original: None,
-        name: if repo.remotes.is_empty() {
-            "origin".to_owned()
-        } else {
-            String::new()
-        },
-        url: String::new(),
-        fetch: true,
-    });
+    let add = Action::OpenDialog(DialogKind::add_remote(repo.remotes.is_empty()));
     for remote in &repo.remotes {
         simple_row(ui, Icon::Cloud, &remote.name, color::text_mid(), 8.0)
             .on_hover_text(graft_core::console::redact(&remote.fetch_url))
@@ -834,12 +759,7 @@ fn remotes(
                     "Edit…",
                     !busy,
                     actions,
-                    Action::OpenDialog(DialogKind::Remote {
-                        original: Some(remote.name.clone()),
-                        name: remote.name.clone(),
-                        url: remote.fetch_url.clone(),
-                        fetch: false,
-                    }),
+                    Action::OpenDialog(DialogKind::edit_remote(&remote.name, &remote.fetch_url)),
                 );
                 if ui.button("Copy URL").clicked() {
                     ui.ctx().copy_text(remote.fetch_url.clone());
@@ -856,7 +776,7 @@ fn remotes(
                             "Graft forgets {} and its remote branches. Nothing changes on the \
                              server, and your local branches keep their commits; branches that \
                              tracked it lose their upstream.",
-                            remote.fetch_url
+                            redact(&remote.fetch_url)
                         ),
                         confirm_label: "Remove remote".to_owned(),
                         action: Action::RemoveRemote(remote.name.clone()),
@@ -913,7 +833,7 @@ fn remote_branch_row(
         color::text(),
         rect.right() - PAD_X - x,
     );
-    paint_galley_left(ui.painter(), x, y, name, color::text());
+    paint_galley_left(ui.painter(), x, y, name);
     let response = if label.len() < branch.branch_name().len() {
         response.on_hover_text(&branch.name)
     } else {
@@ -950,7 +870,7 @@ fn simple_row(ui: &mut Ui, icon: Icon, text: &str, fg: egui::Color32, indent: f3
         color::text(),
         rect.right() - PAD_X - x,
     );
-    paint_galley_left(ui.painter(), x, y, name, color::text());
+    paint_galley_left(ui.painter(), x, y, name);
     response
 }
 
@@ -959,13 +879,7 @@ fn faint_row(ui: &mut Ui, text: &str) {
     let galley = ui
         .painter()
         .layout_no_wrap(text.to_owned(), theme::small(), color::text_faint());
-    paint_galley_left(
-        ui.painter(),
-        rect.left() + 20.0,
-        rect.center().y,
-        galley,
-        color::text_faint(),
-    );
+    paint_galley_left(ui.painter(), rect.left() + 20.0, rect.center().y, galley);
 }
 
 fn footer_row(ui: &mut Ui, title: &str, value: &str) -> Response {
@@ -978,6 +892,6 @@ fn footer_row(ui: &mut Ui, title: &str, value: &str) -> Response {
         .painter()
         .layout_no_wrap(value.to_owned(), theme::small(), color::text_weak());
     let x = rect.right() - PAD_X - value.size().x;
-    paint_galley_left(painter, x, y, value, color::text_weak());
+    paint_galley_left(painter, x, y, value);
     response
 }

@@ -12,12 +12,12 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
         let stashes =
             (stash_count > 0).then(|| Badge::new(ui, stash_count.to_string(), widgets::neutral()));
         let tabs = [
-            (Tab::Workspace, "Workspace", None),
-            (Tab::Review, "Review", None),
-            (Tab::Stashes, "Stashes", stashes),
+            (Tab::Workspace, None),
+            (Tab::Review, None),
+            (Tab::Stashes, stashes),
         ];
-        for (tab, label, badge) in tabs {
-            if widgets::tab(ui, label, badge, project.nav.tab == tab).clicked() {
+        for (tab, badge) in tabs {
+            if widgets::tab(ui, tab.label(), badge, project.nav.tab == tab).clicked() {
                 actions.push(Action::SetTab(tab));
             }
         }

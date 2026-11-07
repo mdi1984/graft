@@ -3,11 +3,13 @@
 
 use std::time::UNIX_EPOCH;
 
-use egui::{Align, Layout, RichText, ScrollArea, Sense, Ui, pos2, vec2};
+use egui::{Align, Color32, Layout, RichText, ScrollArea, Sense, Ui, pos2, vec2};
 use graft_core::console::Entry;
 
 use super::icons::Icon;
-use super::widgets::{ICON_SIZE, elided, icon_button, paint_galley_left, paint_icon, spinner};
+use super::widgets::{
+    ICON_SIZE, elided, icon_button, paint_galley_left, paint_icon, paint_placeholder_left, spinner,
+};
 use crate::keys::{Command, Keymap};
 use crate::theme::{self, color};
 
@@ -78,10 +80,10 @@ pub fn status_bar(
             rect.width() / 2.0,
         );
         let width = text.size().x;
-        paint_galley_left(painter, x, y, text, color::text_weak());
+        paint_galley_left(painter, x, y, text);
         if cancellable {
             let galley =
-                painter.layout_no_wrap("Cancel".to_owned(), theme::small(), color::ahead_fg());
+                painter.layout_no_wrap("Cancel".to_owned(), theme::small(), Color32::PLACEHOLDER);
             let r = egui::Rect::from_min_size(
                 pos2(x + width + 10.0, rect.top() + 4.0),
                 vec2(galley.size().x + 8.0, rect.height() - 8.0),
@@ -92,7 +94,7 @@ pub fn status_bar(
             } else {
                 color::ahead_fg()
             };
-            paint_galley_left(painter, r.left() + 4.0, y, galley, fg);
+            paint_placeholder_left(painter, r.left() + 4.0, y, galley, fg);
             cancel = response.clicked();
         }
     } else if let Some(last) = view.entries.last() {
@@ -104,10 +106,9 @@ pub fn status_bar(
             color::text_faint(),
             rect.width() / 2.0,
         );
-        paint_galley_left(painter, x, y, text, color::text_faint());
+        paint_galley_left(painter, x, y, text);
     }
 
-    // Console toggle on the right.
     let failures = view.unseen_failures();
     let label = if failures > 0 {
         format!("Console · {failures} failed")
@@ -132,7 +133,7 @@ pub fn status_bar(
         painter.rect_filled(button, 4, color::control_hover_bg());
     }
     paint_icon(painter, pos2(button.left() + 8.0, y), Icon::Terminal, fg);
-    paint_galley_left(painter, button.left() + 14.0 + ICON_SIZE, y, galley, fg);
+    paint_galley_left(painter, button.left() + 14.0 + ICON_SIZE, y, galley);
     if response.clicked() {
         *console_open = !*console_open;
     }
@@ -207,7 +208,7 @@ fn entry_row(ui: &mut Ui, entry: &Entry) {
     let mut x = rect.left() + 4.0;
     let time = painter.layout_no_wrap(clock, theme::mono(), color::text_faint());
     let time_width = time.size().x;
-    paint_galley_left(painter, x, y, time, color::text_faint());
+    paint_galley_left(painter, x, y, time);
     x += time_width + 10.0;
     let (mark, mark_color) = if entry.failed() {
         (format!("exit {}", entry.status), color::removed())
@@ -215,7 +216,7 @@ fn entry_row(ui: &mut Ui, entry: &Entry) {
         ("ok".to_owned(), color::added())
     };
     let mark = painter.layout_no_wrap(mark, theme::small(), mark_color);
-    paint_galley_left(painter, x, y, mark, mark_color);
+    paint_galley_left(painter, x, y, mark);
     x += 48.0;
     let duration = painter.layout_no_wrap(
         format!("{} ms", entry.duration.as_millis()),
@@ -223,7 +224,7 @@ fn entry_row(ui: &mut Ui, entry: &Entry) {
         color::text_faint(),
     );
     let duration_x = rect.right() - 6.0 - duration.size().x;
-    paint_galley_left(painter, duration_x, y, duration, color::text_faint());
+    paint_galley_left(painter, duration_x, y, duration);
     let command = elided(
         ui,
         &entry.command,
@@ -231,7 +232,7 @@ fn entry_row(ui: &mut Ui, entry: &Entry) {
         color::text_mid(),
         duration_x - 10.0 - x,
     );
-    paint_galley_left(painter, x, y, command, color::text_mid());
+    paint_galley_left(painter, x, y, command);
     if response
         .on_hover_text(format!("in {}", entry.cwd))
         .clicked()

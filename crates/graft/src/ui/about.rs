@@ -1,8 +1,9 @@
 //! The About dialog: version, license, and updates.
 
-use egui::{Align, Id, Key, Layout, RichText, Sense, Ui, vec2};
+use egui::{Align, Layout, RichText, Sense, Ui, vec2};
 
-use super::widgets::{ButtonKind, button, spinner};
+use super::widgets::dialog;
+use super::widgets::{ButtonKind, button, error_label, inline_spinner};
 use super::window_frame::paint_app_icon;
 use crate::theme::{self, color};
 use crate::update::{self, Status};
@@ -19,9 +20,7 @@ pub enum AboutAction {
 
 pub fn show(ctx: &egui::Context, status: &Status) -> Option<AboutAction> {
     let mut action = None;
-    let response = super::widgets::modal(ctx, Id::unique("about-modal")).show(ctx, |ui| {
-        ui.set_width(WIDTH);
-        ui.spacing_mut().item_spacing.y = 6.0;
+    let shown = dialog::show(ctx, "about-modal", WIDTH, false, |ui| {
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(vec2(48.0, 48.0), Sense::hover());
             paint_app_icon(ui, rect);
@@ -60,7 +59,7 @@ pub fn show(ctx: &egui::Context, status: &Status) -> Option<AboutAction> {
             });
         });
     });
-    if action.is_none() && (response.should_close() || ctx.input(|i| i.key_pressed(Key::Escape))) {
+    if action.is_none() && shown.cancel {
         action = Some(AboutAction::Close);
     }
     action
@@ -69,8 +68,7 @@ pub fn show(ctx: &egui::Context, status: &Status) -> Option<AboutAction> {
 fn updates(ui: &mut Ui, status: &Status, action: &mut Option<AboutAction>) {
     let busy = |ui: &mut Ui, text: String| {
         ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
-            spinner(ui, rect.center(), 5.0, color::text_weak());
+            inline_spinner(ui);
             ui.label(RichText::new(text).color(color::text_mid()));
         });
     };
@@ -108,7 +106,7 @@ fn updates(ui: &mut Ui, status: &Status, action: &mut Option<AboutAction>) {
         }
         Status::Installing(release) => busy(ui, format!("Downloading Graft {}…", release.version)),
         Status::Failed(error) => {
-            ui.add(egui::Label::new(RichText::new(error).color(color::removed())).wrap());
+            error_label(ui, error);
             if button(ui, "Try again", ButtonKind::Secondary, true).clicked() {
                 *action = Some(AboutAction::Check);
             }

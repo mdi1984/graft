@@ -7,32 +7,13 @@
 use egui::{Align, Layout, Ui};
 use graft_core::{RepoSnapshot, Upstream, Worktree};
 
+use super::can::{self, Can, no, yes};
 use super::icons::Icon;
-use super::widgets::{Tone, tool_button, toolbar_divider};
+use super::widgets::{Tone, plural, tool_button, toolbar_divider};
 use crate::project::{Action, DialogKind, Project, RemoteOp, merge_dialog};
 
 /// Below this width, buttons with an icon drop their label.
 const COMPACT_WIDTH: f32 = 1120.0;
-
-/// Whether a button can act now, and its hover text: what it does, or why not.
-struct Can {
-    ok: bool,
-    hint: String,
-}
-
-fn yes(hint: impl Into<String>) -> Can {
-    Can {
-        ok: true,
-        hint: hint.into(),
-    }
-}
-
-fn no(hint: impl Into<String>) -> Can {
-    Can {
-        ok: false,
-        hint: hint.into(),
-    }
-}
 
 const FINISH_FIRST: &str = "Finish or abort what is in progress first";
 
@@ -138,12 +119,10 @@ pub fn show(
                 (None, Some(id)) => (id.to_string(), graft_core::short(&id)),
                 (None, None) => ("HEAD".to_owned(), "HEAD".to_owned()),
             };
-            actions.push(Action::OpenDialog(DialogKind::NewBranch {
-                name: String::new(),
+            actions.push(Action::OpenDialog(DialogKind::new_branch(
                 start,
                 start_label,
-                checkout: true,
-            }));
+            )));
         }
         let can = can_merge(snap, wt);
         if tool_button(
@@ -171,12 +150,7 @@ pub fn show(
             .clicked()
             && !busy
         {
-            actions.push(Action::OpenDialog(DialogKind::Stash {
-                message: String::new(),
-                include_untracked: true,
-                keep_index: false,
-                staged_only: false,
-            }));
+            actions.push(Action::OpenDialog(DialogKind::stash()));
         }
         if tool_button(ui, None, "New worktree", None, Tone::Normal, snap.is_some())
             .on_hover_text("Check out a branch in a second folder")
@@ -187,7 +161,10 @@ pub fn show(
         }
         toolbar_divider(ui);
 
-        let (can, preview_action) = can_preview(snap, wt);
+        let (can, preview_action) = match snap {
+            Some(snap) => can::preview(snap, wt),
+            None => (no("Select a worktree first"), None),
+        };
         if tool_button(
             ui,
             None,
@@ -283,8 +260,7 @@ fn can_push(snap: Option<&RepoSnapshot>, wt: Option<&Worktree>) -> Can {
             "Nothing to push: {branch} has no commits that {name} lacks"
         )),
         Ok((_, Upstream::Tracking { name, .. })) => {
-            let commits = if ahead == 1 { "commit" } else { "commits" };
-            yes(format!("Push {ahead} {commits} to {name}"))
+            yes(format!("Push {} to {name}", plural(ahead, "commit")))
         }
         Ok((branch, Upstream::None)) => yes(format!("Publish {branch} and track it")),
         Ok((branch, Upstream::Gone { name })) => yes(format!(
@@ -310,37 +286,5 @@ fn can_merge(snap: Option<&RepoSnapshot>, wt: Option<&Worktree>) -> Can {
         yes(format!("Merge another branch into {branch}"))
     } else {
         no("There is no other branch to merge")
-    }
-}
-
-fn can_preview(snap: Option<&RepoSnapshot>, wt: Option<&Worktree>) -> (Can, Option<Action>) {
-    let Some(snap) = snap else {
-        return (no("Select a worktree first"), None);
-    };
-    match (snap.preview.as_ref(), wt) {
-        (Some(p), Some(wt)) if graft_core::same_path(&p.source, &wt.path) => (
-            yes("The main folder shows this worktree: show its current state again"),
-            Some(Action::UpdatePreview),
-        ),
-        (Some(_), _) => (
-            no("The main folder already shows a preview. Restore it first."),
-            None,
-        ),
-        (None, Some(wt)) if wt.is_main => (
-            no("Select another worktree to show its state in the main folder"),
-            None,
-        ),
-        (None, Some(_)) if snap.main_worktree().is_some_and(|m| m.dirty() > 0) => (
-            no("The main folder has uncommitted changes. Commit or stash them first."),
-            None,
-        ),
-        (None, Some(wt)) => (
-            yes(
-                "Check out this worktree's commit plus its uncommitted changes in the main \
-                 folder, e.g. to run it from there",
-            ),
-            Some(Action::PreviewInMain(wt.path.clone())),
-        ),
-        (None, None) => (no("Select a worktree first"), None),
     }
 }

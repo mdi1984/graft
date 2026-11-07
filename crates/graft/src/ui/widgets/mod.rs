@@ -1,4 +1,7 @@
-//! Custom-painted building blocks shared by the toolbar, tabs and sidebar.
+//! Custom-painted building blocks shared by every screen.
+
+pub mod dialog;
+mod form;
 
 use std::sync::Arc;
 
@@ -8,7 +11,10 @@ use egui::{
     pos2, vec2,
 };
 
+pub use form::*;
+
 use super::icons::{self, Icon};
+use crate::project::{Action, CheckedOut};
 use crate::theme::{self, RADIUS, color};
 
 pub const ICON_SIZE: f32 = 14.0;
@@ -50,7 +56,19 @@ pub fn elided_path(
 }
 
 /// Paint `galley` vertically centered on `y`, starting at `x`.
-pub fn paint_galley_left(painter: &Painter, x: f32, y: f32, galley: Arc<Galley>, color: Color32) {
+pub fn paint_galley_left(painter: &Painter, x: f32, y: f32, galley: Arc<Galley>) {
+    paint_placeholder_left(painter, x, y, galley, color::text());
+}
+
+/// Like [`paint_galley_left`], for a galley laid out in
+/// `Color32::PLACEHOLDER`: it gets `color` now, e.g. the hover color.
+pub fn paint_placeholder_left(
+    painter: &Painter,
+    x: f32,
+    y: f32,
+    galley: Arc<Galley>,
+    color: Color32,
+) {
     let pos = pos2(x, y - galley.size().y / 2.0);
     painter.galley(pos, galley, color);
 }
@@ -148,7 +166,7 @@ pub fn section_heading(ui: &Ui, painter: &Painter, x: f32, y: f32, title: &str) 
     let galley = ui
         .painter()
         .layout_job(LayoutJob::single_section(title.to_owned(), format));
-    paint_galley_left(painter, x, y, galley, color::text_weak());
+    paint_galley_left(painter, x, y, galley);
 }
 
 /// Row background: selected, hovered, or nothing.
@@ -246,7 +264,7 @@ pub fn tool_button(
         x += ICON_SIZE + icon_gap;
     }
     let text_width = text.size().x;
-    paint_galley_left(painter, x, y, text, fg);
+    paint_galley_left(painter, x, y, text);
     x += text_width;
     if let Some(badge) = badge {
         badge.paint(painter, x + GAP, y);
@@ -269,24 +287,26 @@ pub fn tab(ui: &mut Ui, label: &str, badge: Option<Badge>, selected: bool) -> Re
     const PAD_X: f32 = 12.0;
     const HEIGHT: f32 = 38.0;
 
-    let (font, fg) = if selected {
-        (theme::semibold(theme::BODY_SIZE), color::text())
+    let font = if selected {
+        theme::semibold(theme::BODY_SIZE)
     } else {
-        (theme::body(), color::text_weak())
+        theme::body()
     };
-    let text = ui.painter().layout_no_wrap(label.to_owned(), font, fg);
+    let text = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font, Color32::PLACEHOLDER);
     let badge_width = badge.as_ref().map_or(0.0, |b| b.width() + 6.0);
     let size = vec2(2.0 * PAD_X + text.size().x + badge_width, HEIGHT);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
 
-    let fg = if response.hovered() && !selected {
+    let fg = if selected || response.hovered() {
         color::text()
     } else {
-        fg
+        color::text_weak()
     };
     let painter = ui.painter();
     let text_width = text.size().x;
-    paint_galley_left(painter, rect.left() + PAD_X, rect.center().y, text, fg);
+    paint_placeholder_left(painter, rect.left() + PAD_X, rect.center().y, text, fg);
     if let Some(badge) = badge {
         badge.paint(
             painter,
@@ -311,7 +331,7 @@ pub fn empty_state(ui: &mut Ui, title: &str, detail: &str) {
         center - vec2(0.0, 12.0),
         Align2::CENTER_CENTER,
         title,
-        theme::semibold(15.0),
+        theme::title(),
         color::text_mid(),
     );
     painter.text(
@@ -513,14 +533,47 @@ pub fn progress_bar(ui: &mut Ui, fraction: Option<f32>, width: f32) {
     }
 }
 
-/// A modal dialog with Graft's frame. egui's default frame uses the tight
-/// menu padding; dialogs get more room.
-pub fn modal(ctx: &egui::Context, id: egui::Id) -> egui::Modal {
-    let frame = egui::Frame::popup(&ctx.global_style()).inner_margin(egui::Margin {
-        left: 22,
-        right: 22,
-        top: 18,
-        bottom: 20,
+/// A row of the group colors; returns the one clicked.
+pub fn color_swatches(ui: &mut Ui, current: usize) -> Option<usize> {
+    let mut picked = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        for c in 0..color::GROUP_COUNT {
+            let fill = color::group(c);
+            let (rect, response) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
+            let painter = ui.painter();
+            painter.circle_filled(rect.center(), 6.0, fill);
+            if c == current || response.hovered() {
+                painter.circle_stroke(rect.center(), 8.5, Stroke::new(1.5, color::text_mid()));
+            }
+            if response.clicked() {
+                picked = Some(c);
+            }
+        }
     });
-    egui::Modal::new(id).frame(frame)
+    picked
+}
+
+/// Where a branch is checked out, as the sidebar and the graph color it:
+/// green in the main folder, orange in a linked worktree.
+pub fn checkout_color(checked_out: CheckedOut) -> Color32 {
+    match checked_out {
+        CheckedOut::Main => color::accent(),
+        CheckedOut::Worktree => color::branch_dot_agent(),
+        CheckedOut::Nowhere => color::ahead_fg(),
+    }
+}
+
+/// A context menu entry that sends `action` and closes the menu.
+pub fn menu_item(
+    ui: &mut Ui,
+    label: &str,
+    enabled: bool,
+    actions: &mut Vec<Action>,
+    action: Action,
+) {
+    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+        actions.push(action);
+        ui.close();
+    }
 }

@@ -72,3 +72,10 @@ impl ThemeChoice {
         }
     }
 }
+
+/// Where clones go when the user has not picked a folder yet.
+pub fn default_clone_parent() -> std::path::PathBuf {
+    std::env::var_os("USERPROFILE")
+        .map(|home| std::path::PathBuf::from(home).join("source").join("repos"))
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\dev"))
+}

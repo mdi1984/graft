@@ -44,6 +44,13 @@ pub struct StashFile {
     pub commit: Oid,
 }
 
+impl StashFile {
+    /// Saved with `--include-untracked`: it lives in the stash's third parent.
+    pub fn is_untracked(&self, stash: &Stash) -> bool {
+        self.commit != stash.id
+    }
+}
+
 pub fn list(git: &Git) -> Result<Vec<Stash>> {
     let out = stash_git(git).read(["stash", "list", "--format=%H%x1f%gs%x1f%ct"])?;
     Ok(out
