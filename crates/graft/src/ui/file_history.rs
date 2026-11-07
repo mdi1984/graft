@@ -11,9 +11,10 @@ use graft_core::file_log::Blame;
 
 use super::diff_view;
 use super::widgets::{
-    ButtonKind, button, elided, empty_state, paint_galley_left, paint_row_bg, plural, waiting,
+    ButtonKind, button, elided, empty_state, paint_galley_left, paint_row_bg, waiting,
 };
 use crate::project::{Action, FileHistoryMode, FileHistoryView, Project};
+use crate::text::plural;
 use crate::theme::{self, color};
 
 const ROW: f32 = 46.0;

@@ -2,7 +2,7 @@
 //! with checkboxes. Nothing is deleted until "Slash N" is clicked.
 
 use egui::{Align, Layout, RichText, ScrollArea, Ui};
-use graft_core::repo::Progress;
+use graft_core::Progress;
 use graft_core::slash::{Candidate, Plan, Reason};
 
 use super::widgets::dialog;
@@ -209,10 +209,7 @@ fn candidate_row(
     let mut on = view.checked.get(index).copied().unwrap_or(false);
     let name = match (&candidate.branch, &candidate.worktree) {
         (Some(branch), _) => branch.clone(),
-        (None, Some(path)) => path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string()),
+        (None, Some(path)) => graft_core::paths::folder_name(path),
         (None, None) => return,
     };
     ui.add_enabled_ui(!view.running, |ui| {
@@ -231,7 +228,7 @@ fn candidate_row(
             ui.add_space(24.0);
             ui.spacing_mut().item_spacing.x = 0.0;
             small(ui, prefix, color::text_weak());
-            let full = graft_core::wsl::display(path);
+            let full = graft_core::paths::display(path);
             let galley = elided_path(
                 ui,
                 &full,
@@ -253,10 +250,7 @@ fn recent_ui(ui: &mut Ui, slashed: &[SlashedBranch], running: bool, actions: &mu
                     .font(theme::mono())
                     .color(color::text()),
             );
-            let sha = entry
-                .target
-                .parse()
-                .map_or_else(|_| entry.target.clone(), |oid| graft_core::short(&oid));
+            let sha = graft_core::short(&entry.target);
             small(
                 ui,
                 &format!("{sha} · {}", crate::time::relative(entry.at, now)),

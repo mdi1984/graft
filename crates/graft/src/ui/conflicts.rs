@@ -6,25 +6,24 @@
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, Frame, Margin, Panel, RichText, ScrollArea, Stroke, TextEdit, Ui, vec2};
 use graft_core::Worktree;
-use graft_core::conflicts::{ConflictFile, InProgress, Kind, Resolution, Segment};
+use graft_core::conflicts::{
+    self, ConflictFile, Resolution, Segment, count_lines, first_lines, last_lines,
+};
+use graft_core::model::{InProgress, Kind};
 
-use super::widgets::{ButtonKind, button, empty_state, plural, waiting};
+use super::widgets::{ButtonKind, button, empty_state, waiting};
 use crate::project::{Action, ConflictView, Project};
+use crate::text::plural;
 use crate::theme::{self, RADIUS, color};
 
 /// Lines of clean context shown around each conflict.
 const CONTEXT: usize = 3;
 
-/// Names for the two sides. In a rebase, "ours" is the branch being rebased
-/// onto and "theirs" is your commit being replayed.
 fn side_names(wt: &Worktree) -> (String, String) {
-    let branch = wt.branch.clone().unwrap_or_else(|| "HEAD".to_owned());
-    match wt.in_progress.as_ref().map(|p| p.kind) {
-        Some(Kind::Rebase) => ("Upstream".to_owned(), "Your commit".to_owned()),
-        Some(Kind::CherryPick) => (format!("Current ({branch})"), "Picked commit".to_owned()),
-        Some(Kind::Revert) => (format!("Current ({branch})"), "Reverted commit".to_owned()),
-        _ => (format!("Current ({branch})"), "Incoming".to_owned()),
-    }
+    conflicts::side_names(
+        wt.in_progress.as_ref().map(|p| p.kind),
+        wt.branch.as_deref(),
+    )
 }
 
 /// The strip across the top of the Workspace while something is in progress.
@@ -517,16 +516,12 @@ fn result_panel(ui: &mut Ui, view: &ConflictView, file: &ConflictFile) {
             Segment::Common(text) => {
                 job.append(&String::from_utf8_lossy(text), 0.0, plain.clone());
             }
-            Segment::Conflict { .. } => {
+            Segment::Conflict { ours, theirs, .. } => {
                 let resolution = resolutions.get(index).cloned().flatten();
                 index += 1;
                 match resolution {
                     Some(r) => {
-                        let bytes = graft_core::conflicts::assemble(
-                            std::slice::from_ref(segment),
-                            &[Some(r)],
-                        )
-                        .unwrap_or_default();
+                        let bytes = r.apply(ours, theirs);
                         job.append(
                             &String::from_utf8_lossy(&bytes),
                             0.0,
@@ -557,24 +552,4 @@ fn result_panel(ui: &mut Ui, view: &ConflictView, file: &ConflictFile) {
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
             ui.add(egui::Label::new(job).extend());
         });
-}
-
-fn count_lines(text: &[u8]) -> usize {
-    let n = text.iter().filter(|b| **b == b'\n').count();
-    if text.last().is_some_and(|b| *b != b'\n') {
-        n + 1
-    } else {
-        n
-    }
-}
-
-fn last_lines(text: &[u8], n: usize) -> String {
-    let text = String::from_utf8_lossy(text);
-    let lines: Vec<&str> = text.lines().collect();
-    lines[lines.len().saturating_sub(n)..].join("\n")
-}
-
-fn first_lines(text: &[u8], n: usize) -> String {
-    let text = String::from_utf8_lossy(text);
-    text.lines().take(n).collect::<Vec<_>>().join("\n")
 }

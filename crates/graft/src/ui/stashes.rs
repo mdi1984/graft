@@ -4,8 +4,9 @@
 
 use egui::{Frame, Margin, Panel, RichText, ScrollArea, Sense, Ui, vec2};
 use graft_core::diff::Source;
+use graft_core::paths::{self, folder_name};
 use graft_core::stash::Stash;
-use graft_core::{RepoSnapshot, short, wsl};
+use graft_core::{RepoSnapshot, short};
 
 use super::diff_view;
 use super::file_row::{FILE_ROW_HEIGHT, file_row};
@@ -156,11 +157,7 @@ fn origin(snap: &RepoSnapshot, stash: &Stash) -> String {
     match &stash.branch {
         Some(branch) => match snap.worktree_for_branch(branch) {
             Some(wt) => {
-                let folder = wt
-                    .path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
+                let folder = folder_name(&wt.path);
                 format!("from {branch} in {folder}")
             }
             None => format!("from {branch}"),
@@ -185,8 +182,8 @@ fn details(
     );
     ui.label(
         RichText::new(format!(
-            "stash@{{{}}} · {} · {} · {}",
-            stash.index,
+            "{} · {} · {} · {}",
+            stash.name(),
             short(&stash.id),
             origin(snap, stash),
             time::absolute(stash.time)
@@ -220,7 +217,7 @@ fn details(
             ui.menu_button("Apply to…", |ui| {
                 for wt in others {
                     if ui
-                        .button(format!("{}  ({})", wt.label(), wsl::display(&wt.path)))
+                        .button(format!("{}  ({})", wt.label(), paths::display(&wt.path)))
                         .clicked()
                     {
                         actions.push(apply(stash, wt.path.clone(), false));
@@ -235,7 +232,7 @@ fn details(
         {
             actions.push(Action::OpenDialog(DialogKind::StashBranch {
                 id: stash.id,
-                label: format!("stash@{{{}}}", stash.index),
+                label: stash.name(),
                 name: String::new(),
             }));
         }
@@ -292,7 +289,7 @@ fn apply(stash: &Stash, worktree: std::path::PathBuf, pop: bool) -> Action {
 
 fn drop(stash: &Stash) -> Action {
     Action::Ask(Box::new(Confirm {
-        title: format!("Drop stash@{{{}}}?", stash.index),
+        title: format!("Drop {}?", stash.name()),
         body: format!(
             "\"{}\" will be deleted. Its changes are gone unless you applied them somewhere.",
             stash.message

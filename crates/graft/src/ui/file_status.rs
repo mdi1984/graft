@@ -9,11 +9,12 @@ use graft_core::status::{Change, StatusEntry, WorktreeStatus};
 use super::file_row;
 use super::icons::Icon;
 use super::widgets::{
-    ButtonKind, button, empty_state, hint, paint_icon_button, plural, section_heading, text_field,
+    ButtonKind, button, empty_state, hint, paint_icon_button, section_heading, text_field,
 };
 use super::{conflicts, diff_view};
 use crate::keys::{Command, Keymap};
 use crate::project::{Action, FileKey, Project};
+use crate::text::plural;
 use crate::theme::{self, RADIUS, color};
 
 pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {

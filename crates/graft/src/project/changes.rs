@@ -5,10 +5,10 @@ use std::collections::BTreeSet;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
+use graft_core::Progress;
 use graft_core::diff::{self, FileDiff, Gap, Source};
 use graft_core::ops::{self, LineOp};
 use graft_core::remote;
-use graft_core::repo::Progress;
 use graft_core::status::{EntryKind, StatusEntry};
 use graft_core::{CancelToken, Git, JobError};
 

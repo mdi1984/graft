@@ -48,10 +48,7 @@ impl Project {
     }
 
     pub(super) fn apply_stash(&mut self, id: Oid, worktree: PathBuf, pop: bool) {
-        let name = worktree
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let name = graft_core::paths::folder_name(&worktree);
         let done = format!(
             "{} {} in {name}",
             if pop { "Popped" } else { "Applied" },

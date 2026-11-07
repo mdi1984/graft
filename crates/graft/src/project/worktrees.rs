@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use graft_core::paths::folder_name;
 use graft_core::refs::{RefKind, check_ref_name};
 use graft_core::watch::Watcher;
 use graft_core::worktree::{self, Start};
@@ -10,6 +11,7 @@ use graft_core::{RepoSnapshot, same_path};
 
 use super::changes::Then;
 use super::{Event, Project};
+use crate::text::plural;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BranchMode {
@@ -200,8 +202,8 @@ impl Project {
                 Ok(Some(match copied.len() {
                     0 => "Created the worktree. No ignored files matched to copy.".to_owned(),
                     n => format!(
-                        "Created the worktree and copied {n} ignored file{}: {}",
-                        if n == 1 { "" } else { "s" },
+                        "Created the worktree and copied {}: {}",
+                        plural(n, "ignored file"),
                         copied.join(", ")
                     ),
                 }))
@@ -252,10 +254,7 @@ impl Project {
     }
 
     pub(super) fn remove_worktree(&mut self, path: PathBuf, force: bool) {
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let name = folder_name(&path);
         self.run_op_at(
             self.git.clone(),
             "Removing worktree",

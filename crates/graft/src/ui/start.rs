@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex};
 
 use egui::{Align2, Color32, Rect, ScrollArea, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use graft_core::CancelToken;
-use graft_core::repo::{Progress, clone_folder_name, native};
+use graft_core::Progress;
+use graft_core::paths::{self, native};
+use graft_core::repo::clone_folder_name;
 use graft_core::wsl::Wsl;
 
 use super::icons::{self, Icon};
@@ -756,10 +758,7 @@ impl StartPage {
             if hovered {
                 painter.rect_filled(rect, RADIUS, color::hover_row_bg());
             }
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.display().to_string());
+            let name = paths::folder_name(path);
             let fg = if exists {
                 color::text()
             } else {
@@ -827,15 +826,7 @@ fn group_list(ui: &mut Ui, groups: &[TabGroup], width: f32, action: &mut Option<
         paint_galley_left(painter, rect.left() + 26.0, rect.top() + 14.0, name);
         let count = elided(ui, &count, theme::small(), color::text_weak(), 160.0);
         paint_galley_left(painter, name_right + 8.0, rect.top() + 14.0, count);
-        let names: Vec<String> = group
-            .repos
-            .iter()
-            .map(|p| {
-                p.file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| p.display().to_string())
-            })
-            .collect();
+        let names: Vec<String> = group.repos.iter().map(|p| paths::folder_name(p)).collect();
         let names = elided(
             ui,
             &names.join(" · "),

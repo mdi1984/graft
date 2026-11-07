@@ -20,10 +20,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, Sender};
-use graft_core::conflicts::{ConflictFile, Kind};
+use graft_core::conflicts::ConflictFile;
 use graft_core::details::{self, CommitDetails};
 use graft_core::history::{self, Commits, History};
 use graft_core::jobs::JobPool;
+use graft_core::model::Kind;
 use graft_core::ops::LineOp;
 use graft_core::stash::{Stash, StashFile};
 use graft_core::watch::Watcher;
@@ -483,10 +484,7 @@ impl Project {
     /// `opened` is the worktree to select first (the folder the user picked).
     pub fn new(root: PathBuf, opened: PathBuf, console: Console, pool: JobPool) -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
-        let name = root
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| root.display().to_string());
+        let name = graft_core::paths::folder_name(&root);
         let mut project = Self {
             git: Git::new(&root, console),
             root,
@@ -650,7 +648,7 @@ impl Project {
                 let head_moved = had_snapshot && self.worktree().and_then(|wt| wt.head) != old_head;
                 if self.first_load {
                     self.first_load = false;
-                    if self.worktree().is_some_and(|wt| wt.dirty() > 0) {
+                    if self.worktree().is_some_and(|wt| wt.is_dirty()) {
                         self.nav.view = WorkspaceView::FileStatus;
                     }
                 }
@@ -713,7 +711,7 @@ impl Project {
     /// HEAD of the selected worktree if it has uncommitted changes.
     fn worktree_parent(&self) -> Option<Oid> {
         self.worktree()
-            .filter(|wt| wt.dirty() > 0)
+            .filter(|wt| wt.is_dirty())
             .and_then(|wt| wt.head)
     }
 
@@ -774,7 +772,7 @@ impl Project {
     fn select_head(&mut self) {
         let Some(history) = &self.history else { return };
         let target = match self.worktree() {
-            Some(wt) if wt.dirty() > 0 => Some(null_oid()),
+            Some(wt) if wt.is_dirty() => Some(null_oid()),
             Some(wt) => wt.head,
             None => None,
         }
@@ -815,7 +813,7 @@ impl Project {
             return;
         }
         self.nav.tab = Tab::Workspace;
-        let dirty = self.worktree().is_some_and(|wt| wt.dirty() > 0);
+        let dirty = self.worktree().is_some_and(|wt| wt.is_dirty());
         self.nav.view = if dirty {
             WorkspaceView::FileStatus
         } else {

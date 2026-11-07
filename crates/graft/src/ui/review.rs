@@ -15,11 +15,12 @@ use super::can;
 use super::diff_view::{self, Marks};
 use super::file_row;
 use super::widgets::{
-    Badge, ButtonKind, ahead, button, empty_state, paint_galley_left, plural, progress_bar, waiting,
+    Badge, ButtonKind, ahead, button, empty_state, paint_galley_left, progress_bar, waiting,
 };
 use crate::keys::Command;
 use crate::project::comments::{self, LineComment};
 use crate::project::{Action, Confirm, Project};
+use crate::text::plural;
 use crate::theme::{self, color};
 
 pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
@@ -327,7 +328,10 @@ fn merge_button(
         }
         (Some(branch), Some(t)) => (
             !busy,
-            format!("Run git merge {branch} in {}", folder(&t.path)),
+            format!(
+                "Run git merge {branch} in {}",
+                graft_core::paths::folder_name(&t.path)
+            ),
         ),
     };
     let label = format!("Merge into {base}…");
@@ -339,9 +343,9 @@ fn merge_button(
     {
         let mut body = format!(
             "Runs git merge {branch} in the worktree {} (where {base} is checked out).",
-            folder(&t.path)
+            graft_core::paths::folder_name(&t.path)
         );
-        if wt.dirty() > 0 {
+        if wt.is_dirty() {
             body.push_str(&format!(
                 "\n\n{} has {} uncommitted changes. They are not part of the merge; commit \
                  them first if they should be.",
@@ -822,11 +826,4 @@ fn file_note(
     {
         project.review_state_mut().notes.remove(path);
     }
-}
-
-/// The last part of a path, e.g. "demo-repo".
-fn folder(path: &std::path::Path) -> String {
-    path.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
 }

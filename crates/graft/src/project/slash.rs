@@ -4,7 +4,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use graft_core::repo::Progress;
+use graft_core::Progress;
 use graft_core::slash::{self, Candidate, Outcome, Plan, Slashed};
 use graft_core::{CancelToken, JobError, Oid};
 use serde::{Deserialize, Serialize};
@@ -13,13 +13,30 @@ use super::changes::{Operation, Then};
 use super::{Action, Event, Project};
 
 /// A deleted branch in "Recently slashed". Saved by the app.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SlashedBranch {
     pub branch: String,
-    /// Commit id (hex).
-    pub target: String,
+    #[serde(with = "hex")]
+    pub target: Oid,
     /// Unix time of the deletion.
     pub at: i64,
+}
+
+/// Commit ids saved as hex text.
+mod hex {
+    use graft_core::{Oid, null_oid};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(id: &Oid, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(id)
+    }
+
+    /// Text that is not a commit id reads as the null id, rather than
+    /// failing everything else Graft saved.
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Oid, D::Error> {
+        let text = String::deserialize(d)?;
+        Ok(Oid::from_hex(text.as_bytes()).unwrap_or_else(|_| null_oid()))
+    }
 }
 
 /// Branches kept in "Recently slashed".
@@ -134,7 +151,7 @@ impl Project {
                 0,
                 SlashedBranch {
                     branch: s.branch.clone(),
-                    target: s.target.to_string(),
+                    target: s.target,
                     at: now,
                 },
             );
@@ -181,9 +198,9 @@ impl Project {
         let Some(entry) = self.slashed.get(index).cloned() else {
             return;
         };
-        let Ok(target) = Oid::from_hex(entry.target.as_bytes()) else {
+        if entry.target.is_null() {
             return;
-        };
+        }
         if self
             .snapshot
             .as_ref()
@@ -197,7 +214,7 @@ impl Project {
         }
         let slashed = Slashed {
             branch: entry.branch.clone(),
-            target,
+            target: entry.target,
         };
         self.slashed.remove(index);
         let done = format!("Restored {}", entry.branch);
@@ -234,5 +251,23 @@ impl Project {
             Action::RestoreSlashed(i) => self.restore_slashed(i),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Saved as before, when the id was a hex string.
+    #[test]
+    fn slashed_ids_are_saved_as_hex() {
+        let hex = "0123456789abcdef0123456789abcdef01234567";
+        let saved = format!(r#"{{"branch":"done","target":"{hex}","at":7}}"#);
+        let entry: SlashedBranch = serde_json::from_str(&saved).unwrap();
+        assert_eq!(entry.target.to_string(), hex);
+        assert_eq!(serde_json::to_string(&entry).unwrap(), saved);
+        let broken: SlashedBranch =
+            serde_json::from_str(r#"{"branch":"x","target":"nope","at":1}"#).unwrap();
+        assert!(broken.target.is_null());
     }
 }

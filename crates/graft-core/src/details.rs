@@ -2,7 +2,7 @@
 
 use anyhow::{Result, bail};
 
-pub use crate::changes::FileChange;
+use crate::changes::FileChange;
 use crate::changes::{EMPTY_TREE, between};
 use crate::cli::Git;
 use crate::model::Oid;

@@ -3,17 +3,18 @@
 
 use egui::{Id, Rect, Response, ScrollArea, Sense, Stroke, Ui, pos2, vec2};
 use graft_core::console::redact;
-use graft_core::{Branch, RemoteBranch, RepoSnapshot, Upstream, Worktree, same_path, wsl};
+use graft_core::{Branch, RemoteBranch, RepoSnapshot, Upstream, Worktree, paths, same_path};
 
 use super::branch_menu;
 use super::icons::Icon;
 use super::widgets::{
     self, Badge, ICON_SIZE, checkout_color, elided, elided_path, menu_item, paint_badges_right,
-    paint_galley_left, paint_icon, paint_row_bg, plural, section_heading,
+    paint_galley_left, paint_icon, paint_row_bg, section_heading,
 };
 use crate::project::{
     Action, CheckedOut, Confirm, DialogKind, Project, RemoteOp, Tab, WorkspaceView, merge_dialog,
 };
+use crate::text::plural;
 use crate::theme::{self, color};
 
 const SECTION_GAP: f32 = 14.0;
@@ -320,7 +321,7 @@ fn worktree_row(ui: &mut Ui, wt: &Worktree, selected: bool) -> Response {
     );
 
     let mut badges = Vec::new();
-    if wt.dirty() > 0 {
+    if wt.is_dirty() {
         badges.push(Badge::new(ui, wt.dirty().to_string(), widgets::dirty()));
     }
     if wt.ahead() > 0 {
@@ -349,9 +350,9 @@ fn worktree_row(ui: &mut Ui, wt: &Worktree, selected: bool) -> Response {
     let branch = elided(ui, &wt.label(), theme::mono(), fg, badges_x - 6.0 - text_x);
     paint_galley_left(painter, text_x, top_y, branch);
     let path = if wt.is_main {
-        format!("{}  · main folder", graft_core::wsl::display(&wt.path))
+        format!("{}  · main folder", graft_core::paths::display(&wt.path))
     } else {
-        graft_core::wsl::display(&wt.path)
+        graft_core::paths::display(&wt.path)
     };
     let path = elided_path(
         ui,
@@ -362,7 +363,7 @@ fn worktree_row(ui: &mut Ui, wt: &Worktree, selected: bool) -> Response {
     );
     paint_galley_left(painter, text_x, bottom_y, path);
 
-    response.on_hover_text(graft_core::wsl::display(&wt.path))
+    response.on_hover_text(graft_core::paths::display(&wt.path))
 }
 
 fn worktree_menu(ui: &mut Ui, wt: &Worktree, busy: bool, actions: &mut Vec<Action>) {
@@ -386,7 +387,7 @@ fn worktree_menu(ui: &mut Ui, wt: &Worktree, busy: bool, actions: &mut Vec<Actio
         ui.close();
     }
     if ui.button("Copy path").clicked() {
-        ui.ctx().copy_text(wsl::display(&wt.path));
+        ui.ctx().copy_text(paths::display(&wt.path));
         ui.close();
     }
     if wt.is_main {
@@ -428,13 +429,13 @@ fn remove_confirm(wt: &Worktree) -> Confirm {
     let body = if dirty > 0 {
         format!(
             "The folder {} will be deleted, including {}, which will be lost. {branch}",
-            wsl::display(&wt.path),
+            paths::display(&wt.path),
             plural(dirty, "uncommitted change")
         )
     } else {
         format!(
             "The folder {} will be deleted. {branch}",
-            wsl::display(&wt.path)
+            paths::display(&wt.path)
         )
     };
     Confirm {
@@ -724,7 +725,7 @@ fn branch_row(
         Some(wt) if wt.is_main => format!("{tip}\nChecked out in your main folder"),
         Some(wt) => format!(
             "{tip}\nChecked out in the worktree {}",
-            wsl::display(&wt.path)
+            paths::display(&wt.path)
         ),
         None => format!("{tip}\nDouble-click to check it out in the main folder"),
     };

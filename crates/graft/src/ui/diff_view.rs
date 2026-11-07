@@ -22,12 +22,13 @@ use graft_core::syntax::{Spans, Token};
 use super::file_row::paint_change_letter;
 use super::icons::Icon;
 use super::widgets::{
-    ButtonKind, button, elided_path, empty_state, icon_button, paint_galley_left, plural, waiting,
+    ButtonKind, button, elided_path, empty_state, icon_button, paint_galley_left, waiting,
 };
 use crate::keys::Command;
 use crate::project::comments::{LineComment, Pick, Placed, Side};
 use crate::project::{Action, Confirm, DiffView, Project};
 use crate::settings::Settings;
+use crate::text::plural;
 use crate::theme::{self, color};
 
 const ROW: f32 = 20.0;

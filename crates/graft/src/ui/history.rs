@@ -17,10 +17,11 @@ use super::file_row::{self, file_row, paint_file};
 use super::icons::Icon;
 use super::widgets::{
     ButtonKind, button, checkout_color, chip, elided, empty_state, icon_button, loading, menu_item,
-    paint_galley_left, plural,
+    paint_galley_left,
 };
 use super::{branch_menu, diff_view};
 use crate::project::{Action, DialogKind, FileKey, Project, RefKind, RefLabel};
+use crate::text::plural;
 use crate::theme::{self, color};
 use crate::time;
 
@@ -787,7 +788,7 @@ fn uncommitted(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
             .color(color::text()),
     );
     let Some(wt) = project.worktree() else { return };
-    ui.label(RichText::new(graft_core::wsl::display(&wt.path)).color(color::text_weak()));
+    ui.label(RichText::new(graft_core::paths::display(&wt.path)).color(color::text_weak()));
     let Some(status) = &wt.status else { return };
     let staged = status.staged().count();
     let unstaged = status.unstaged().count();

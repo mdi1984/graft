@@ -11,6 +11,7 @@ mod native;
 mod project;
 mod settings;
 mod single;
+mod text;
 mod theme;
 mod time;
 mod ui;

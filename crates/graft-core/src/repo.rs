@@ -5,12 +5,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-pub use crate::cli::Progress;
-use crate::cli::{Git, failure_message};
+use crate::cli::{Git, Progress, failure_message};
 use crate::console::Console;
 use crate::jobs::CancelToken;
 use crate::paths::display;
-pub use crate::paths::native;
 
 /// Where a repository lives on disk.
 #[derive(Clone, Debug, PartialEq, Eq)]

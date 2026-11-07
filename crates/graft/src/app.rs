@@ -7,8 +7,9 @@ use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::{Receiver, Sender};
 use egui::{CentralPanel, Frame, Margin, Panel};
+use graft_core::Progress;
 use graft_core::jobs::{JobPool, Waker};
-use graft_core::repo::{self, Location, Progress};
+use graft_core::repo::{self, Location};
 use graft_core::{CancelToken, Console, JobError, Panicked, same_path};
 use serde::{Deserialize, Serialize};
 
@@ -1002,7 +1003,7 @@ impl eframe::App for GraftApp {
             .iter()
             .map(|p| TabInfo {
                 name: p.name.clone(),
-                tooltip: graft_core::wsl::display(&p.root),
+                tooltip: graft_core::paths::display(&p.root),
                 dirty: p.is_dirty(),
                 busy: p.snapshot.is_none() && p.error.is_none(),
                 error: p.error.is_some(),

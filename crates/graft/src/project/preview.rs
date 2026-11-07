@@ -19,11 +19,7 @@ impl Project {
                     .find(|wt| graft_core::same_path(&wt.path, path))
             })
             .map(|wt| wt.label())
-            .unwrap_or_else(|| {
-                path.file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            })
+            .unwrap_or_else(|| graft_core::paths::folder_name(path))
     }
 
     fn preview_in_main(&mut self, worktree: PathBuf) {

@@ -8,7 +8,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub use crate::paths::display;
 use crate::paths::{native, no_window, wsl_parts};
 
 /// A distro, as the user's path names it.
@@ -248,8 +247,8 @@ mod tests {
         assert_eq!(wsl.show(home_dir, home).unwrap(), "~");
         let other = Path::new(r"\\wsl.localhost\Ubuntu\home\mdix");
         assert_eq!(wsl.show(other, home).unwrap(), "/home/mdix");
-        assert_eq!(display(p), "/home/mdi/projects/x (Ubuntu)");
-        assert_eq!(display(Path::new(r"C:\dev")), r"C:\dev");
+        assert_eq!(crate::paths::display(p), "/home/mdi/projects/x (Ubuntu)");
+        assert_eq!(crate::paths::display(Path::new(r"C:\dev")), r"C:\dev");
     }
 
     #[test]

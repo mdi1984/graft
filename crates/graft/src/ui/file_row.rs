@@ -3,7 +3,7 @@
 //! commit details and stashes list files alike.
 
 use egui::{Align2, Color32, Rect, Response, Sense, Ui, pos2, vec2};
-use graft_core::details::FileChange;
+use graft_core::changes::FileChange;
 use graft_core::status::Change;
 
 use super::widgets::{elided, paint_galley_left, paint_row_bg};
