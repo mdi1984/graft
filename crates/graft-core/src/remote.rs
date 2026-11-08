@@ -3,7 +3,7 @@
 
 use anyhow::{Result, bail};
 
-use crate::cli::{Git, Output, Progress};
+use crate::cli::{Git, Progress};
 use crate::conflicts;
 use crate::jobs::CancelToken;
 use crate::model::{ORIGIN, Upstream, branch_name, local_ref};
@@ -87,7 +87,7 @@ pub fn pull(git: &Git, cancel: &CancelToken, on_progress: impl FnMut(Progress)) 
     if let Err(why) = pull_check(&branch, &upstream(git)?) {
         bail!(why);
     }
-    let accept = |o: &Output| o.success() || conflicts::stopped(o);
+    let accept = conflicts::done_or_stopped(git);
     let out = git.run_progress_accepting(&["pull", "--progress"], cancel, on_progress, accept)?;
     Ok(!out.success())
 }

@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use crate::changes::is_binary;
 use crate::cli::{Git, Output};
 use crate::model::Operation;
-use crate::refusal::stopped_with_conflicts;
+use crate::repo::in_progress;
 
 /// What one side of a conflict is called.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,13 +58,20 @@ pub fn side_names(kind: Option<Operation>, branch: Option<&str>) -> SideNames {
 /// Run a command that may stop with conflicts. Ok(true) means it stopped and
 /// the conflicts are waiting to be resolved.
 fn run_may_conflict(git: &Git, args: &[&str]) -> Result<bool> {
-    let out = git.run_accepting(args, None, |o| o.success() || stopped(o))?;
+    let out = git.run_accepting(args, None, done_or_stopped(git))?;
     Ok(!out.success())
 }
 
-/// Git stopped because of conflicts (rather than failing).
-pub(crate) fn stopped(out: &Output) -> bool {
-    stopped_with_conflicts(&format!("{}\n{}", out.stdout_str(), out.stderr_str()))
+/// Tells, for a merge, rebase, cherry-pick, revert or pull about to run in
+/// `git`'s worktree, whether it went through or stopped part-way to resolve
+/// conflicts and continue (rather than failed): it left an operation in
+/// progress where there was none. Judged by the repository, not by git's
+/// words, which for a pull include fetched branch names and the remote's
+/// messages.
+pub(crate) fn done_or_stopped(git: &Git) -> impl Fn(&Output) -> bool {
+    let worktree = git.cwd().to_path_buf();
+    let before = in_progress(&worktree).is_some();
+    move |out| out.success() || (!before && in_progress(&worktree).is_some())
 }
 
 /// Merge `rev` into the current branch. Ok(true): stopped with conflicts.

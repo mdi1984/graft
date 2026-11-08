@@ -65,12 +65,6 @@ pub fn rejected_push(error: &str) -> bool {
         || error.contains("fetch first")
 }
 
-/// A merge, rebase, cherry-pick or revert stopped because of conflicts
-/// (rather than failing); `output` is its stdout and stderr.
-pub(crate) fn stopped_with_conflicts(output: &str) -> bool {
-    output.contains("CONFLICT") || output.contains("could not apply")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3,7 +3,8 @@
 mod common;
 
 use common::sh;
-use graft_core::{CancelToken, remote, snapshot};
+use graft_core::console::Console;
+use graft_core::{CancelToken, Git, remote, snapshot};
 
 #[test]
 fn add_edit_and_remove() {
@@ -164,4 +165,40 @@ fn a_pull_that_conflicts_stops_for_resolving() {
     let git = common::git(&dir);
     let error = remote::pull(&git, &CancelToken::default(), |_| {}).unwrap_err();
     assert!(format!("{error:#}").contains("overwritten"), "{error:#}");
+}
+
+/// A pull git refuses fails with git's message (and as a failure in the
+/// console), even when its output mentions conflicts: here a fetched
+/// branch's name.
+#[test]
+fn a_failed_pull_is_not_taken_for_conflicts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let server = common::init_bare(&tmp.path().join("server.git"));
+    let dir = common::init(&tmp.path().join("app"));
+    common::commit(&dir, "a.txt", "a\n", "a");
+    sh(&dir, &["push", "-q", server.to_str().unwrap(), "main"]);
+    let mine = common::clone(&server, &tmp.path().join("mine"));
+    let theirs = common::clone(&server, &tmp.path().join("theirs"));
+    common::commit(&theirs, "a.txt", "theirs\n", "theirs");
+    sh(&theirs, &["push", "-q"]);
+    sh(
+        &theirs,
+        &["push", "-q", "origin", "HEAD:fix-CONFLICT-detection"],
+    );
+    common::commit(&mine, "b.txt", "mine\n", "mine");
+    sh(&mine, &["config", "pull.ff", "only"]);
+
+    let console = Console::default();
+    let git = Git::new(&mine, console.clone());
+    let error = remote::pull(&git, &CancelToken::default(), |_| {}).unwrap_err();
+    let error = format!("{error:#}");
+    assert!(error.contains("fast-forward"), "{error}");
+    let pull = console.snapshot().into_iter().last().unwrap();
+    assert!(
+        pull.stderr.contains("fix-CONFLICT-detection"),
+        "{}",
+        pull.stderr
+    );
+    assert!(pull.failed());
+    assert!(!mine.join(".git").join("MERGE_HEAD").exists());
 }

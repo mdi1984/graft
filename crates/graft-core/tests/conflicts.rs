@@ -286,3 +286,17 @@ fn merges_name_branches_by_their_short_name() {
     let f = std::fs::read_to_string(dir.join("f.txt")).unwrap();
     assert!(f.contains("\n>>>>>>> refs/heads/topic\n"), "{f}");
 }
+
+/// A merge git refuses because one is already in progress fails; it did not
+/// stop with conflicts of its own.
+#[test]
+fn a_refused_merge_is_not_taken_for_conflicts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    diverged_repo(dir);
+    let git = common::git(dir);
+    assert!(conflicts::merge(&git, "topic", false).unwrap());
+    let error = conflicts::merge(&git, "topic", false).unwrap_err();
+    assert!(format!("{error:#}").contains("unmerged files"), "{error:#}");
+    assert!(conflicts::cherry_pick(&git, "topic").is_err());
+}
