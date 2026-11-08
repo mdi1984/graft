@@ -148,7 +148,9 @@ impl Dialog {
 
 /// The ending of an operation submitted from the open dialog: success
 /// closes it, then `then` runs; an error shows in the dialog, which can be
-/// tried again even if the operation switched the branch before failing.
+/// tried again. Branch from stash switches the branch before it can fail,
+/// so after its failure any branch will do; other dialogs still refuse a
+/// branch that changed meanwhile.
 fn from_dialog<T>(
     then: impl FnOnce(&mut Project, PathBuf, anyhow::Result<T>) + Send,
 ) -> impl FnOnce(&mut Project, PathBuf, anyhow::Result<T>) + Send {
@@ -158,7 +160,9 @@ fn from_dialog<T>(
         {
             dialog.submitting = false;
             dialog.error = shown_error(e);
-            dialog.asked.branch_changed_by_us();
+            if matches!(dialog.kind, DialogKind::StashBranch { .. }) {
+                dialog.asked.branch_changed_by_us();
+            }
             return;
         }
         if result.is_ok() {
@@ -864,6 +868,48 @@ mod tests {
         });
         let restored = std::fs::read_to_string(main.join("u.txt")).unwrap();
         assert_eq!(restored.trim_end(), "stashed");
+    }
+
+    /// A failed merge leaves the dialog open; when the branch changes
+    /// before the next try, OK refuses instead of merging into it.
+    #[test]
+    fn a_failed_dialog_still_refuses_a_changed_branch() {
+        let Setup {
+            _dir,
+            mut project,
+            main,
+            ..
+        } = setup(|_| {});
+        project.apply(Action::OpenWorktree(main.clone()));
+        project.apply(Action::OpenDialog(DialogKind::Merge {
+            into: "main".to_owned(),
+            rev: "no-such-branch".to_owned(),
+            choices: Vec::new(),
+            filter: String::new(),
+            no_ff: false,
+        }));
+        project.apply(Action::SubmitDialog);
+        wait(&mut project, "the merge never failed", |p| {
+            p.dialog.as_ref().is_some_and(|d| d.error.is_some())
+        });
+
+        git(&main, &["switch", "-q", "other"]);
+        project.refresh();
+        wait(&mut project, "the switch never showed", |p| {
+            branch_at(p, &main).as_deref() == Some("other")
+        });
+        project.dialog.as_mut().unwrap().kind = DialogKind::Merge {
+            into: "main".to_owned(),
+            rev: "agent".to_owned(),
+            choices: Vec::new(),
+            filter: String::new(),
+            no_ff: false,
+        };
+        project.apply(Action::SubmitDialog);
+        assert!(project.dialog.is_none());
+        assert!(!project.is_operating());
+        assert_eq!(project.notices.len(), 1, "{:?}", project.notices);
+        assert!(project.notices[0].contains("changed while you were deciding"));
     }
 
     /// An action refused because another operation runs changes nothing.
