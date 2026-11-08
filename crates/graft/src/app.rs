@@ -572,15 +572,15 @@ impl GraftApp {
             self.update = update::Status::Ready(release, installed);
             return;
         }
-        self.update = update::Status::Installing(release);
-        self.jobs.spawn(
-            move || update::restart(&installed),
-            |app, restarted| match restarted {
-                // The new Graft runs: close this one.
-                Ok(()) => app.closing = true,
-                Err(e) => app.update = update::Status::Failed(format!("{e:#}")),
-            },
-        );
+        // Started right here, not as a job: nothing may start in between.
+        match update::restart(&installed) {
+            // The new Graft runs: close this one.
+            Ok(()) => {
+                self.update = update::Status::Installing(release);
+                self.closing = true;
+            }
+            Err(e) => self.update = update::Status::Failed(format!("{e:#}")),
+        }
     }
 
     /// Close a project's tab, unless an operation still runs there (see
