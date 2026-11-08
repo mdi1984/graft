@@ -82,8 +82,8 @@ pub fn paint_icon(painter: &Painter, left_center: Pos2, icon: Icon, color: Color
 
 #[derive(Clone, Copy)]
 pub struct BadgeColors {
-    pub bg: Color32,
-    pub fg: Color32,
+    bg: Color32,
+    fg: Color32,
 }
 
 pub fn dirty() -> BadgeColors {

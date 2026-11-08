@@ -25,7 +25,7 @@ pub struct SettingsForm {
     key_error: Option<String>,
     /// The identity as loaded, to tell whether it was edited.
     loaded: Option<Identity>,
-    pub identity: Identity,
+    identity: Identity,
 }
 
 pub enum Outcome {

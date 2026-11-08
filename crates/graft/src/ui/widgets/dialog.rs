@@ -12,11 +12,11 @@ use crate::theme::color;
 
 pub struct Shown<R> {
     /// What the content returned.
-    pub inner: R,
+    inner: R,
     /// Escape, or a click outside the dialog. Never while `busy`.
     pub cancel: bool,
     /// Enter, unless `busy`.
-    pub enter: bool,
+    enter: bool,
 }
 
 /// Show a dialog `width` wide with `add` as its content. While `busy`

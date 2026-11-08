@@ -55,17 +55,17 @@ fn place_of(path: &Path) -> Place {
 }
 
 pub struct StartPage {
-    pub mode: Mode,
-    pub url: String,
-    pub clone_parent: String,
-    pub folder_name: String,
+    mode: Mode,
+    url: String,
+    clone_parent: String,
+    folder_name: String,
     /// The user typed a folder name, so stop deriving it from the URL.
     folder_name_edited: bool,
-    pub init_path: String,
+    init_path: String,
     /// A clone or init in progress.
     busy: Option<Running>,
     error: Option<String>,
-    pub place: Place,
+    place: Place,
     distros: Distros,
     homes: HashMap<String, Home>,
     /// The clone folder and new repository folder typed for other places.
@@ -86,7 +86,7 @@ enum Distros {
 /// not every frame.
 pub struct Recent {
     pub path: PathBuf,
-    pub exists: bool,
+    exists: bool,
 }
 
 impl Recent {

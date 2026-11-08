@@ -21,7 +21,7 @@ pub const STATUS_HEIGHT: f32 = 26.0;
 #[derive(Default)]
 pub struct ConsoleView {
     next_seq: u64,
-    pub entries: Vec<Entry>,
+    entries: Vec<Entry>,
     /// Entries before this `seq` were seen (console open).
     seen: u64,
     /// Entries before this `seq` are hidden ("Clear").
