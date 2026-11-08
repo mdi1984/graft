@@ -10,7 +10,7 @@ use graft_core::conflicts::{
 };
 use graft_core::{InProgress, Operation, Worktree};
 
-use super::widgets::{ButtonKind, button, empty_state, waiting};
+use super::widgets::{ButtonKind, button, empty_state, section_heading_row, waiting};
 use crate::project::{Action, ConflictView, Project};
 use crate::text::plural;
 use crate::theme::{self, RADIUS, color};
@@ -490,11 +490,7 @@ fn code(ui: &mut Ui, text: &str, fg: Color32) {
 
 /// The whole file as it will be saved; unresolved conflicts stand out.
 fn result_panel(ui: &mut Ui, view: &ConflictView, file: &ConflictFile) {
-    ui.label(
-        RichText::new("RESULT")
-            .font(theme::semibold(theme::SMALL_SIZE))
-            .color(color::text_faint()),
-    );
+    section_heading_row(ui, "RESULT");
     ui.add_space(4.0);
     let resolutions = view.effective();
     let mut job = LayoutJob::default();

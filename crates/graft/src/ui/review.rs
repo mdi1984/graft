@@ -15,7 +15,7 @@ use super::diff_view::{self, Marks};
 use super::file_row;
 use super::widgets::{
     Badge, ButtonKind, ahead, button, empty_state, paint_check, paint_galley_left, progress_bar,
-    waiting,
+    section_heading_row, waiting,
 };
 use crate::keys::Command;
 use crate::project::comments::{self, LineComment};
@@ -336,11 +336,7 @@ fn merge_button(
 
 fn file_list(ui: &mut Ui, project: &Project, review: &Review, actions: &mut Actions) {
     let selected = project.review.as_ref().and_then(|v| v.selected.as_deref());
-    ui.label(
-        RichText::new(format!("FILES  {}", review.files.len()))
-            .font(theme::semibold(theme::SMALL_SIZE))
-            .color(color::text_faint()),
-    );
+    section_heading_row(ui, &format!("FILES  {}", review.files.len()));
     ui.add_space(4.0);
     ScrollArea::vertical()
         .id_salt("review-file-list")

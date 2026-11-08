@@ -11,7 +11,8 @@ use graft_core::{RepoSnapshot, short};
 use super::diff_view;
 use super::file_row::{FILE_ROW_HEIGHT, file_row};
 use super::widgets::{
-    ButtonKind, button, elided, empty_state, paint_galley_left, paint_row_bg, waiting,
+    ButtonKind, button, elided, empty_state, hint, paint_galley_left, paint_row_bg,
+    section_heading_row, waiting,
 };
 use crate::project::{Action, Confirm, DialogKind, FileKey, Project};
 use crate::theme::{self, color};
@@ -95,16 +96,8 @@ fn list(
     actions: &mut Actions,
 ) {
     let now = time::now();
-    ui.label(
-        RichText::new(format!("STASHES  {}", stashes.len()))
-            .font(theme::semibold(theme::SMALL_SIZE))
-            .color(color::text_faint()),
-    );
-    ui.label(
-        RichText::new("Shared by all worktrees of this repository.")
-            .color(color::text_faint())
-            .size(theme::SMALL_SIZE),
-    );
+    section_heading_row(ui, &format!("STASHES  {}", stashes.len()));
+    hint(ui, "Shared by all worktrees of this repository.");
     ui.add_space(6.0);
     ScrollArea::vertical()
         .id_salt("stash-list-scroll")

@@ -154,7 +154,8 @@ pub fn paint_badges_right(painter: &Painter, right: f32, y: f32, badges: Vec<Bad
     x
 }
 
-/// Small uppercase heading for a sidebar section, e.g. "WORKTREES".
+/// Small letter-spaced heading over a section, painted at `x`, centered on
+/// `y`. `title` comes in capitals: "WORKTREES", "FILES  12".
 pub fn section_heading(ui: &Ui, painter: &Painter, x: f32, y: f32, title: &str) {
     let format = TextFormat {
         font_id: theme::semibold(theme::SMALL_SIZE),
@@ -192,6 +193,12 @@ pub fn paint_check(painter: &Painter, rect: Rect, checked: bool, hovered: bool) 
         };
         painter.rect_stroke(rect, 3, Stroke::new(1.0, border), StrokeKind::Inside);
     }
+}
+
+/// A [`section_heading`] on a row of its own, in a laid-out panel.
+pub fn section_heading_row(ui: &mut Ui, title: &str) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 16.0), Sense::hover());
+    section_heading(ui, ui.painter(), rect.left(), rect.center().y, title);
 }
 
 /// Row background: selected, hovered, or nothing.

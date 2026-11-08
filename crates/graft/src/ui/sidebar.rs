@@ -1,5 +1,5 @@
-//! Left sidebar: WORKSPACE, WORKTREES, BRANCHES, then collapsible REMOTES and
-//! TAGS, and STASHES.
+//! Left sidebar: WORKSPACE and WORKTREES, the collapsible BRANCHES, REMOTES
+//! and TAGS, and STASHES at the bottom.
 
 use egui::{Id, Rect, Response, ScrollArea, Sense, Stroke, Ui, pos2, vec2};
 use graft_core::console::redact;
@@ -36,7 +36,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
 
-            heading(ui, "WORKSPACE", None);
+            heading(ui, "WORKSPACE", false);
             let in_workspace = nav.tab == Tab::Workspace;
             let dirty = current.map_or(0, Worktree::dirty);
             let dirty_badge =
@@ -60,7 +60,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
             }
             ui.add_space(SECTION_GAP);
 
-            if let Some(add) = heading(ui, "WORKTREES", Some(repo.worktrees.len()))
+            if let Some(add) = heading(ui, "WORKTREES", true)
                 && add.on_hover_text("New worktree").clicked()
                 && !project.is_operating()
             {
@@ -104,7 +104,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
             }
 
             if collapsible(ui, "REMOTES", repo.remotes.len(), false) {
-                remotes(ui, project, repo, project.is_operating(), actions);
+                remotes(ui, project, repo, actions);
                 ui.add_space(SECTION_GAP);
             }
 
@@ -234,11 +234,14 @@ fn row(ui: &mut Ui, height: f32) -> (Rect, Response) {
     ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click())
 }
 
-/// Section heading with a count; returns the "+" button's response for WORKTREES.
-fn heading(ui: &mut Ui, title: &str, count: Option<usize>) -> Option<Response> {
+/// Section heading, with a "+" button at the right if `plus`; returns the
+/// button's response.
+fn heading(ui: &mut Ui, title: &str, plus: bool) -> Option<Response> {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
     section_heading(ui, ui.painter(), rect.left() + 6.0, rect.center().y, title);
-    count?;
+    if !plus {
+        return None;
+    }
     let button =
         Rect::from_center_size(pos2(rect.right() - 12.0, rect.center().y), vec2(22.0, 22.0));
     let response = ui.interact(button, ui.scope_id().with(title), Sense::click());
@@ -568,9 +571,9 @@ fn remote_branch_menu(
     project: &Project,
     repo: &RepoSnapshot,
     branch: &RemoteBranch,
-    busy: bool,
     actions: &mut Actions,
 ) {
+    let busy = project.is_operating();
     merge_items(ui, project, &branch.name, actions);
     let local = branch.branch_name();
     // With a local branch of its name, that is what gets checked out.
@@ -737,7 +740,8 @@ fn open_branch(project: &Project, repo: &RepoSnapshot, name: &str) -> Option<Act
     }
 }
 
-fn remotes(ui: &mut Ui, project: &Project, repo: &RepoSnapshot, busy: bool, actions: &mut Actions) {
+fn remotes(ui: &mut Ui, project: &Project, repo: &RepoSnapshot, actions: &mut Actions) {
+    let busy = project.is_operating();
     let add = Action::OpenDialog(DialogKind::add_remote(repo.remotes.is_empty()));
     for remote in &repo.remotes {
         simple_row(ui, Icon::Cloud, &remote.name, color::text_mid(), 8.0)
@@ -787,7 +791,7 @@ fn remotes(ui: &mut Ui, project: &Project, repo: &RepoSnapshot, busy: bool, acti
             &|_| false,
             Level::top(22.0),
             &mut |ui, branch, label, indent| {
-                remote_branch_row(ui, project, repo, branch, label, indent, busy, actions)
+                remote_branch_row(ui, project, repo, branch, label, indent, actions)
             },
         );
     }
@@ -797,7 +801,6 @@ fn remotes(ui: &mut Ui, project: &Project, repo: &RepoSnapshot, busy: bool, acti
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn remote_branch_row(
     ui: &mut Ui,
     project: &Project,
@@ -805,7 +808,6 @@ fn remote_branch_row(
     branch: &RemoteBranch,
     label: &str,
     indent: f32,
-    busy: bool,
     actions: &mut Actions,
 ) {
     let (rect, response) = row(ui, 24.0);
@@ -832,7 +834,7 @@ fn remote_branch_row(
         let local = branch.branch_name();
         if repo.branch(local).is_some() {
             actions.extend(open_branch(project, repo, local));
-        } else if !busy {
+        } else if !project.is_operating() {
             actions.push(Action::CheckoutRemote {
                 local: local.to_owned(),
                 remote: branch.name.clone(),
@@ -841,16 +843,27 @@ fn remote_branch_row(
     } else if response.clicked() {
         actions.push(Action::Reveal(branch.target));
     }
-    response.context_menu(|ui| remote_branch_menu(ui, project, repo, branch, busy, actions));
+    response.context_menu(|ui| remote_branch_menu(ui, project, repo, branch, actions));
 }
 
-/// An icon and a name, indented by `indent`.
-fn simple_row(ui: &mut Ui, icon: Icon, text: &str, fg: egui::Color32, indent: f32) -> Response {
+/// An icon in `icon_color` and a name, indented by `indent`.
+fn simple_row(
+    ui: &mut Ui,
+    icon: Icon,
+    text: &str,
+    icon_color: egui::Color32,
+    indent: f32,
+) -> Response {
     let (rect, response) = row(ui, 24.0);
     paint_row_bg(ui.painter(), rect, &response, false);
     let y = rect.center().y;
     let icon_rect = Rect::from_center_size(pos2(rect.left() + indent + 6.0, y), vec2(12.0, 12.0));
-    super::icons::paint(ui.painter(), icon_rect, icon, fg.gamma_multiply(0.8));
+    super::icons::paint(
+        ui.painter(),
+        icon_rect,
+        icon,
+        icon_color.gamma_multiply(0.8),
+    );
     let x = rect.left() + indent + 18.0;
     let name = elided(
         ui,
