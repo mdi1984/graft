@@ -7,9 +7,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 use crate::cli::Git;
-use crate::diff::{
-    Chosen, Direction, FileDiff, Kind, Source, build_patch, chosen, new_file_header,
-};
+use crate::diff::{Chosen, Direction, FileDiff, Kind, Source, build_patch, chosen};
 use crate::paths::display;
 
 /// Stage whole files (including deletions).
@@ -96,19 +94,11 @@ pub fn apply_lines(
         (Source::Untracked, LineOp::Stage) if everything => {
             stage_paths(git, std::slice::from_ref(&diff.path))
         }
-        (Source::Untracked, LineOp::Stage) => {
-            let mut diff = diff.clone();
-            if strips_cr(git)? {
-                for line in diff.hunks.iter_mut().flat_map(|h| &mut h.lines) {
-                    if line.content.ends_with(b"\r") {
-                        line.content.pop();
-                    }
-                }
-            }
-            diff.header = new_file_header(&diff.path);
-            let patch = build_patch(&diff, Direction::Forward, &selected).expect("lines chosen");
-            apply_patch(git, &patch, true, false)
-        }
+        (Source::Untracked, LineOp::Stage) => stage_new_file_lines(
+            git,
+            &diff.path,
+            &kept_lines(diff, Kept::Selected, &selected),
+        ),
         (Source::Untracked, LineOp::Discard) if everything => {
             discard_paths(git, &[], std::slice::from_ref(&diff.path))
         }
@@ -119,11 +109,58 @@ pub fn apply_lines(
     }
 }
 
-/// Whether git turns CRLF into LF when adding files (core.autocrlf).
-fn strips_cr(git: &Git) -> Result<bool> {
-    let value = git.config(&["--get", "core.autocrlf"])?;
-    let value = value.unwrap_or_default().to_lowercase();
-    Ok(value == "true" || value == "input")
+/// Which lines of a new file's diff to keep.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kept {
+    Selected,
+    Unselected,
+}
+
+/// The content of a new file's diff, as on disk, with only the selected
+/// (or only the unselected) added lines.
+fn kept_lines(diff: &FileDiff, keep: Kept, selected: impl Fn(usize, usize) -> bool) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (h, hunk) in diff.hunks.iter().enumerate() {
+        for (l, line) in hunk.lines.iter().enumerate() {
+            let picked = line.kind == Kind::Added && selected(h, l);
+            if picked != (keep == Kept::Selected) {
+                continue;
+            }
+            out.extend_from_slice(&line.content);
+            if !line.no_newline {
+                out.push(b'\n');
+            }
+        }
+    }
+    out
+}
+
+/// Stage an untracked file with only `content` (worktree form). git cleans
+/// it as `git add` would (line endings, .gitattributes, filters) and picks
+/// the mode from the file (core.fileMode). A failure leaves the index as
+/// it was.
+fn stage_new_file_lines(git: &Git, path: &str, content: &[u8]) -> Result<()> {
+    let out = git.run_input(["hash-object", "-w", "--stdin", "--path", path], content)?;
+    let id = out.stdout_str().trim().to_owned();
+    // An intent-to-add entry carries the mode git sees on the file.
+    git.run(["add", "--intent-to-add", "--", path])?;
+    let staged = replace_entry_content(git, path, &id);
+    if staged.is_err() {
+        let _ = git.run(["update-index", "--force-remove", "--", path]);
+    }
+    staged.context("git could not stage the lines")
+}
+
+/// Point the index entry of `path` at blob `id`, keeping its mode.
+fn replace_entry_content(git: &Git, path: &str, id: &str) -> Result<()> {
+    let entry = git.read(["ls-files", "--stage", "--", path])?;
+    let mode = entry
+        .split_whitespace()
+        .next()
+        .with_context(|| format!("git did not list {path} in the index"))?
+        .to_owned();
+    git.run(["update-index", "--add", "--cacheinfo", &mode, id, path])?;
+    Ok(())
 }
 
 /// Rewrite an untracked file without the selected lines.
@@ -135,18 +172,7 @@ fn remove_lines(
     if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
         bail!("{} is a link; Graft only edits plain files.", display(path));
     }
-    let mut out = Vec::new();
-    for (h, hunk) in diff.hunks.iter().enumerate() {
-        for (l, line) in hunk.lines.iter().enumerate() {
-            if line.kind == Kind::Added && selected(h, l) {
-                continue;
-            }
-            out.extend_from_slice(&line.content);
-            if !line.no_newline {
-                out.push(b'\n');
-            }
-        }
-    }
+    let out = kept_lines(diff, Kept::Unselected, selected);
     std::fs::write(path, out).with_context(|| format!("Could not write {}", display(path)))
 }
 

@@ -245,9 +245,20 @@ fn git_file_matters(inside: &Path) -> bool {
     if text.ends_with(".lock") {
         return false;
     }
-    // A linked worktree's own HEAD and index live in .git/worktrees/<name>/.
+    // Upstreams and remotes (`branch -u`, `remote add`, `remote set-url`).
+    if text == "config" {
+        return true;
+    }
+    // A linked worktree's own HEAD and index live in .git/worktrees/<name>/,
+    // next to `locked`, which `worktree lock` and `unlock` add and remove.
     let text = match text.strip_prefix("worktrees/") {
-        Some(rest) => rest.split_once('/').map_or("", |(_, r)| r).to_owned(),
+        Some(rest) => {
+            let rest = rest.split_once('/').map_or("", |(_, r)| r);
+            if rest == "locked" {
+                return true;
+            }
+            rest.to_owned()
+        }
         None => text,
     };
     let in_progress = OPERATION_MARKERS.iter().any(|(marker, _)| {
@@ -301,6 +312,8 @@ mod tests {
         assert!(m("worktrees/agent/HEAD") && m("worktrees/agent/index"));
         assert!(!m("objects/ab/cdef") && !m("index.lock") && !m("logs/HEAD"));
         assert!(!m("FETCH_HEAD") && !m("worktrees/agent/logs/HEAD"));
+        assert!(m("config") && m("worktrees/agent/locked"));
+        assert!(!m("config.lock") && !m("locked") && !m("worktrees/agent/gitdir"));
         assert_eq!(
             inside_git_dir(Path::new(".git/refs/heads/x")),
             Some(PathBuf::from("refs/heads/x"))

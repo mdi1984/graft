@@ -54,7 +54,6 @@ fn locate_snapshot_history_details() {
     let names: Vec<_> = snap.branches.iter().map(|b| b.name.as_str()).collect();
     assert_eq!(names, ["agent", "feature", "main"]);
     assert_eq!(snap.tags.len(), 1);
-    assert!(snap.tags[0].annotated);
 
     // History over all branches: 5 commits, merge on top, two lanes.
     let tips: Vec<_> = snap.branches.iter().map(|b| b.target).collect();

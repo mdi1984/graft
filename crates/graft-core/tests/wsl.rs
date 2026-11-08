@@ -220,6 +220,31 @@ fn worktrees_clone_and_conflicts() {
     assert!(dest.join("readme.md").exists());
 }
 
+/// Staging some lines of a new executable script keeps its mode: git in the
+/// distro sees the +x bit Windows cannot.
+#[test]
+fn partial_stage_of_new_script_keeps_mode() {
+    let Some(d) = Distro::start("partial_stage_of_new_script_keeps_mode") else {
+        return;
+    };
+    repo_with_worktree(&d);
+    d.sh("cd app && printf '#!/bin/sh\\necho a\\necho b\\n' > new.sh && chmod +x new.sh");
+    let git = Git::new(d.path("app"), Console::default());
+    let diff =
+        graft_core::diff::load(&git, &graft_core::diff::Source::Untracked, "new.sh").unwrap();
+    ops::apply_lines(
+        &git,
+        &diff,
+        &graft_core::diff::Source::Untracked,
+        ops::LineOp::Stage,
+        |_, l| l < 2,
+    )
+    .unwrap();
+    let entry = d.sh("cd app && git ls-files --stage -- new.sh");
+    assert!(entry.starts_with("100755 "), "{entry}");
+    assert_eq!(d.sh("cd app && git show :new.sh"), "#!/bin/sh\necho a");
+}
+
 #[test]
 fn preview_in_main() {
     let Some(d) = Distro::start("preview_in_main") else {

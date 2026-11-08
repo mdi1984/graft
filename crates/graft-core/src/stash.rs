@@ -54,9 +54,7 @@ impl StashFile {
 }
 
 pub fn list(git: &Git) -> Result<Vec<Stash>> {
-    let out =
-        git.without_literal_pathspecs()
-            .read(["stash", "list", "--format=%H%x1f%gs%x1f%ct"])?;
+    let out = git.read(["stash", "list", "--format=%H%x1f%gs%x1f%ct"])?;
     Ok(out
         .lines()
         .enumerate()
@@ -132,15 +130,13 @@ fn reference(git: &Git, id: Oid) -> Result<String> {
 /// Apply a stash to the worktree `git` points at; `pop` also drops it.
 pub fn apply(git: &Git, id: Oid, pop: bool) -> Result<()> {
     let name = reference(git, id)?;
-    git.without_literal_pathspecs()
-        .run(["stash", if pop { "pop" } else { "apply" }, &name])?;
+    git.run(["stash", if pop { "pop" } else { "apply" }, &name])?;
     Ok(())
 }
 
 pub fn drop(git: &Git, id: Oid) -> Result<()> {
     let name = reference(git, id)?;
-    git.without_literal_pathspecs()
-        .run(["stash", "drop", &name])?;
+    git.run(["stash", "drop", &name])?;
     Ok(())
 }
 
@@ -149,8 +145,7 @@ pub fn drop(git: &Git, id: Oid) -> Result<()> {
 pub fn branch(git: &Git, branch: &str, id: Oid) -> Result<()> {
     crate::refs::check_branch_name(git, branch)?;
     let name = reference(git, id)?;
-    git.without_literal_pathspecs()
-        .run(["stash", "branch", branch, &name])?;
+    git.run(["stash", "branch", branch, &name])?;
     Ok(())
 }
 

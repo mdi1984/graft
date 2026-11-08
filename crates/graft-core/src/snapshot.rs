@@ -116,7 +116,6 @@ fn parse_refs(text: &str) -> Refs {
             refs.tags.push(Tag {
                 name: tag.to_owned(),
                 target: peeled_oid.unwrap_or(oid),
-                annotated: peeled_oid.is_some(),
             });
         }
     }
@@ -229,14 +228,11 @@ fn load_remotes(git: &Git) -> Result<Vec<Remote>> {
                 remotes.push(Remote {
                     name: name.to_owned(),
                     fetch_url: String::new(),
-                    push_url: String::new(),
                 });
                 remotes.last_mut().expect("just pushed")
             }
         };
-        if kind == "(push)" {
-            remote.push_url = url.to_owned();
-        } else {
+        if kind == "(fetch)" {
             remote.fetch_url = url.to_owned();
         }
     }
@@ -291,7 +287,6 @@ mod tests {
         assert_eq!(refs.remote_branches.len(), 1);
         assert_eq!(refs.remote_branches[0].branch_name(), "feature/x");
         assert_eq!(refs.remote_default.as_deref(), Some("main"));
-        assert!(refs.tags[0].annotated);
         assert_eq!(refs.tags[0].target.to_string(), peeled);
     }
 

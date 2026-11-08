@@ -116,6 +116,54 @@ fn untracked_partial_stage_and_whole_files() {
     );
 }
 
+/// Selected lines of a new file go through git's own clean step: with
+/// `* text=auto` and autocrlf off, git stores LF. A file whose filter fails
+/// is not staged at all.
+#[test]
+fn untracked_partial_stage_follows_gitattributes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = common::init(&tmp.path().join("r"));
+    std::fs::write(
+        dir.join(".gitattributes"),
+        "* text=auto\n*.bad filter=bad\n",
+    )
+    .unwrap();
+    common::commit(&dir, "a.txt", "a\n", "init");
+    sh(&dir, &["add", ".gitattributes"]);
+    sh(&dir, &["commit", "-q", "-m", "attributes"]);
+    let git = common::git(&dir);
+
+    std::fs::write(dir.join("new.txt"), "l1\r\nl2\r\nl3\r\n").unwrap();
+    let d = diff::load(&git, &Source::Untracked, "new.txt").unwrap();
+    ops::apply_lines(
+        &git,
+        &d,
+        &Source::Untracked,
+        LineOp::Stage,
+        pick(&d, &["l1", "l3"]),
+    )
+    .unwrap();
+    let blob = sh(&dir, &["cat-file", "-p", ":new.txt"]);
+    assert_eq!(blob, "l1\nl3", "only the picked lines, stored with LF");
+    let entry = sh(&dir, &["ls-files", "--stage", "--", "new.txt"]);
+    assert!(entry.starts_with("100644 "), "{entry}");
+
+    std::fs::write(dir.join("x.bad"), "x1\nx2\n").unwrap();
+    let d = diff::load(&git, &Source::Untracked, "x.bad").unwrap();
+    sh(&dir, &["config", "filter.bad.clean", "false"]);
+    sh(&dir, &["config", "filter.bad.required", "true"]);
+    let before = sh(&dir, &["ls-files", "--stage"]);
+    let result = ops::apply_lines(
+        &git,
+        &d,
+        &Source::Untracked,
+        LineOp::Stage,
+        pick(&d, &["x1"]),
+    );
+    assert!(result.is_err());
+    assert_eq!(sh(&dir, &["ls-files", "--stage"]), before);
+}
+
 #[test]
 fn commit_amend_and_push() {
     let (tmp, git) = repo();

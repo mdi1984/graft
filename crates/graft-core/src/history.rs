@@ -16,7 +16,6 @@ pub struct Commit {
     pub id: Oid,
     pub parents: SmallVec<[Oid; 2]>,
     pub author: String,
-    pub email: String,
     /// Author time, seconds since the Unix epoch.
     pub time: i64,
     /// Committer time; used for ordering like git does.
@@ -70,7 +69,6 @@ pub fn walk(root: &Path, tips: &[Oid], limit: usize, cancel: &CancelToken) -> Re
             id: info.id,
             parents: info.parent_ids.iter().copied().collect(),
             author: author.name.to_string(),
-            email: author.email.to_string(),
             time,
             commit_time: info.commit_time.unwrap_or(time),
             summary,
@@ -107,7 +105,6 @@ impl History {
                 id: worktree_id(),
                 parents: SmallVec::from_slice(&[parent]),
                 author: String::new(),
-                email: String::new(),
                 time: i64::MAX,
                 commit_time: i64::MAX,
                 summary: String::new(),
@@ -304,7 +301,6 @@ mod tests {
             id: oid(n),
             parents: parents.iter().map(|&p| oid(p)).collect(),
             author: String::new(),
-            email: String::new(),
             time,
             commit_time: time,
             summary: format!("c{n}"),
