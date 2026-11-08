@@ -1,5 +1,6 @@
-//! The screens. They read the app's state and say what the user did as
-//! [`Actions`]; they never change state themselves.
+//! The screens. They read the app's state and report what the user did as
+//! [`Actions`]. The only state they change themselves is what is typed into
+//! forms and dialogs, and egui's memory (scroll positions, open menus).
 
 pub mod about;
 mod branch_menu;

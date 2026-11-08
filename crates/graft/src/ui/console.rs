@@ -199,11 +199,7 @@ fn entry_row(ui: &mut Ui, entry: &Entry) {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let mut x = rect.left() + 4.0;
-    let time = painter.layout_no_wrap(
-        crate::time::clock(secs),
-        theme::mono(),
-        color::text_faint(),
-    );
+    let time = painter.layout_no_wrap(crate::time::clock(secs), theme::mono(), color::text_faint());
     let time_width = time.size().x;
     paint_galley_left(painter, x, y, time);
     x += time_width + 10.0;
