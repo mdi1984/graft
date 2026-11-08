@@ -10,13 +10,10 @@ use graft_core::{RepoSnapshot, Upstream, Worktree};
 
 use super::can::{self, Can, no, yes};
 use super::icons::Icon;
-use super::widgets::{Tone, tool_button, toolbar_divider};
+use super::widgets::{Tone, fits, remember_width, tool_button, toolbar_divider};
 use crate::project::{Action, DialogKind, Project, RemoteOp, merge_dialog};
 use crate::text::plural;
 use crate::ui::Actions;
-
-/// Below this width, buttons with an icon drop their label.
-const COMPACT_WIDTH: f32 = 1120.0;
 
 pub fn show(
     ui: &mut Ui,
@@ -31,11 +28,15 @@ pub fn show(
     let blocked = project.can_act().err();
     let ahead = wt.map_or(0, |wt| wt.ahead());
     let behind = wt.map_or(0, |wt| wt.behind());
-    let compact = ui.available_width() < COMPACT_WIDTH;
+    // Buttons with an icon drop their label when the labeled buttons (as
+    // wide as last measured) leave the search less than its full width.
+    let labeled = egui::Id::unique("toolbar-labeled-width");
+    let compact = !fits(ui, labeled, ui.available_width() - super::search::MAX_WIDTH);
     let label = |text: &'static str| if compact { "" } else { text };
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
+        let start = ui.cursor().left();
 
         let can = can_commit(wt);
         if tool_button(
@@ -184,6 +185,9 @@ pub fn show(
         .clicked()
         {
             actions.push(Action::OpenSlash);
+        }
+        if !compact {
+            remember_width(ui, labeled, ui.cursor().left() - start);
         }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {

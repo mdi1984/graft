@@ -332,6 +332,10 @@ fn project_hits(
     out
 }
 
+/// The search box's width: what the toolbar leaves, within these.
+const MIN_WIDTH: f32 = 160.0;
+pub const MAX_WIDTH: f32 = 300.0;
+
 pub fn show(
     ui: &mut Ui,
     projects: &[Project],
@@ -367,7 +371,7 @@ pub fn show(
     } else {
         color::control_border()
     };
-    let width = ui.available_width().clamp(160.0, 300.0);
+    let width = ui.available_width().clamp(MIN_WIDTH, MAX_WIDTH);
 
     let before = text.clone();
     let frame = Frame::new()

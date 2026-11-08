@@ -4,7 +4,7 @@
 //! for a coding agent in one go), Open in IDE and Merge.
 
 use egui::{
-    Align, Frame, Key, Layout, Margin, Panel, Rect, RichText, ScrollArea, Sense, TextEdit, Ui,
+    Align, Frame, Id, Key, Layout, Margin, Panel, Rect, RichText, ScrollArea, Sense, TextEdit, Ui,
     pos2, vec2,
 };
 use graft_core::review::{Review, ReviewFile};
@@ -14,8 +14,8 @@ use super::can;
 use super::diff_view::{self, Marks};
 use super::file_row;
 use super::widgets::{
-    Badge, ButtonKind, ahead, button, empty_state, paint_check, paint_galley_left, progress_bar,
-    section_heading_row, waiting,
+    Badge, ButtonKind, ahead, button, empty_state, fits, paint_check, paint_galley_left,
+    progress_bar, remember_width, section_heading_row, waiting,
 };
 use crate::keys::{self, Command};
 use crate::project::comments::{self, LineComment};
@@ -151,10 +151,14 @@ fn header(
     actions: &mut Actions,
 ) {
     let blocked = project.can_act().err();
-    // Not enough room for everything on one line: the numbers and the
-    // progress bar move to a second line instead of running under the buttons.
-    let one_line = ui.available_width() > ONE_LINE_WIDTH;
+    // Not enough room for everything on one line (as wide as it measured
+    // last frame): the numbers and the progress bar move to a second line
+    // instead of running under the buttons.
+    let needed = Id::unique("review-header-width");
+    let one_line = fits(ui, needed, ui.available_width());
+    let mut width = 0.0;
     ui.horizontal(|ui| {
+        let start = ui.cursor().left();
         let base = project.review_state().and_then(|s| s.base.clone());
         base_picker(
             ui,
@@ -166,6 +170,7 @@ fn header(
         if one_line {
             stats(ui, review);
         }
+        width += ui.cursor().left() - start;
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             merge_button(ui, snap, wt, review, blocked, actions);
@@ -191,16 +196,21 @@ fn header(
             if one_line {
                 progress(ui, review, viewed);
             }
+            width += ui.min_rect().width();
         });
     });
     if !one_line {
         ui.horizontal(|ui| {
+            let start = ui.cursor().left();
             stats(ui, review);
+            width += ui.cursor().left() - start;
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 progress(ui, review, viewed);
+                width += ui.min_rect().width();
             });
         });
     }
+    remember_width(ui, needed, width);
 }
 
 /// What "Open in IDE" runs, from the settings.
@@ -210,9 +220,6 @@ fn ide_tip(project: &Project, what: &str) -> String {
         command => format!("Open {what} with {command}"),
     }
 }
-
-/// Header width below which it takes two lines.
-const ONE_LINE_WIDTH: f32 = 1240.0;
 
 /// "12 commits · 30 files  +120 −45".
 fn stats(ui: &mut Ui, review: &Review) {
