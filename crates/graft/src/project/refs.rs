@@ -55,6 +55,8 @@ pub enum DialogKind {
         original: Option<String>,
         name: String,
         url: String,
+        /// `url` is the push URL of a remote that has only that.
+        push_only: bool,
         /// Fetch from it after adding.
         fetch: bool,
     },
@@ -105,15 +107,17 @@ impl DialogKind {
             original: None,
             name: if first { graft_core::ORIGIN } else { "" }.to_owned(),
             url: String::new(),
+            push_only: false,
             fetch: true,
         }
     }
 
-    pub fn edit_remote(name: &str, url: &str) -> Self {
+    pub fn edit_remote(remote: &graft_core::Remote) -> Self {
         Self::Remote {
-            original: Some(name.to_owned()),
-            name: name.to_owned(),
-            url: url.to_owned(),
+            original: Some(remote.name.clone()),
+            name: remote.name.clone(),
+            url: remote.url.clone(),
+            push_only: remote.push_only,
             fetch: false,
         }
     }
@@ -375,6 +379,7 @@ impl Project {
                 original,
                 name,
                 url,
+                push_only,
                 fetch,
             } => {
                 let name = name.trim().to_owned();
@@ -392,7 +397,16 @@ impl Project {
                 self.run_op(
                     At::Selected,
                     label,
-                    move |git| remote::save_remote(&git, original.as_deref(), &name, &url, fetch),
+                    move |git| {
+                        remote::save_remote(
+                            &git,
+                            original.as_deref(),
+                            &name,
+                            &url,
+                            push_only,
+                            fetch,
+                        )
+                    },
                     from_dialog(say(done)),
                 )
             }

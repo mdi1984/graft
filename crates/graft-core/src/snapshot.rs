@@ -233,7 +233,7 @@ fn load_remotes(git: &Git) -> Result<Vec<Remote>> {
 
 /// `git config -z --get-regexp` output: `key\nvalue\0` per entry.
 fn parse_remotes(text: &str) -> Vec<Remote> {
-    let mut remotes: Vec<(Remote, bool)> = Vec::new();
+    let mut remotes: Vec<Remote> = Vec::new();
     for entry in text.split('\0') {
         let Some((key, value)) = entry.split_once('\n') else {
             continue;
@@ -246,22 +246,20 @@ fn parse_remotes(text: &str) -> Vec<Remote> {
             (None, Some(name)) => (name, false),
             (None, None) => continue,
         };
-        match remotes.iter_mut().find(|(r, _)| r.name == name) {
-            Some((remote, has_url)) if is_url && !*has_url => {
-                remote.fetch_url = value.to_owned();
-                *has_url = true;
+        match remotes.iter_mut().find(|r| r.name == name) {
+            Some(remote) if is_url && remote.push_only => {
+                remote.url = value.to_owned();
+                remote.push_only = false;
             }
             Some(_) => {}
-            None => remotes.push((
-                Remote {
-                    name: name.to_owned(),
-                    fetch_url: value.to_owned(),
-                },
-                is_url,
-            )),
+            None => remotes.push(Remote {
+                name: name.to_owned(),
+                url: value.to_owned(),
+                push_only: !is_url,
+            }),
         }
     }
-    remotes.into_iter().map(|(remote, _)| remote).collect()
+    remotes
 }
 
 #[cfg(test)]

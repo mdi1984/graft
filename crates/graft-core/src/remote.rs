@@ -173,12 +173,14 @@ fn upstream(git: &Git) -> Result<Upstream> {
 }
 
 /// Add a remote, or change one (`original` is its current name): rename it
-/// and set its URL. With `fetch`, fetch from it afterwards.
+/// and set its URL, or its push URL if it has only that (`push_only`). With
+/// `fetch`, fetch from it afterwards.
 pub fn save_remote(
     git: &Git,
     original: Option<&str>,
     name: &str,
     url: &str,
+    push_only: bool,
     fetch: bool,
 ) -> Result<()> {
     refs::check_name(git, RefKind::Remote, name)?;
@@ -190,7 +192,12 @@ pub fn save_remote(
             if old != name {
                 git.run(["remote", "rename", old, name])?;
             }
-            git.run(["remote", "set-url", name, url])?;
+            let mut args = vec!["remote", "set-url"];
+            if push_only {
+                args.push("--push");
+            }
+            args.extend([name, url]);
+            git.run(args)?;
         }
     }
     if fetch && let Err(error) = git.run(["fetch", name]) {

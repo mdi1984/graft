@@ -267,7 +267,10 @@ pub struct Tag {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Remote {
     pub name: String,
-    pub fetch_url: String,
+    /// Its (first) URL, or its push URL when it has only that.
+    pub url: String,
+    /// `url` is a push URL: the remote has no fetch URL.
+    pub push_only: bool,
 }
 
 /// A worktree's uncommitted changes and how far it is ahead of and behind

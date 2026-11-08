@@ -145,6 +145,7 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Actions) {
                 original,
                 name,
                 url,
+                push_only,
                 fetch,
             } => {
                 match original {
@@ -160,7 +161,7 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Actions) {
                 }
                 field_label(ui, "Name");
                 edited |= focused_field(ui, name, "origin", WIDTH, focus);
-                field_label(ui, "URL");
+                field_label(ui, if *push_only { "Push URL" } else { "URL" });
                 edited |=
                     text_field(ui, url, "https://github.com/you/repository.git", WIDTH).changed();
                 if original.is_none() {

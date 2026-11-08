@@ -16,16 +16,16 @@ fn add_edit_and_remove() {
 
     let git = common::git(&dir);
     let url = server.to_string_lossy().into_owned();
-    remote::save_remote(&git, None, "origin", &url, true).unwrap();
+    remote::save_remote(&git, None, "origin", &url, false, true).unwrap();
     let snap = snapshot::load(&git).unwrap();
     assert_eq!(snap.remotes.len(), 1);
     assert!(snap.remote_branches.iter().any(|b| b.name == "origin/main"));
 
     let other_url = other.to_string_lossy().into_owned();
-    remote::save_remote(&git, Some("origin"), "upstream", &other_url, false).unwrap();
+    remote::save_remote(&git, Some("origin"), "upstream", &other_url, false, false).unwrap();
     let snap = snapshot::load(&git).unwrap();
     assert_eq!(snap.remotes[0].name, "upstream");
-    assert_eq!(snap.remotes[0].fetch_url, other_url);
+    assert_eq!(snap.remotes[0].url, other_url);
 
     remote::remove_remote(&git, "upstream").unwrap();
     let snap = snapshot::load(&git).unwrap();
@@ -35,7 +35,7 @@ fn add_edit_and_remove() {
     // A new remote that can't be fetched is not kept.
     let missing = tmp.path().join("missing.git");
     let missing = missing.to_string_lossy().into_owned();
-    assert!(remote::save_remote(&git, None, "backup", &missing, true).is_err());
+    assert!(remote::save_remote(&git, None, "backup", &missing, false, true).is_err());
     let snap = snapshot::load(&git).unwrap();
     assert!(snap.remotes.is_empty());
 }
@@ -64,22 +64,44 @@ fn urls_show_as_configured() {
     let remotes: Vec<_> = snap
         .remotes
         .iter()
-        .map(|r| (r.name.as_str(), r.fetch_url.as_str()))
+        .map(|r| (r.name.as_str(), r.url.as_str(), r.push_only))
         .collect();
     assert_eq!(
         remotes,
         [
-            ("origin", "C:/My Repos/x.git"),
-            ("work.mirror", "gh:me/app"),
-            ("backup", "D:/backup.git"),
-            ("both", "D:/fetch.git"),
+            ("origin", "C:/My Repos/x.git", false),
+            ("work.mirror", "gh:me/app", false),
+            ("backup", "D:/backup.git", true),
+            ("both", "D:/fetch.git", false),
         ]
     );
 
     // Editing a remote without changing its URL keeps it as it was.
-    remote::save_remote(&git, Some("origin"), "origin", "C:/My Repos/x.git", false).unwrap();
+    remote::save_remote(
+        &git,
+        Some("origin"),
+        "origin",
+        "C:/My Repos/x.git",
+        false,
+        false,
+    )
+    .unwrap();
     assert_eq!(
         sh(&dir, &["config", "remote.origin.url"]),
         "C:/My Repos/x.git"
+    );
+
+    // Saving a remote that has only a push URL changes that push URL and
+    // adds no fetch URL.
+    remote::save_remote(&git, Some("backup"), "backup", "E:/backup.git", true, false).unwrap();
+    assert_eq!(
+        sh(&dir, &["config", "--get-all", "remote.backup.pushurl"]),
+        "E:/backup.git"
+    );
+    let snap = snapshot::load(&git).unwrap();
+    let backup = snap.remotes.iter().find(|r| r.name == "backup").unwrap();
+    assert_eq!(
+        (backup.url.as_str(), backup.push_only),
+        ("E:/backup.git", true)
     );
 }

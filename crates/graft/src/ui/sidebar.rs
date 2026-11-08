@@ -741,17 +741,17 @@ fn remotes(ui: &mut Ui, project: &Project, repo: &RepoSnapshot, actions: &mut Ac
             color::text(),
             8.0,
         )
-        .on_hover_text(graft_core::console::redact(&remote.fetch_url))
+        .on_hover_text(graft_core::console::redact(&remote.url))
         .context_menu(|ui| {
             can_item(
                 ui,
                 "Edit…",
                 &can_change,
                 actions,
-                Action::OpenDialog(DialogKind::edit_remote(&remote.name, &remote.fetch_url)),
+                Action::OpenDialog(DialogKind::edit_remote(remote)),
             );
             if ui.button("Copy URL").clicked() {
-                ui.ctx().copy_text(remote.fetch_url.clone());
+                ui.ctx().copy_text(remote.url.clone());
                 ui.close();
             }
             can_item(
@@ -765,7 +765,7 @@ fn remotes(ui: &mut Ui, project: &Project, repo: &RepoSnapshot, actions: &mut Ac
                         "Graft forgets {} and its remote branches. Nothing changes on the \
                              server, and your local branches keep their commits; branches that \
                              tracked it lose their upstream.",
-                        redact(&remote.fetch_url)
+                        redact(&remote.url)
                     ),
                     confirm_label: "Remove remote".to_owned(),
                     action: Action::RemoveRemote(remote.name.clone()),
