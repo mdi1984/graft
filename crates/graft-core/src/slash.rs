@@ -120,7 +120,7 @@ pub fn plan(git: &Git, snap: &RepoSnapshot, patterns: &str) -> Result<Plan> {
             .collect(),
         None => Vec::new(),
     };
-    let main_branch = snap.main_worktree().and_then(|wt| wt.branch.clone());
+    let main_branch = snap.main_branch();
 
     let mut out = Plan {
         default_branch: default.clone(),
@@ -142,7 +142,7 @@ pub fn plan(git: &Git, snap: &RepoSnapshot, patterns: &str) -> Result<Plan> {
             }
             continue;
         }
-        if main_branch.as_deref() == Some(name) {
+        if main_branch == Some(name) {
             if reason != Reason::NeverPushed {
                 out.kept.push(keep("checked out in the main worktree"));
             }

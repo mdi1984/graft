@@ -46,11 +46,29 @@ impl RepoSnapshot {
         self.branches.iter().find(|b| b.name == name)
     }
 
-    /// Worktree that has `branch` checked out, if any.
+    /// The branch the main worktree is on. During a preview git sees main
+    /// detached, but it is still on the branch Restore main goes back to.
+    pub fn main_branch(&self) -> Option<&str> {
+        match &self.preview {
+            Some(preview) => match &preview.restore {
+                Restore::Branch(branch) => Some(branch),
+                Restore::Detached(_) => None,
+            },
+            None => self.main_worktree()?.branch.as_deref(),
+        }
+    }
+
+    /// Worktree that has `branch` checked out, if any (main's branch as
+    /// [`Self::main_branch`] sees it).
     pub fn worktree_for_branch(&self, branch: &str) -> Option<&Worktree> {
-        self.worktrees
-            .iter()
-            .find(|wt| wt.branch.as_deref() == Some(branch))
+        self.worktrees.iter().find(|wt| {
+            let on = if wt.is_main {
+                self.main_branch()
+            } else {
+                wt.branch.as_deref()
+            };
+            on == Some(branch)
+        })
     }
 
     /// What can be merged into the branch `into`: the other local branches,

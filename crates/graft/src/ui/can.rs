@@ -113,6 +113,9 @@ pub fn merge_reviewed<'a>(
         (Some(_), Some(t)) if same_path(&t.path, &wt.path) => {
             no("This worktree is the base itself")
         }
+        (Some(_), Some(t)) if t.is_main && snap.preview.is_some() => {
+            no("The main folder shows a preview. Restore main first, then merge.")
+        }
         (Some(_), Some(t)) if t.in_progress.is_some() => {
             no(format!("{base} has a merge or rebase in progress"))
         }

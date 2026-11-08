@@ -7,7 +7,7 @@ use std::path::Path;
 use common::sh;
 use graft_core::slash::{self, Reason, default_protected};
 use graft_core::worktree::{self, Start};
-use graft_core::{CancelToken, Git, snapshot};
+use graft_core::{CancelToken, Git, preview, snapshot};
 
 fn commit(dir: &Path, file: &str, text: &str) {
     common::commit(dir, file, text, file);
@@ -296,4 +296,35 @@ fn branches_that_moved_since_the_scan_are_kept() {
     );
     let settings = std::fs::read_to_string(main.join(".git/config")).unwrap();
     assert!(!settings.contains("done/gone"), "{settings}");
+}
+
+/// During a preview the main folder is detached, but Restore main goes back
+/// to its branch: Slash keeps that branch, like any checked-out one.
+#[test]
+fn the_branch_main_returns_to_after_a_preview_is_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main = common::init(&tmp.path().join("app"));
+    commit(&main, "a.txt", "a\n");
+    sh(&main, &["switch", "-q", "-c", "topic"]);
+    let git = common::git(&main);
+    let agent = tmp.path().join("agent");
+    let start = Start::NewBranch {
+        name: "agent/x".into(),
+        base: "main".into(),
+    };
+    worktree::add(&git, &agent, &start).unwrap();
+    std::fs::write(agent.join("b.txt"), "b\n").unwrap();
+    preview::start(&git, &git.at(&agent)).unwrap();
+
+    let snap = snapshot::load(&git).unwrap();
+    assert!(snap.preview.is_some());
+    assert_eq!(snap.main_worktree().unwrap().branch, None);
+    assert_eq!(snap.main_branch(), Some("topic"));
+    assert!(snap.worktree_for_branch("topic").unwrap().is_main);
+    let plan = slash::plan(&git, &snap, &default_protected()).unwrap();
+    let topic = Some("topic");
+    assert!(plan.candidates.iter().all(|c| c.branch.as_deref() != topic));
+    assert!(plan.kept.iter().any(|(branch, _)| branch == "topic"));
+    preview::restore_main(&git).unwrap();
+    assert_eq!(sh(&main, &["symbolic-ref", "--short", "HEAD"]), "topic");
 }
