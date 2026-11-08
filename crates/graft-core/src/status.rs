@@ -39,7 +39,18 @@ fn parse(bytes: &[u8]) -> WorktreeStatus {
                     .next()
                     .map(|f| String::from_utf8_lossy(f).into_owned());
                 if let [_, xy, _, _, _, _, _, _, _, path] = parts[..] {
-                    status.entries.push(tracked(xy, path, orig));
+                    match (xy, orig) {
+                        // Renamed or copied only on the worktree side: the
+                        // new file is added with intent (`add -N`), so it is
+                        // a new file (see `tracked`); a renamed one is gone.
+                        (".R" | ".C", orig) => {
+                            status.entries.push(tracked(".A", path, None));
+                            if let (".R", Some(orig)) = (xy, orig) {
+                                status.entries.push(tracked(".D", &orig, None));
+                            }
+                        }
+                        (xy, orig) => status.entries.push(tracked(xy, path, orig)),
+                    }
                 }
             }
             b'u' => {
@@ -127,6 +138,30 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
         assert_eq!(s.unstaged().count(), 3);
         assert_eq!(s.entries[3].shown_change(), Change::Unmerged);
         assert_eq!(s.entries[1].shown_change(), Change::Added);
+    }
+
+    /// `mv old new; git add -N new` shows as a rename on the worktree side:
+    /// new is a new file (discarding it must never empty it), old is
+    /// deleted.
+    #[test]
+    fn a_rename_added_with_intent_is_a_new_and_a_deleted_file() {
+        let raw = b"2 .R N... 100644 100644 100644 aaaa aaaa R100 new.txt\0old.txt\0\
+2 .C N... 100644 100644 100644 bbbb bbbb C100 copy.txt\0orig.txt\0";
+        let s = parse(raw);
+        let entries: Vec<(&str, EntryKind, Change)> = s
+            .entries
+            .iter()
+            .map(|e| (e.path.as_str(), e.kind, e.worktree))
+            .collect();
+        assert_eq!(
+            entries,
+            [
+                ("new.txt", EntryKind::Untracked, Change::Added),
+                ("old.txt", EntryKind::Tracked, Change::Deleted),
+                ("copy.txt", EntryKind::Untracked, Change::Added),
+            ]
+        );
+        assert!(s.entries.iter().all(|e| e.orig_path.is_none()));
     }
 
     /// Conflicts first, then staged, then unstaged; a file changed on both

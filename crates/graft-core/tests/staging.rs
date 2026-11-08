@@ -526,3 +526,34 @@ fn a_failed_discard_keeps_the_file_added_with_intent() {
     assert_eq!(std::fs::read(dir.join("intent.txt")).unwrap(), b"keep me\n");
     assert_eq!(sh(&dir, &["ls-files", "--", "intent.txt"]), "intent.txt");
 }
+
+/// `mv a.txt moved.txt; git add -N moved.txt`: git shows a rename, but
+/// moved.txt is a new file (discarding lines keeps the rest, never empties
+/// it) and a.txt a deleted one (discarding brings it back).
+#[test]
+fn a_moved_file_added_with_intent_is_a_new_file() {
+    let (_tmp, git) = repo();
+    let dir = git.cwd().to_path_buf();
+    std::fs::rename(dir.join("a.txt"), dir.join("moved.txt")).unwrap();
+    sh(&dir, &["add", "-N", "moved.txt"]);
+    let s = status::load(&git).unwrap();
+    let kind = |p: &str| s.entries.iter().find(|e| e.path == p).map(|e| e.kind);
+    assert_eq!(kind("moved.txt"), Some(graft_core::EntryKind::Untracked));
+    assert_eq!(kind("a.txt"), Some(graft_core::EntryKind::Tracked));
+
+    let d = diff::load(&git, &Source::Untracked, "moved.txt").unwrap();
+    ops::apply_lines(
+        &git,
+        &d,
+        &Source::Untracked,
+        LineOp::Discard,
+        pick(&d, &["two"]),
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read(dir.join("moved.txt")).unwrap(),
+        b"one\nthree\nfour\nfive\n"
+    );
+    ops::discard_paths(&git, &["a.txt".to_owned()], &[]).unwrap();
+    assert!(dir.join("a.txt").is_file());
+}
