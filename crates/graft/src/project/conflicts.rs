@@ -310,7 +310,7 @@ impl Project {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{git, open, wait};
+    use crate::testing::{git, merge_stops, open, wait};
 
     /// The file was fixed by hand in an editor while the resolver was open:
     /// Save resolution asks before it replaces those edits.
@@ -329,12 +329,7 @@ mod tests {
         git(&main, &["switch", "-q", "main"]);
         std::fs::write(main.join("a.txt"), "main\n").unwrap();
         git(&main, &["commit", "-q", "-am", "main"]);
-        let merge = std::process::Command::new("git")
-            .args(["merge", "other"])
-            .current_dir(&main)
-            .output()
-            .unwrap();
-        assert!(!merge.status.success(), "the merge must stop");
+        merge_stops(&main, "other");
 
         let mut project = open(&main);
         wait(&mut project, "the resolver never loaded", |p| {

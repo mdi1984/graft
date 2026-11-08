@@ -12,7 +12,32 @@ use crate::project::Project;
 
 /// Run git in `dir` with a test identity; it must succeed.
 pub fn git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git")
+    let status = with_identity(dir, args).status().unwrap();
+    assert!(status.success(), "git {args:?}");
+}
+
+/// Merge `branch` in `dir`; it must stop with conflicts.
+pub fn merge_stops(dir: &Path, branch: &str) {
+    let out = with_identity(dir, &["merge", "-q", branch])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "the merge must stop");
+    let unmerged = Command::new("git")
+        .args(["ls-files", "-u"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        !unmerged.stdout.is_empty(),
+        "the merge must leave conflicts"
+    );
+}
+
+/// git in `dir` with a test identity, which machines without one (CI)
+/// need for commits and merges.
+fn with_identity(dir: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command
         .args([
             "-c",
             "user.name=t",
@@ -22,10 +47,8 @@ pub fn git(dir: &Path, args: &[&str]) {
             "commit.gpgsign=false",
         ])
         .args(args)
-        .current_dir(dir)
-        .status()
-        .unwrap();
-    assert!(status.success(), "git {args:?}");
+        .current_dir(dir);
+    command
 }
 
 /// The commit `rev` names in `repo`, or empty.

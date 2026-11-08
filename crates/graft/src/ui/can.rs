@@ -165,10 +165,8 @@ pub fn preview(snap: &RepoSnapshot, wt: Option<&Worktree>) -> (Can, Option<Actio
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
-
     use super::*;
-    use crate::testing::{git, open, tip, wait};
+    use crate::testing::{git, merge_stops, open, tip, wait};
 
     /// A repo on `main` with a branch `other` and a linked worktree `agent`.
     fn repo(dir: &Path) -> std::path::PathBuf {
@@ -205,12 +203,7 @@ mod tests {
         let main = repo(dir.path());
         std::fs::write(main.join("a.txt"), "main\n").unwrap();
         git(&main, &["commit", "-q", "-am", "main"]);
-        let merge = Command::new("git")
-            .args(["merge", "other"])
-            .current_dir(&main)
-            .output()
-            .unwrap();
-        assert!(!merge.status.success(), "the merge must stop");
+        merge_stops(&main, "other");
         let mut project = open(&main);
 
         let can = checkout(&project);

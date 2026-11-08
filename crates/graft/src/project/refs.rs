@@ -654,7 +654,7 @@ mod tests {
     use std::process::Command as Cmd;
 
     use super::*;
-    use crate::testing::{git, open, wait};
+    use crate::testing::{git, merge_stops, open, wait};
 
     fn branch_at(project: &Project, path: &Path) -> Option<String> {
         project.snapshot.as_ref()?.worktree_at(path)?.branch.clone()
@@ -716,12 +716,7 @@ mod tests {
         } = setup(|main| {
             std::fs::write(main.join("a.txt"), "main\n").unwrap();
             git(main, &["commit", "-q", "-am", "main"]);
-            let merge = Cmd::new("git")
-                .args(["merge", "other"])
-                .current_dir(main)
-                .output()
-                .unwrap();
-            assert!(!merge.status.success(), "the merge must stop");
+            merge_stops(main, "other");
             std::fs::write(main.join("b.txt"), "b\n").unwrap();
             git(main, &["add", "b.txt"]);
         });
@@ -796,13 +791,7 @@ mod tests {
         } = setup(|main| {
             std::fs::write(main.join("a.txt"), "main\n").unwrap();
             git(main, &["commit", "-q", "-am", "main"]);
-            let merge = Cmd::new("git")
-                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
-                .args(["merge", "-q", "other"])
-                .current_dir(main)
-                .output()
-                .unwrap();
-            assert!(!merge.status.success(), "the merge should conflict");
+            merge_stops(main, "other");
         });
         project.apply(Action::Checkout("other".to_owned()));
         assert!(!project.is_operating());
