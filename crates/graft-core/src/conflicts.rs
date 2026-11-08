@@ -230,11 +230,11 @@ pub fn load(git: &Git, path: &str) -> Result<ConflictFile> {
                     "--diff3",
                     "--object-id",
                     "-L",
-                    "ours",
+                    LABELS[0],
                     "-L",
-                    "base",
+                    LABELS[1],
                     "-L",
-                    "theirs",
+                    LABELS[2],
                     &o.id,
                     &base_id,
                     &t.id,
@@ -265,6 +265,17 @@ fn write_blob(git: &Git, content: &[u8], flags: &[&str]) -> Result<String> {
     Ok(out.stdout_str().trim().to_owned())
 }
 
+/// The `-L` labels for ours, base and theirs, and the marker lines they give.
+/// A line is a marker only if it is exactly one of these, so content like a
+/// Markdown `==========` underline is not.
+const LABELS: [&str; 3] = ["ours", "base", "theirs"];
+const MARKERS: [&[u8]; 4] = [
+    b"<<<<<<< ours",
+    b"||||||| base",
+    b"=======",
+    b">>>>>>> theirs",
+];
+
 /// Split `git merge-file --diff3` output at its conflict markers.
 fn parse_merged(text: &[u8]) -> Vec<Segment> {
     enum State {
@@ -278,20 +289,22 @@ fn parse_merged(text: &[u8]) -> Vec<Segment> {
     let (mut ours, mut base, mut theirs) = (Vec::new(), Vec::new(), Vec::new());
     let mut state = State::Common;
     for line in text.split_inclusive(|b| *b == b'\n') {
-        let marker = |m: &[u8]| line.starts_with(m);
+        let bare = line.strip_suffix(b"\n").unwrap_or(line);
+        let bare = bare.strip_suffix(b"\r").unwrap_or(bare);
+        let marker = |m: usize| bare == MARKERS[m];
         match state {
-            State::Common if marker(b"<<<<<<< ") => {
+            State::Common if marker(0) => {
                 if !common.is_empty() {
                     segments.push(Segment::Common(std::mem::take(&mut common)));
                 }
                 state = State::Ours;
             }
             State::Common => common.extend_from_slice(line),
-            State::Ours if marker(b"||||||| ") => state = State::Base,
-            State::Ours | State::Base if marker(b"=======") => state = State::Theirs,
+            State::Ours if marker(1) => state = State::Base,
+            State::Ours | State::Base if marker(2) => state = State::Theirs,
             State::Ours => ours.extend_from_slice(line),
             State::Base => base.extend_from_slice(line),
-            State::Theirs if marker(b">>>>>>> ") => {
+            State::Theirs if marker(3) => {
                 segments.push(Segment::Conflict {
                     ours: std::mem::take(&mut ours),
                     base: std::mem::take(&mut base),
@@ -427,6 +440,9 @@ mod tests {
 
     #[test]
     fn parses_diff3_output() {
+        for (marker, label) in [MARKERS[0], MARKERS[1], MARKERS[3]].iter().zip(LABELS) {
+            assert!(marker.ends_with(label.as_bytes()));
+        }
         let text = b"a\n<<<<<<< ours\nB1\n||||||| base\nb\n=======\nB2\n>>>>>>> theirs\nc\n";
         let segments = parse_merged(text);
         assert_eq!(

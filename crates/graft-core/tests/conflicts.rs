@@ -172,3 +172,28 @@ fn rebase_abort_puts_the_branch_back() {
     assert_eq!(common::rev(dir, "HEAD"), before);
     assert_eq!(sh(dir, &["status", "--porcelain"]), "");
 }
+
+#[test]
+fn markdown_underlines_are_content_not_markers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    common::init(dir);
+    std::fs::write(dir.join("doc.md"), "Title\nx\n").unwrap();
+    sh(dir, &["add", "."]);
+    sh(dir, &["commit", "-q", "-m", "base"]);
+    sh(dir, &["switch", "-q", "-c", "topic"]);
+    std::fs::write(dir.join("doc.md"), "Title\n----------\ntheirs\n").unwrap();
+    sh(dir, &["commit", "-q", "-am", "topic"]);
+    sh(dir, &["switch", "-q", "main"]);
+    std::fs::write(dir.join("doc.md"), "Title\n==========\nours\n").unwrap();
+    sh(dir, &["commit", "-q", "-am", "main"]);
+    let git = common::git(dir);
+
+    assert!(conflicts::merge(&git, "topic", false).unwrap());
+    let file = conflicts::load(&git, "doc.md").unwrap();
+    assert_eq!(file.conflicts(), 1);
+    let theirs = conflicts::assemble(&file.segments, &[Some(Resolution::Theirs)]).unwrap();
+    assert_eq!(theirs, b"Title\n----------\ntheirs\n");
+    let ours = conflicts::assemble(&file.segments, &[Some(Resolution::Ours)]).unwrap();
+    assert_eq!(ours, b"Title\n==========\nours\n");
+}
