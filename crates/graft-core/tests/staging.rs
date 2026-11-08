@@ -470,3 +470,23 @@ fn discarding_a_file_added_with_intent_keeps_its_content() {
         b"l1\r\nl3\r\n"
     );
 }
+
+/// Lines starting with '#' are part of the message, not comments.
+#[test]
+fn commit_keeps_lines_starting_with_a_hash() {
+    let (_tmp, git) = repo();
+    let dir = git.cwd().to_path_buf();
+    std::fs::write(dir.join("b.txt"), "b\n").unwrap();
+    ops::stage_paths(&git, &["b.txt".into()]).unwrap();
+    let message = "#42 Fix crash\n\n# Why\n\nIt crashed.";
+    ops::commit(&git, message, false).unwrap();
+    assert_eq!(
+        ops::last_commit_message(&git).unwrap().as_deref(),
+        Some(message)
+    );
+    ops::commit(&git, "#42 Fix crash, reworded\n\n# Why", true).unwrap();
+    assert_eq!(
+        sh(&dir, &["log", "-1", "--format=%B"]),
+        "#42 Fix crash, reworded\n\n# Why"
+    );
+}

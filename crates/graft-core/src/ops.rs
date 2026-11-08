@@ -215,7 +215,9 @@ pub fn last_commit_message(git: &Git) -> Result<Option<String>> {
 
 /// Commit what is staged. Hooks run as usual. Returns git's one-line summary.
 pub fn commit(git: &Git, message: &str, amend: bool) -> Result<String> {
-    let mut args = vec!["commit", "--file=-", "--cleanup=strip"];
+    // Not `strip`: lines starting with '#' (Markdown headings, "#42 Fix
+    // crash") are part of the message.
+    let mut args = vec!["commit", "--file=-", "--cleanup=whitespace"];
     if amend {
         args.push("--amend");
     }
