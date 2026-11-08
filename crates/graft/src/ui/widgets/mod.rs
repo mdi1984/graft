@@ -201,6 +201,90 @@ pub fn section_heading_row(ui: &mut Ui, title: &str) {
     section_heading(ui, ui.painter(), rect.left(), rect.center().y, title);
 }
 
+/// A folder that folds what is inside it: open until folded, and it stays
+/// the way it was left (under `id`). `count` shows at the right; `marked`
+/// highlights it while folded (it hides the current branch or open file).
+/// True while open.
+pub fn folder_row(
+    ui: &mut Ui,
+    id: egui::Id,
+    name: &str,
+    font: FontId,
+    count: &str,
+    indent: f32,
+    marked: bool,
+) -> bool {
+    let mut open = ui.data_mut(|d| *d.get_persisted_mut_or(id, true));
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
+    let painter = ui.painter();
+    paint_row_bg(painter, rect, &response, marked && !open);
+    let y = rect.center().y;
+    let chevron = if open {
+        Icon::ChevronDown
+    } else {
+        Icon::ChevronRight
+    };
+    let chevron_rect =
+        Rect::from_center_size(pos2(rect.left() + indent + 7.0, y), vec2(10.0, 10.0));
+    icons::paint(painter, chevron_rect, chevron, color::text_faint());
+    let folder_rect =
+        Rect::from_center_size(pos2(rect.left() + indent + 21.0, y), vec2(12.0, 12.0));
+    icons::paint(painter, folder_rect, Icon::Folder, color::text_weak());
+
+    let count = painter.layout_no_wrap(count.to_owned(), theme::small(), color::text_faint());
+    let count_x = rect.right() - 8.0 - count.size().x;
+    paint_galley_left(painter, count_x, y, count);
+    let x = rect.left() + indent + 32.0;
+    let label = elided(ui, name, font, color::text_mid(), count_x - 6.0 - x);
+    paint_galley_left(ui.painter(), x, y, label);
+    if response.clicked() {
+        open = !open;
+        ui.data_mut(|d| d.insert_persisted(id, open));
+    }
+    open
+}
+
+/// A list's section heading ("STAGED  3") with an optional link at the
+/// right (`text`, hover `tip`); true when the link was clicked while
+/// `can` allows it.
+pub fn section_with_link(
+    ui: &mut Ui,
+    heading: &str,
+    link: Option<(&str, &str)>,
+    can: &super::can::Can,
+) -> bool {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
+    let y = rect.center().y;
+    section_heading(ui, ui.painter(), rect.left() + 4.0, y, heading);
+    let Some((link, tip)) = link else {
+        return false;
+    };
+    let galley = ui
+        .painter()
+        .layout_no_wrap(link.to_owned(), theme::small(), Color32::PLACEHOLDER);
+    let r = Rect::from_min_size(
+        pos2(rect.right() - galley.size().x - 8.0, rect.top() + 3.0),
+        vec2(galley.size().x + 6.0, 18.0),
+    );
+    let response = ui
+        .interact(
+            r,
+            ui.scope_id().with(("section-link", heading)),
+            Sense::click(),
+        )
+        .on_hover_text(can.blocked().unwrap_or(tip));
+    let fg = if !can.ok {
+        color::text_faint()
+    } else if response.hovered() {
+        color::text()
+    } else {
+        color::ahead_fg()
+    };
+    ui.painter()
+        .galley(pos2(r.left() + 3.0, y - galley.size().y / 2.0), galley, fg);
+    response.clicked() && can.ok
+}
+
 /// Height of a [`two_line_row`].
 pub const TWO_LINE_HEIGHT: f32 = 46.0;
 

@@ -13,6 +13,7 @@ pub mod diff_view;
 pub mod file_history;
 mod file_row;
 pub mod file_status;
+mod file_tree;
 pub mod group_dialog;
 pub mod history;
 pub mod icons;
@@ -48,6 +49,8 @@ pub enum AppAction {
     },
     /// Show whole files in diffs, or only the changes (an app setting).
     ToggleWholeFile,
+    /// Review lists files under their folders, or flat (an app setting).
+    ToggleReviewFolders,
 }
 
 /// What the user did this frame.

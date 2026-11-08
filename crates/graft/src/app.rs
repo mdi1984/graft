@@ -1048,6 +1048,10 @@ impl GraftApp {
                     return;
                 }
                 AppAction::ToggleWholeFile => self.toggle_whole_file(),
+                AppAction::ToggleReviewFolders => {
+                    let folders = !self.settings.review_folders;
+                    self.change_settings(|s| s.review_folders = folders);
+                }
                 AppAction::InProject { project, actions } if project < self.projects.len() => {
                     self.activate(Some(project));
                     for action in actions {

@@ -95,6 +95,8 @@ pub struct Extras<'a> {
     pub note: Option<(&'a str, Color32)>,
     /// A count left of the line counts (Review's comments); none at 0.
     pub badge: usize,
+    /// The file's name without its folder (a tree shows the folder above).
+    pub name_only: bool,
 }
 
 /// A changed file of a commit, stash or review.
@@ -116,12 +118,17 @@ pub fn file_row(ui: &mut Ui, file: &FileChange, selected: bool, extras: Extras) 
         path_right -= badge.width() + 6.0;
         badge.paint(ui.painter(), path_right + 6.0, y);
     }
+    let shown = if extras.name_only {
+        file.path.rsplit('/').next().unwrap_or(&file.path)
+    } else {
+        &file.path
+    };
     paint_file(
         ui,
         rect.left() + 4.0 + extras.inset,
         y,
         file.change,
-        &file.path,
+        shown,
         path_right,
     );
     response.on_hover_text(tip(&file.path, file.orig_path.as_deref()))
