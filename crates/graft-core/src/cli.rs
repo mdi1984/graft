@@ -537,7 +537,7 @@ fn inherited_config(count: usize) -> Vec<String> {
 ///
 /// Most of them undo user settings that change the output Graft reads, so every
 /// command (and every caller) gets git's plain machine-readable form.
-const CONFIG: [(&str, &str); 8] = [
+const CONFIG: [(&str, &str); 9] = [
     // Paths past Windows' old 260-character limit (deep node_modules or
     // target folders), e.g. when removing a worktree. Off by default in Git
     // for Windows.
@@ -557,6 +557,10 @@ const CONFIG: [(&str, &str); 8] = [
     // Empty context lines keep their leading space, as `git apply` and
     // Graft's diff parser read them.
     ("diff.suppressBlankEmpty", "false"),
+    // A conflict rerere solves from a remembered resolution stays unmerged
+    // (with that resolution in the file): Graft tells a stop for conflicts by
+    // unmerged files, and the user checks the result before Continue.
+    ("rerere.autoUpdate", "false"),
 ];
 
 fn extra_config(start: usize) -> Vec<(String, String)> {
