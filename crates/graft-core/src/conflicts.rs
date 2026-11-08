@@ -230,6 +230,7 @@ pub fn load(git: &Git, path: &str) -> Result<ConflictFile> {
                     "-p",
                     "--diff3",
                     "--object-id",
+                    &format!("--marker-size={MARKER_SIZE}"),
                     "-L",
                     LABELS[0],
                     "-L",
@@ -282,16 +283,39 @@ fn write_blob(git: &Git, content: &[u8], flags: &[&str]) -> Result<String> {
     Ok(out.stdout_str().trim().to_owned())
 }
 
-/// The `-L` labels for ours, base and theirs, and the marker lines they give.
-/// A line is a marker only if it is exactly one of these, so content like a
-/// Markdown `==========` underline is not.
+/// The `-L` labels for ours, base and theirs.
 const LABELS: [&str; 3] = ["ours", "base", "theirs"];
-const MARKERS: [&[u8]; 4] = [
-    b"<<<<<<< ours",
-    b"||||||| base",
-    b"=======",
-    b">>>>>>> theirs",
-];
+
+/// How long the conflict markers are: far longer than git's usual 7, so a
+/// content line (a Markdown `=======` underline) is never taken for one.
+const MARKER_SIZE: usize = 41;
+
+/// The marker lines of `git merge-file --marker-size` [`MARKER_SIZE`] with
+/// [`LABELS`]: ours starts, base starts, theirs starts, the conflict ends.
+/// A line is a marker only if it is exactly one of these.
+static MARKERS: std::sync::LazyLock<[Vec<u8>; 4]> = std::sync::LazyLock::new(|| {
+    let marker = |c: &str, label: Option<&str>| {
+        let line = c.repeat(MARKER_SIZE);
+        match label {
+            Some(label) => format!("{line} {label}").into_bytes(),
+            None => line.into_bytes(),
+        }
+    };
+    [
+        marker("<", Some(LABELS[0])),
+        marker("|", Some(LABELS[1])),
+        marker("=", None),
+        marker(">", Some(LABELS[2])),
+    ]
+});
+
+/// The lines of `text` (each with its line ending), and each without it.
+fn lines(text: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> {
+    text.split_inclusive(|b| *b == b'\n').map(|line| {
+        let bare = line.strip_suffix(b"\n").unwrap_or(line);
+        (line, bare.strip_suffix(b"\r").unwrap_or(bare))
+    })
+}
 
 /// Split `git merge-file --diff3` output at its conflict markers.
 fn parse_merged(text: &[u8]) -> Vec<Segment> {
@@ -305,9 +329,7 @@ fn parse_merged(text: &[u8]) -> Vec<Segment> {
     let mut common = Vec::new();
     let (mut ours, mut base, mut theirs) = (Vec::new(), Vec::new(), Vec::new());
     let mut state = State::Common;
-    for line in text.split_inclusive(|b| *b == b'\n') {
-        let bare = line.strip_suffix(b"\n").unwrap_or(line);
-        let bare = bare.strip_suffix(b"\r").unwrap_or(bare);
+    for (line, bare) in lines(text) {
         let marker = |m: usize| bare == MARKERS[m];
         match state {
             State::Common if marker(0) => {
@@ -385,6 +407,12 @@ pub fn assemble(segments: &[Segment], resolutions: &[Option<Resolution>]) -> Opt
 /// Resolve `path` with this content (in repository form, LF line endings):
 /// stage it and write it to the worktree.
 pub fn resolve_with(git: &Git, file: &ConflictFile, content: &[u8]) -> Result<()> {
+    if lines(content).any(|(_, bare)| MARKERS.iter().any(|m| bare == m.as_slice())) {
+        bail!(
+            "The result for {} still contains conflict markers. Edit them out first.",
+            file.path
+        );
+    }
     let mode = file
         .ours
         .as_ref()
@@ -457,11 +485,9 @@ mod tests {
 
     #[test]
     fn parses_diff3_output() {
-        for (marker, label) in [MARKERS[0], MARKERS[1], MARKERS[3]].iter().zip(LABELS) {
-            assert!(marker.ends_with(label.as_bytes()));
-        }
-        let text = b"a\n<<<<<<< ours\nB1\n||||||| base\nb\n=======\nB2\n>>>>>>> theirs\nc\n";
-        let segments = parse_merged(text);
+        let [start, base, sep, end] = MARKERS.clone().map(|m| String::from_utf8(m).unwrap());
+        let text = format!("a\n{start}\nB1\n{base}\nb\n{sep}\nB2\n{end}\nc\n");
+        let segments = parse_merged(text.as_bytes());
         assert_eq!(
             segments,
             vec![

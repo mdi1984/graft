@@ -205,3 +205,41 @@ fn markdown_underlines_are_content_not_markers() {
     let ours = conflicts::assemble(&file.segments, &[Some(Resolution::Ours)]).unwrap();
     assert_eq!(ours, b"Title\n==========\nours\n");
 }
+
+/// A line exactly like git's usual separator (a Markdown underline of a
+/// seven-letter heading) is content too, and "Use theirs" stages theirs.
+#[test]
+fn a_line_like_a_marker_is_content() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    common::init(dir);
+    std::fs::write(dir.join("doc.md"), "base text\n").unwrap();
+    sh(dir, &["add", "."]);
+    sh(dir, &["commit", "-q", "-m", "base"]);
+    sh(dir, &["switch", "-q", "-c", "topic"]);
+    std::fs::write(dir.join("doc.md"), "theirs text\n").unwrap();
+    sh(dir, &["commit", "-q", "-am", "topic"]);
+    sh(dir, &["switch", "-q", "main"]);
+    std::fs::write(dir.join("doc.md"), "Example\n=======\nours text\n").unwrap();
+    sh(dir, &["commit", "-q", "-am", "main"]);
+    let git = common::git(dir);
+
+    assert!(conflicts::merge(&git, "topic", false).unwrap());
+    let file = conflicts::load(&git, "doc.md").unwrap();
+    assert_eq!(file.conflicts(), 1);
+    let ours = conflicts::assemble(&file.segments, &[Some(Resolution::Ours)]).unwrap();
+    assert_eq!(ours, b"Example\n=======\nours text\n");
+    let theirs = conflicts::assemble(&file.segments, &[Some(Resolution::Theirs)]).unwrap();
+    assert_eq!(theirs, b"theirs text\n");
+    conflicts::resolve_with(&git, &file, &theirs).unwrap();
+    assert_eq!(sh(dir, &["show", ":doc.md"]), "theirs text");
+
+    // Marker lines that still reach a result are refused, never staged.
+    let marker = format!("{}\n", "=".repeat(41));
+    let error = conflicts::resolve_with(&git, &file, marker.as_bytes()).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("conflict markers"),
+        "{error:#}"
+    );
+    assert_eq!(sh(dir, &["show", ":doc.md"]), "theirs text");
+}
