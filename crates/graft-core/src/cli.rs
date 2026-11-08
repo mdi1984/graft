@@ -405,6 +405,11 @@ impl Git {
         };
         // Never block on a terminal prompt; Git Credential Manager still shows its own window.
         cmd.env("GIT_TERMINAL_PROMPT", "0")
+            // Never open an editor (e.g. `merge --continue` for the message):
+            // nobody would see it, and git would wait for it forever. The
+            // variable, not `core.editor`, because a user's `GIT_EDITOR` wins
+            // over the setting.
+            .env("GIT_EDITOR", "true")
             // Stable, parseable English output: Graft reads git's messages
             // (see `refusal` for the ones it tells apart).
             .env("LC_ALL", "C")
@@ -646,6 +651,29 @@ mod tests {
         assert!(names.contains(&"LC_ALL"), "{wslenv}");
         assert!(!names.contains(&"GIT_DIR"), "{wslenv}");
         assert!(!names.contains(&"WSLENV"), "{wslenv}");
+    }
+
+    /// The editor git would open, e.g. for `merge --continue`, is one that
+    /// returns at once, whatever the user set (here and in WSL).
+    #[test]
+    fn no_command_opens_an_editor() {
+        let git = Git::new(std::env::temp_dir(), Console::default());
+        let mut cmd = git.command("git").unwrap();
+        let args = ["-c", "core.editor=false", "var", "GIT_EDITOR"];
+        let out = cmd.args(args).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "true");
+
+        let mut cmd = Command::new("wsl.exe");
+        cmd.env("GIT_EDITOR", "true");
+        share_env(&mut cmd);
+        let wslenv = cmd.get_envs().find(|(name, _)| *name == "WSLENV");
+        let wslenv = wslenv.and_then(|(_, value)| value).unwrap();
+        assert!(
+            wslenv
+                .to_string_lossy()
+                .split(':')
+                .any(|n| n == "GIT_EDITOR")
+        );
     }
 
     #[test]

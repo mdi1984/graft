@@ -106,13 +106,10 @@ pub fn revert(git: &Git, rev: &str) -> Result<bool> {
     )
 }
 
-/// Continue after all conflicts are resolved, without opening an editor.
+/// Continue after all conflicts are resolved, keeping the prepared message.
 /// Ok(true): the next step (a rebase's next commit) stopped with conflicts.
 pub fn continue_op(git: &Git, kind: Operation) -> Result<bool> {
-    run_may_conflict(
-        git,
-        &["-c", "core.editor=true", kind.command(), "--continue"],
-    )
+    run_may_conflict(git, &[kind.command(), "--continue"])
 }
 
 pub fn abort(git: &Git, kind: Operation) -> Result<()> {

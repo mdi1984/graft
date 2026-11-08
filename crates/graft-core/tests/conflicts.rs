@@ -72,6 +72,8 @@ fn merge_resolve_and_continue() {
     );
 
     assert_eq!(status::load(&git).unwrap().conflicted().count(), 0);
+    // Continue never opens the user's editor (one that fails here).
+    sh(dir, &["config", "core.editor", "false"]);
     assert!(!conflicts::continue_op(&git, Operation::Merge).unwrap());
     assert_eq!(repo::in_progress(dir), None);
     let parents = git.read(["rev-list", "--parents", "-n1", "HEAD"]).unwrap();
