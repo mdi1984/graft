@@ -73,21 +73,25 @@ impl Project {
     /// would drop what it does when it ends (push after commit, conflicts,
     /// its error).
     pub fn may_close(&mut self) -> bool {
-        let Some(op) = &self.op else {
+        let Some(wait) = self.wait_before_closing() else {
             return true;
         };
+        let notice = format!("{wait} before closing the {} tab.", self.name);
+        self.notices.push(notice);
+        false
+    }
+
+    /// While an operation runs: what to wait for before closing, e.g.
+    /// `Wait for "Pushing" to finish (or cancel it)`.
+    pub fn wait_before_closing(&self) -> Option<String> {
+        let op = self.op.as_ref()?;
         let what = op.label.trim_end_matches('…');
         let cancel = if op.can_cancel() {
             " (or cancel it)"
         } else {
             ""
         };
-        let notice = format!(
-            "Wait for \"{what}\" to finish{cancel} before closing the {} tab.",
-            self.name
-        );
-        self.notices.push(notice);
-        false
+        Some(format!("Wait for \"{what}\" to finish{cancel}"))
     }
 
     /// The running operation's progress, while it has any to show.

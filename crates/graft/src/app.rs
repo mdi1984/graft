@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use crossbeam_channel::Receiver;
@@ -34,6 +35,8 @@ use crate::{fonts, launch, theme, ui};
 
 const STORAGE_KEY: &str = "graft";
 const MAX_RECENT: usize = 12;
+/// How soon a second close of the window quits although an operation runs.
+const CLOSE_AGAIN: Duration = Duration::from_secs(5);
 
 /// What Graft remembers between runs.
 #[derive(Serialize, Deserialize, Default)]
@@ -114,6 +117,8 @@ pub struct GraftApp {
     about_open: bool,
     /// An update is installed and the new Graft started: close this one.
     closing: bool,
+    /// When closing the window was last refused, as an operation ran.
+    close_refused: Option<Instant>,
     /// Folders from a second start of Graft (empty: just come to the front).
     forwarded: Receiver<Vec<PathBuf>>,
 }
@@ -194,6 +199,7 @@ impl GraftApp {
             update: update::Status::Idle,
             about_open: false,
             closing: false,
+            close_refused: None,
             forwarded,
         };
         app.arrange();
@@ -517,6 +523,32 @@ impl GraftApp {
                 }
             },
         );
+    }
+
+    /// The window is closing (its close button, Alt+F4, an update's
+    /// restart): not while an operation runs in a tab, as for closing the
+    /// tab, unless the user closes again right away.
+    fn close_requested(&mut self, ctx: &egui::Context) {
+        let waits: Vec<String> = self
+            .projects
+            .iter()
+            .filter_map(|p| {
+                let wait = p.wait_before_closing()?;
+                Some(format!(
+                    "{wait} in the {} tab before quitting. Close again to quit anyway.",
+                    p.name
+                ))
+            })
+            .collect();
+        let now = Instant::now();
+        if self.closing || may_quit(!waits.is_empty(), self.close_refused, now) {
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        self.close_refused = Some(now);
+        for wait in waits {
+            self.toasts.error(wait);
+        }
     }
 
     /// Close a project's tab, unless an operation still runs there (see
@@ -974,6 +1006,9 @@ impl eframe::App for GraftApp {
         if self.closing {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.close_requested(&ctx);
+        }
         if let Some(wake) = self.projects.iter().filter_map(Project::next_wake).min() {
             ctx.request_repaint_after(wake);
         }
@@ -1112,4 +1147,28 @@ impl eframe::App for GraftApp {
 fn take_memory(memories: &mut HashMap<PathBuf, RepoMemory>, root: &Path) -> RepoMemory {
     let key = memories.keys().find(|k| same_path(k, root)).cloned();
     key.and_then(|k| memories.remove(&k)).unwrap_or_default()
+}
+
+/// Whether the window may close now: yes when no operation runs (`busy`),
+/// or when closing was refused (`refused`) less than [`CLOSE_AGAIN`] ago.
+fn may_quit(busy: bool, refused: Option<Instant>, now: Instant) -> bool {
+    !busy || refused.is_some_and(|at| now.saturating_duration_since(at) < CLOSE_AGAIN)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_second_close_soon_after_quits_anyway() {
+        let now = Instant::now();
+        let ago = |secs| now.checked_sub(Duration::from_secs(secs)).unwrap();
+        assert!(may_quit(false, None, now), "nothing runs");
+        assert!(!may_quit(true, None, now), "the first close");
+        assert!(may_quit(true, Some(ago(1)), now), "closed again soon");
+        assert!(
+            !may_quit(true, Some(ago(6)), now),
+            "closed again much later"
+        );
+    }
 }
