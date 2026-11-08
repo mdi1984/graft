@@ -462,12 +462,23 @@ impl Project {
         self.snapshot.as_ref()?.main_worktree()
     }
 
-    /// Why the main folder can't switch now, for a readable notice.
-    fn checkout_blocked(&self) -> Option<&'static str> {
-        self.main_worktree()?.in_progress.is_some().then_some(
-            "A merge, rebase, cherry-pick or revert is still going on in the main folder. \
-             Finish or abort it first, then check out.",
-        )
+    /// The main folder's path: git's spelling of it once the snapshot is
+    /// loaded, which may differ from the folder the project was opened as.
+    pub fn main_path(&self) -> PathBuf {
+        self.main_worktree()
+            .map_or_else(|| self.root.clone(), |main| main.path.clone())
+    }
+
+    /// Why the main folder can't switch now (see [`Project::head_blocked`]),
+    /// for a readable notice.
+    pub fn checkout_blocked(&self) -> Option<&'static str> {
+        let main = self.main_worktree()?;
+        self.head_blocked(&main.path).or_else(|| {
+            main.in_progress.is_some().then_some(
+                "A merge, rebase, cherry-pick or revert is still going on in the main folder. \
+                 Finish or abort it first, then check out.",
+            )
+        })
     }
 
     /// " in the main folder" while a linked worktree is selected, so a menu

@@ -90,7 +90,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
                     &mut |ui, branch, label, indent| {
                         let response = branch_row(ui, repo, branch, label, indent, head);
                         if response.double_clicked() {
-                            open(project, Open::local(project, repo, &branch.name), actions);
+                            open(Open::local(project, repo, &branch.name), actions);
                         } else if response.clicked() {
                             actions.push(Action::Reveal(branch.target));
                         }
@@ -721,9 +721,10 @@ fn branch_row(
     response.on_hover_text(tip)
 }
 
-/// Double-click on a branch: what its menu offers first, if it can start.
-fn open(project: &Project, open: Option<Open>, actions: &mut Actions) {
-    if let Some(open) = open.filter(|o| o.can(project).ok) {
+/// Double-click on a branch: what its menu offers first. When that cannot
+/// start, the project says why.
+fn open(open: Option<Open>, actions: &mut Actions) {
+    if let Some(open) = open {
         actions.push(open.action());
     }
 }
@@ -833,7 +834,7 @@ fn remote_branch_row(
         response
     };
     if response.double_clicked() {
-        open(project, Open::remote(project, repo, branch), actions);
+        open(Open::remote(project, repo, branch), actions);
     } else if response.clicked() {
         actions.push(Action::Reveal(branch.target));
     }

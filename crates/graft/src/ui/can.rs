@@ -73,9 +73,10 @@ pub fn moves_head(project: &Project, path: &Path, hint: impl Into<String>) -> Ca
     act(project, hint).unless(project.head_blocked(path))
 }
 
-/// A checkout, which always happens in the main folder.
+/// A checkout, which always happens in the main folder, see
+/// [`Project::checkout_blocked`].
 pub fn checkout(project: &Project) -> Can {
-    moves_head(project, &project.root, "")
+    act(project, "").unless(project.checkout_blocked())
 }
 
 /// A new worktree (toolbar, the sidebar's "+", a branch's menu).
@@ -159,5 +160,89 @@ pub fn preview(snap: &RepoSnapshot, wt: Option<&Worktree>) -> (Can, Option<Actio
             Some(Action::PreviewInMain(wt.path.clone())),
         ),
         Err(blocked) => (no(blocked.message()), None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    use super::*;
+    use crate::testing::{git, open, tip, wait};
+
+    /// A repo on `main` with a branch `other` and a linked worktree `agent`.
+    fn repo(dir: &Path) -> std::path::PathBuf {
+        let main = dir.join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        git(&main, &["init", "-q", "-b", "main"]);
+        std::fs::write(main.join("a.txt"), "a\n").unwrap();
+        git(&main, &["add", "a.txt"]);
+        git(&main, &["commit", "-q", "-m", "first"]);
+        git(&main, &["switch", "-q", "-c", "other"]);
+        std::fs::write(main.join("a.txt"), "other\n").unwrap();
+        git(&main, &["commit", "-q", "-am", "other"]);
+        git(&main, &["switch", "-q", "main"]);
+        let agent = dir.join("agent");
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "agent",
+                agent.to_str().unwrap(),
+            ],
+        );
+        main
+    }
+
+    /// Mid-merge, a checkout looks disabled and says why; asked anyway
+    /// (a double-click), it says the same and does nothing.
+    #[test]
+    fn no_checkout_while_main_merges() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = repo(dir.path());
+        std::fs::write(main.join("a.txt"), "main\n").unwrap();
+        git(&main, &["commit", "-q", "-am", "main"]);
+        let merge = Command::new("git")
+            .args(["merge", "other"])
+            .current_dir(&main)
+            .output()
+            .unwrap();
+        assert!(!merge.status.success(), "the merge must stop");
+        let mut project = open(&main);
+
+        let can = checkout(&project);
+        assert!(!can.ok);
+        assert!(can.hint.contains("Finish or abort"), "{}", can.hint);
+        project.apply(Action::Checkout("other".to_owned()));
+        assert!(!project.is_operating());
+        assert_eq!(project.notices, [can.hint]);
+    }
+
+    /// During a preview a checkout is refused even when the project was
+    /// opened as a folder spelled differently from git's main worktree.
+    #[test]
+    fn no_checkout_during_a_preview_whatever_the_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = repo(dir.path());
+        let mut project = open(&main.join("."));
+        let agent = project.snapshot.as_ref().unwrap().worktrees[1].path.clone();
+        project.apply(Action::PreviewInMain(agent));
+        wait(&mut project, "the preview never showed", |p| {
+            p.snapshot.as_ref().is_some_and(|s| s.preview.is_some())
+        });
+        assert!(!same_path(&project.root, &project.main_path()));
+        let before = tip(&main, "HEAD");
+
+        let can = checkout(&project);
+        assert!(!can.ok);
+        assert!(can.hint.contains("Restore main first"), "{}", can.hint);
+        project.apply(Action::Checkout("other".to_owned()));
+        assert!(!project.is_operating());
+        assert_eq!(project.notices.len(), 1, "{:?}", project.notices);
+        assert!(project.notices[0].contains("Restore main first"));
+        assert_eq!(tip(&main, "HEAD"), before);
     }
 }

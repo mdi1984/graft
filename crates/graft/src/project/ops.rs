@@ -29,7 +29,7 @@ impl Project {
     fn path_of(&self, at: At) -> PathBuf {
         match at {
             At::Selected => self.nav.worktree.clone(),
-            At::Main => self.root.clone(),
+            At::Main => self.main_path(),
             At::Path(path) => path,
         }
     }
