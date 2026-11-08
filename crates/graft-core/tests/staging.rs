@@ -603,3 +603,39 @@ fn hunks_of_a_file_with_a_textconv_driver() {
     ops::apply_lines(&git, &d, &Source::Unstaged, LineOp::Discard, |_, _| true).unwrap();
     assert_eq!(std::fs::read(dir.join("a.dat")).unwrap(), b"one\ntwo\n");
 }
+
+/// Unstaging every line of a staged rename (`git mv`) unstages the whole
+/// rename, like unstaging the file: the old file is no longer staged as
+/// deleted. Unstaging some lines keeps the rename staged with the rest.
+#[test]
+fn unstaging_lines_of_a_renamed_file() {
+    let (_tmp, git) = repo();
+    let dir = git.cwd().to_path_buf();
+    let short_status = || sh(&dir, &["status", "--porcelain", "--untracked-files=all"]);
+    sh(&dir, &["mv", "a.txt", "b.txt"]);
+    assert_eq!(short_status(), "R  a.txt -> b.txt");
+
+    let d = diff::load(&git, &Source::Staged, "b.txt").unwrap();
+    ops::apply_lines(&git, &d, &Source::Staged, LineOp::Unstage, |_, _| true).unwrap();
+    assert_eq!(short_status(), " D a.txt\n?? b.txt");
+
+    // The same as unstaging the whole file.
+    ops::stage_paths(&git, &["a.txt".into(), "b.txt".into()]).unwrap();
+    assert_eq!(short_status(), "R  a.txt -> b.txt");
+    ops::unstage_paths(&git, &["b.txt".into()]).unwrap();
+    assert_eq!(short_status(), " D a.txt\n?? b.txt");
+
+    ops::stage_paths(&git, &["a.txt".into(), "b.txt".into()]).unwrap();
+    let d = diff::load(&git, &Source::Staged, "b.txt").unwrap();
+    ops::apply_lines(
+        &git,
+        &d,
+        &Source::Staged,
+        LineOp::Unstage,
+        pick(&d, &["two"]),
+    )
+    .unwrap();
+    assert_eq!(sh(&dir, &["show", ":b.txt"]), "one\nthree\nfour\nfive");
+    assert_eq!(sh(&dir, &["ls-files", "--", "a.txt"]), "");
+    assert_eq!(short_status(), "RM a.txt -> b.txt");
+}

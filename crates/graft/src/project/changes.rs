@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use graft_core::diff::{self, FileDiff, Gap, Source};
 use graft_core::ops::{self, LineOp};
 use graft_core::paths::same_path;
-use graft_core::{Change, EntryKind, FileList, Git, StatusEntry};
+use graft_core::{EntryKind, FileList, Git, StatusEntry};
 
 use super::comments::{Pick, Side};
 use super::ops::{At, quietly};
@@ -693,17 +693,7 @@ impl Project {
         self.run_op(At::Selected, "Staging", job, quietly);
     }
 
-    pub(super) fn unstage_files(&mut self, mut paths: Vec<String>) {
-        // A staged rename is a deletion and an addition: unstaging it puts
-        // both back, or the old file would stay staged as deleted.
-        if let Some(status) = self.worktree().and_then(|wt| wt.status.as_ref()) {
-            let sources: Vec<String> = status
-                .staged()
-                .filter(|e| e.index == Change::Renamed && paths.contains(&e.path))
-                .filter_map(|e| e.orig_path.clone())
-                .collect();
-            paths.extend(sources);
-        }
+    pub(super) fn unstage_files(&mut self, paths: Vec<String>) {
         let job = move |git: Git| ops::unstage_paths(&git, &paths);
         self.run_op(At::Selected, "Unstaging", job, quietly);
     }
@@ -916,7 +906,7 @@ mod tests {
         wait(&mut project, "the rename never showed", |p| {
             p.worktree()
                 .and_then(|wt| wt.status.as_ref())
-                .is_some_and(|s| s.staged().any(|e| e.index == Change::Renamed))
+                .is_some_and(|s| s.staged().any(|e| e.index == graft_core::Change::Renamed))
         });
 
         project.unstage_files(vec!["e.txt".to_owned()]);

@@ -19,20 +19,43 @@ pub fn stage_paths(git: &Git, paths: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Move staged changes of whole files back to the working tree.
+/// Move staged changes of whole files back to the working tree. A staged
+/// rename is a deletion and an addition: unstaging its new path puts both
+/// back, or the old file would stay staged as deleted.
 pub fn unstage_paths(git: &Git, paths: &[String]) -> Result<()> {
     if paths.is_empty() {
         return Ok(());
     }
-    let mut args = if has_head(git)? {
-        vec!["restore", "--staged", "--"]
-    } else {
+    if !has_head(git)? {
         // Before the first commit there is nothing to restore from.
-        vec!["rm", "--cached", "-r", "-q", "--"]
-    };
-    args.extend(paths.iter().map(String::as_str));
+        let mut args = vec!["rm", "--cached", "-r", "-q", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        git.run(args)?;
+        return Ok(());
+    }
+    let sources = renamed_from(git, paths)?;
+    let mut args = vec!["restore", "--staged", "--"];
+    args.extend(paths.iter().chain(&sources).map(String::as_str));
     git.run(args)?;
     Ok(())
+}
+
+/// The old paths of the staged renames whose new path is in `paths`, as
+/// git (and so File status) detects renames.
+fn renamed_from(git: &Git, paths: &[String]) -> Result<Vec<String>> {
+    let out = git.run(["diff", "--cached", "--name-status", "-z", "--diff-filter=R"])?;
+    // Records of three fields: the status (R and a score), old, new.
+    let fields: Vec<String> = out
+        .stdout
+        .split(|&b| b == 0)
+        .map(|f| String::from_utf8_lossy(f).into_owned())
+        .collect();
+    let (records, _) = fields.as_chunks::<3>();
+    Ok(records
+        .iter()
+        .filter(|[_, _, new]| paths.contains(new))
+        .map(|[_, old, _]| old.clone())
+        .collect())
 }
 
 fn has_head(git: &Git) -> Result<bool> {
@@ -98,6 +121,10 @@ pub fn apply_lines(
         (Source::Unstaged, LineOp::Stage) => {
             let patch = build_patch(diff, Direction::Forward, &selected).expect("lines chosen");
             apply_patch(git, &patch, true, false)
+        }
+        // As a whole file: a rename's old path comes back too.
+        (Source::Staged, LineOp::Unstage) if everything => {
+            unstage_paths(git, std::slice::from_ref(&diff.path))
         }
         (Source::Staged, LineOp::Unstage) => {
             let patch = build_patch(diff, Direction::Reverse, &selected).expect("lines chosen");
