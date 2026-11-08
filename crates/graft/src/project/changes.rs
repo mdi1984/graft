@@ -9,7 +9,7 @@ use std::ops::Range;
 use graft_core::diff::{self, FileDiff, Gap, Source};
 use graft_core::ops::{self, LineOp};
 use graft_core::paths::same_path;
-use graft_core::{EntryKind, FileList, Git, StatusEntry};
+use graft_core::{Change, EntryKind, FileList, Git, StatusEntry};
 
 use super::comments::{Pick, Side};
 use super::ops::{At, quietly};
@@ -639,7 +639,17 @@ impl Project {
         self.run_op(At::Selected, "Staging", job, quietly);
     }
 
-    pub(super) fn unstage_files(&mut self, paths: Vec<String>) {
+    pub(super) fn unstage_files(&mut self, mut paths: Vec<String>) {
+        // A staged rename is a deletion and an addition: unstaging it puts
+        // both back, or the old file would stay staged as deleted.
+        if let Some(status) = self.worktree().and_then(|wt| wt.status.as_ref()) {
+            let sources: Vec<String> = status
+                .staged()
+                .filter(|e| e.index == Change::Renamed && paths.contains(&e.path))
+                .filter_map(|e| e.orig_path.clone())
+                .collect();
+            paths.extend(sources);
+        }
         let job = move |git: Git| ops::unstage_paths(&git, &paths);
         self.run_op(At::Selected, "Unstaging", job, quietly);
     }
@@ -736,6 +746,15 @@ mod tests {
     use super::*;
     use crate::testing::{git, open, wait};
 
+    fn porcelain(dir: &std::path::Path) -> String {
+        let out = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    }
+
     fn numbered(changed: &[usize]) -> String {
         (1..=20)
             .map(|n| match changed.contains(&n) {
@@ -792,6 +811,28 @@ mod tests {
         });
         assert_eq!(project.notices.len(), 1, "{:?}", project.notices);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), numbered(&[2, 10]));
+    }
+
+    #[test]
+    fn unstaging_a_rename_puts_back_both_sides() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("d.txt"), "d\n").unwrap();
+        git(root, &["add", "d.txt"]);
+        git(root, &["commit", "-q", "-m", "first"]);
+        git(root, &["mv", "d.txt", "e.txt"]);
+        let mut project = open(root);
+        wait(&mut project, "the rename never showed", |p| {
+            p.worktree()
+                .and_then(|wt| wt.status.as_ref())
+                .is_some_and(|s| s.staged().any(|e| e.index == Change::Renamed))
+        });
+
+        project.unstage_files(vec!["e.txt".to_owned()]);
+        wait(&mut project, "unstaging never ended", |p| !p.is_operating());
+        assert!(project.notices.is_empty(), "{:?}", project.notices);
+        assert_eq!(porcelain(root), " D d.txt\n?? e.txt\n");
     }
 
     #[test]
