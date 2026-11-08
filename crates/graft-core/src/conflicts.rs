@@ -69,12 +69,30 @@ pub(crate) fn stopped(out: &Output) -> bool {
 
 /// Merge `rev` into the current branch. Ok(true): stopped with conflicts.
 pub fn merge(git: &Git, rev: &str, no_ff: bool) -> Result<bool> {
+    // Git names the merge commit and the conflict markers after `rev`.
+    let rev = short_name(git, rev)?;
     let mut args = vec![Operation::Merge.command(), "--no-edit"];
     if no_ff {
         args.push("--no-ff");
     }
-    args.extend(["--end-of-options", rev]);
+    args.extend(["--end-of-options", &rev]);
     run_may_conflict(git, &args)
+}
+
+/// A full ref (`refs/heads/feat`) by its short name (`feat`) when git takes
+/// that name for the same ref, i.e. no tag or other ref is named alike;
+/// anything else as it is.
+fn short_name(git: &Git, rev: &str) -> Result<String> {
+    let short = ["refs/heads/", "refs/remotes/", "refs/tags/"]
+        .iter()
+        .find_map(|prefix| rev.strip_prefix(prefix));
+    let Some(short) = short else {
+        return Ok(rev.to_owned());
+    };
+    let args = ["rev-parse", "-q", "--verify", "--symbolic-full-name", short];
+    let out = git.run_accepting(args, None, |o| o.status <= 1)?;
+    let same = out.success() && out.stdout_str().trim() == rev;
+    Ok(if same { short } else { rev }.to_owned())
 }
 
 /// Rebase the current branch onto `onto`. Ok(true): stopped with conflicts.

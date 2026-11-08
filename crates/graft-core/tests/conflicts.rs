@@ -252,3 +252,37 @@ fn a_line_like_a_marker_is_content() {
         format!("Heading\n{}", "=".repeat(41))
     );
 }
+
+/// A branch passed by its full ref is named by its short name in the merge
+/// commit and in conflict markers; with a tag named alike it stays full, so
+/// git still takes the branch.
+#[test]
+fn merges_name_branches_by_their_short_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    diverged_repo(dir);
+    let git = common::git(dir);
+    sh(dir, &["switch", "-q", "-c", "clean", "topic~1"]);
+    common::commit(dir, "new.txt", "n\n", "new");
+    sh(dir, &["switch", "-q", "main"]);
+
+    assert!(!conflicts::merge(&git, "refs/heads/clean", false).unwrap());
+    assert_eq!(
+        sh(dir, &["log", "-1", "--format=%s"]),
+        "Merge branch 'clean'"
+    );
+
+    assert!(conflicts::merge(&git, "refs/heads/topic", false).unwrap());
+    let f = std::fs::read_to_string(dir.join("f.txt")).unwrap();
+    assert!(f.contains("\n>>>>>>> topic\n"), "{f}");
+    assert_eq!(
+        repo::in_progress(dir).unwrap().title,
+        "Merge branch 'topic'"
+    );
+    conflicts::abort(&git, Operation::Merge).unwrap();
+
+    sh(dir, &["tag", "topic", "main~1"]);
+    assert!(conflicts::merge(&git, "refs/heads/topic", false).unwrap());
+    let f = std::fs::read_to_string(dir.join("f.txt")).unwrap();
+    assert!(f.contains("\n>>>>>>> refs/heads/topic\n"), "{f}");
+}
