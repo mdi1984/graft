@@ -29,12 +29,11 @@ use std::time::Instant;
 use graft_core::console::Console;
 use graft_core::details::{self, CommitDetails};
 use graft_core::history::{self, Commit, History};
-use graft_core::ops::LineOp;
 use graft_core::stash::{Stash, StashFile};
 use graft_core::watch::Watcher;
 use graft_core::{CancelToken, Git, JobPool, Oid, Operation, RepoSnapshot, Worktree, snapshot};
 
-pub use changes::{CommitForm, DiffOwner, DiffView, FileKey, Staging};
+pub use changes::{CommitForm, DiffOwner, DiffView, FileKey, LineChange, Staging};
 pub use conflicts::{ConflictView, merge_dialog};
 pub use file_history::{FileHistoryMode, FileHistoryView};
 pub use refs::{Dialog, DialogKind};
@@ -136,8 +135,8 @@ pub enum Action {
         old: std::ops::Range<u32>,
         new: std::ops::Range<u32>,
     },
-    HunkOp(usize, LineOp),
-    LinesOp(LineOp),
+    /// Stage, unstage or discard a hunk or the selected lines.
+    ChangeLines(Box<LineChange>),
     StageFiles(Vec<String>),
     UnstageFiles(Vec<String>),
     Discard {
@@ -913,8 +912,7 @@ impl Project {
                 old,
                 new,
             } => self.show_lines(owner, &key, old, new),
-            Action::HunkOp(hunk, op) => self.lines_op(op, Some(hunk)),
-            Action::LinesOp(op) => self.lines_op(op, None),
+            Action::ChangeLines(change) => self.change_lines(*change),
             Action::StageFiles(paths) => self.stage_files(paths),
             Action::UnstageFiles(paths) => self.unstage_files(paths),
             Action::Discard { tracked, untracked } => self.discard(tracked, untracked),

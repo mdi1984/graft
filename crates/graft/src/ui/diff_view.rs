@@ -881,7 +881,7 @@ fn selection_bar(ui: &mut Ui, view: &DiffView, can: &Can, actions: &mut Actions)
                                 .why_not(button(ui, "Unstage lines", ButtonKind::Primary, can.ok))
                                 .clicked()
                             {
-                                actions.push(Action::LinesOp(LineOp::Unstage));
+                                actions.extend(view.change_lines(LineOp::Unstage, None));
                             }
                         }
                         Some(Staging::Unstaged) => {
@@ -889,7 +889,7 @@ fn selection_bar(ui: &mut Ui, view: &DiffView, can: &Can, actions: &mut Actions)
                                 .why_not(button(ui, "Stage lines", ButtonKind::Primary, can.ok))
                                 .clicked()
                             {
-                                actions.push(Action::LinesOp(LineOp::Stage));
+                                actions.extend(view.change_lines(LineOp::Stage, None));
                             }
                             if can
                                 .why_not(button(
@@ -899,6 +899,7 @@ fn selection_bar(ui: &mut Ui, view: &DiffView, can: &Can, actions: &mut Actions)
                                     can.ok,
                                 ))
                                 .clicked()
+                                && let Some(action) = view.change_lines(LineOp::Discard, None)
                             {
                                 actions.push(Action::Ask(Box::new(Confirm {
                                     title: "Discard the selected lines?".to_owned(),
@@ -908,7 +909,7 @@ fn selection_bar(ui: &mut Ui, view: &DiffView, can: &Can, actions: &mut Actions)
                                         view.key.path
                                     ),
                                     confirm_label: "Discard lines".to_owned(),
-                                    action: Action::LinesOp(LineOp::Discard),
+                                    action,
                                 })));
                             }
                         }
@@ -1022,24 +1023,20 @@ fn hunk_row(
     // Buttons stick to the visible right edge, not the scrolled content.
     let right = ui.clip_rect().right().min(rect.right()) - 8.0;
     let mut x = right;
-    let mut small = |label: &str, action: Action, danger: bool| {
+    let mut small = |label: &str, op: LineOp| {
         let text = small_galley(ui, label);
         let w = text.size().x + 16.0;
         x -= w;
         let r = Rect::from_min_size(pos2(x, rect.top() + 2.0), vec2(w, ROW - 4.0));
         x -= 6.0;
         let id = ui.scope_id().with(("hunk-btn", h, label));
-        let response = small_button(ui, r, id, text, can.ok, danger);
-        if can.why_not(response).clicked() && can.ok {
-            actions.push(action);
-        }
-    };
-    match staging {
-        Staging::Staged => small("Unstage hunk", Action::HunkOp(h, LineOp::Unstage), false),
-        Staging::Unstaged => {
-            small("Stage hunk", Action::HunkOp(h, LineOp::Stage), false);
-            small(
-                "Discard hunk",
+        let discard = op == LineOp::Discard;
+        let response = small_button(ui, r, id, text, can.ok, discard);
+        if can.why_not(response).clicked()
+            && can.ok
+            && let Some(action) = view.change_lines(op, Some(h))
+        {
+            actions.push(if discard {
                 Action::Ask(Box::new(Confirm {
                     title: "Discard this hunk?".to_owned(),
                     body: format!(
@@ -1047,10 +1044,18 @@ fn hunk_row(
                         view.key.path
                     ),
                     confirm_label: "Discard hunk".to_owned(),
-                    action: Action::HunkOp(h, LineOp::Discard),
-                })),
-                true,
-            );
+                    action,
+                }))
+            } else {
+                action
+            });
+        }
+    };
+    match staging {
+        Staging::Staged => small("Unstage hunk", LineOp::Unstage),
+        Staging::Unstaged => {
+            small("Stage hunk", LineOp::Stage);
+            small("Discard hunk", LineOp::Discard);
         }
     }
 }

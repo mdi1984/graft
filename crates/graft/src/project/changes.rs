@@ -250,6 +250,31 @@ impl DiffView {
     }
 }
 
+/// Lines of File status's diff to stage, unstage or discard, with the diff
+/// they were picked from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineChange {
+    op: LineOp,
+    key: FileKey,
+    diff: FileDiff,
+    /// One hunk, or else the selected lines.
+    hunk: Option<usize>,
+    selection: BTreeSet<(usize, usize)>,
+}
+
+impl DiffView {
+    /// `op` on hunk `hunk`, or on the selected lines with `None`.
+    pub fn change_lines(&self, op: LineOp, hunk: Option<usize>) -> Option<Action> {
+        Some(Action::ChangeLines(Box::new(LineChange {
+            op,
+            key: self.key.clone(),
+            diff: self.diff.clone()?,
+            hunk,
+            selection: self.selection.clone(),
+        })))
+    }
+}
+
 #[derive(Default)]
 pub struct CommitForm {
     pub summary: String,
@@ -569,23 +594,35 @@ impl Project {
         }
     }
 
-    /// Stage, unstage or discard a hunk (`Some(index)`) or the selected lines.
-    pub(super) fn lines_op(&mut self, op: LineOp, hunk: Option<usize>) {
-        let Some(view) = &self.diff_view else {
+    /// Stage, unstage or discard lines, if File status still shows the diff
+    /// they were picked from: a refresh or another file while a Discard
+    /// dialog was open must not discard something else.
+    pub(super) fn change_lines(&mut self, change: LineChange) {
+        let LineChange {
+            op,
+            key,
+            diff,
+            hunk,
+            selection,
+        } = change;
+        let (label, done) = match op {
+            LineOp::Stage => ("Staging", "staged"),
+            LineOp::Unstage => ("Unstaging", "unstaged"),
+            LineOp::Discard => ("Discarding", "discarded"),
+        };
+        let unchanged = self
+            .diff_view
+            .as_ref()
+            .is_some_and(|v| v.key == key && v.diff.as_ref() == Some(&diff));
+        if !unchanged {
+            self.notices.push(format!(
+                "{} changed in the meantime, so nothing was {done}. Check the diff and try again.",
+                key.path
+            ));
             return;
-        };
-        let Some(diff) = view.diff.clone() else {
-            return;
-        };
-        let source = view.key.source.clone();
-        let selection = view.selection.clone();
-        let label = match op {
-            LineOp::Stage => "Staging",
-            LineOp::Unstage => "Unstaging",
-            LineOp::Discard => "Discarding",
-        };
+        }
         let job = move |git: Git| {
-            ops::apply_lines(&git, &diff, &source, op, |h, l| match hunk {
+            ops::apply_lines(&git, &diff, &key.source, op, |h, l| match hunk {
                 Some(only) => h == only,
                 None => selection.contains(&(h, l)),
             })
@@ -697,6 +734,65 @@ impl Project {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{git, open, wait};
+
+    fn numbered(changed: &[usize]) -> String {
+        (1..=20)
+            .map(|n| match changed.contains(&n) {
+                true => format!("changed {n}\n"),
+                false => format!("line {n}\n"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_hunk_is_only_discarded_while_its_diff_is_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let file = root.join("f.txt");
+        git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["config", "core.autocrlf", "false"]);
+        std::fs::write(&file, numbered(&[])).unwrap();
+        git(root, &["add", "f.txt"]);
+        git(root, &["commit", "-q", "-m", "first"]);
+        std::fs::write(&file, numbered(&[2, 18])).unwrap();
+        let mut project = open(root);
+        let key = FileKey {
+            source: Source::Unstaged,
+            path: "f.txt".to_owned(),
+        };
+        project.apply(Action::SelectFile(key));
+        let hunks = |p: &Project| p.diff_view.as_ref()?.diff.as_ref().map(|d| d.hunks.len());
+        wait(&mut project, "the diff never came", |p| hunks(p) == Some(2));
+        let stale = project.diff_view.as_ref().unwrap();
+        let stale = stale.change_lines(LineOp::Discard, Some(1)).unwrap();
+
+        // The file changes while the dialog is open: the hunk asked about
+        // is now a different one.
+        std::fs::write(&file, numbered(&[2, 10, 18])).unwrap();
+        project.load_view(DiffOwner::Status);
+        wait(&mut project, "the diff never reloaded", |p| {
+            hunks(p) == Some(3)
+        });
+        project.apply(stale);
+        assert!(!project.is_operating());
+        assert_eq!(project.notices.len(), 1, "{:?}", project.notices);
+        assert!(project.notices[0].contains("nothing was discarded"));
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            numbered(&[2, 10, 18])
+        );
+
+        // Asked again, it goes.
+        let view = project.diff_view.as_ref().unwrap();
+        let fresh = view.change_lines(LineOp::Discard, Some(2)).unwrap();
+        project.apply(fresh);
+        wait(&mut project, "discarding never ended", |p| {
+            !p.is_operating()
+        });
+        assert_eq!(project.notices.len(), 1, "{:?}", project.notices);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), numbered(&[2, 10]));
+    }
 
     #[test]
     fn only_file_status_stages() {
