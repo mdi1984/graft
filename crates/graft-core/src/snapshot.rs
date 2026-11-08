@@ -214,29 +214,39 @@ fn parse_worktrees(bytes: &[u8], root: &Path, to_path: impl Fn(&str) -> PathBuf)
     list
 }
 
+/// The remotes with their URLs as configured (not expanded by `insteadOf`,
+/// so editing a remote writes back what was there). A remote with several
+/// URLs shows its first.
 fn load_remotes(git: &Git) -> Result<Vec<Remote>> {
-    let out = git.read(["remote", "-v"])?;
+    let out = git.run_accepting(
+        ["config", "-z", "--get-regexp", r"^remote\..*\.url$"],
+        None,
+        |o| o.status <= 1,
+    )?;
+    Ok(parse_remotes(&out.stdout_str()))
+}
+
+/// `git config -z --get-regexp` output: `key\nvalue\0` per entry.
+fn parse_remotes(text: &str) -> Vec<Remote> {
     let mut remotes: Vec<Remote> = Vec::new();
-    for line in out.lines() {
-        let mut parts = line.split_whitespace();
-        let (Some(name), Some(url), Some(kind)) = (parts.next(), parts.next(), parts.next()) else {
+    for entry in text.split('\0') {
+        let Some((key, url)) = entry.split_once('\n') else {
             continue;
         };
-        let remote = match remotes.iter_mut().find(|r| r.name == name) {
-            Some(r) => r,
-            None => {
-                remotes.push(Remote {
-                    name: name.to_owned(),
-                    fetch_url: String::new(),
-                });
-                remotes.last_mut().expect("just pushed")
-            }
+        let Some(name) = key
+            .strip_prefix("remote.")
+            .and_then(|k| k.strip_suffix(".url"))
+        else {
+            continue;
         };
-        if kind == "(fetch)" {
-            remote.fetch_url = url.to_owned();
+        if !remotes.iter().any(|r| r.name == name) {
+            remotes.push(Remote {
+                name: name.to_owned(),
+                fetch_url: url.to_owned(),
+            });
         }
     }
-    Ok(remotes)
+    remotes
 }
 
 #[cfg(test)]

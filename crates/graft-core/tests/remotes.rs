@@ -39,3 +39,41 @@ fn add_edit_and_remove() {
     let snap = snapshot::load(&git).unwrap();
     assert!(snap.remotes.is_empty());
 }
+
+#[test]
+fn urls_show_as_configured() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = common::init(&tmp.path().join("app"));
+    sh(&dir, &["remote", "add", "origin", "C:/My Repos/x.git"]);
+    sh(&dir, &["remote", "add", "work.mirror", "gh:me/app"]);
+    sh(
+        &dir,
+        &["remote", "set-url", "--add", "work.mirror", "gh:me/other"],
+    );
+    sh(
+        &dir,
+        &["config", "url.https://github.com/.insteadOf", "gh:"],
+    );
+
+    let git = common::git(&dir);
+    let snap = snapshot::load(&git).unwrap();
+    let remotes: Vec<_> = snap
+        .remotes
+        .iter()
+        .map(|r| (r.name.as_str(), r.fetch_url.as_str()))
+        .collect();
+    assert_eq!(
+        remotes,
+        [
+            ("origin", "C:/My Repos/x.git"),
+            ("work.mirror", "gh:me/app")
+        ]
+    );
+
+    // Editing a remote without changing its URL keeps it as it was.
+    remote::save_remote(&git, Some("origin"), "origin", "C:/My Repos/x.git", false).unwrap();
+    assert_eq!(
+        sh(&dir, &["config", "remote.origin.url"]),
+        "C:/My Repos/x.git"
+    );
+}
