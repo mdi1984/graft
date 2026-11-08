@@ -56,6 +56,18 @@ impl Running {
         }
     }
 
+    /// What to wait for before closing what runs this, e.g.
+    /// `Wait for "Pushing" to finish (or cancel it)`.
+    pub fn wait_text(&self) -> String {
+        let what = self.label.trim_end_matches('…');
+        let cancel = if self.can_cancel() {
+            " (or cancel it)"
+        } else {
+            ""
+        };
+        format!("Wait for \"{what}\" to finish{cancel}")
+    }
+
     /// "Pushing… · Writing objects 42%"
     pub fn status(&self) -> String {
         let progress = self.progress();

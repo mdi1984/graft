@@ -39,6 +39,8 @@ pub enum Status {
     UpToDate,
     Available(Release),
     Installing(Release),
+    /// Downloaded, but something ran when it was done: restart once it ends.
+    Ready(Release, Installed),
     Failed(String),
 }
 
@@ -147,12 +149,16 @@ fn allowed(url: &str) -> bool {
 }
 
 /// What [`install`] left ready for [`restart`].
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Installed {
     /// The new program is in place; start it.
     Program(PathBuf),
-    /// Run this setup program for the Graft at `exe`.
-    Setup { setup: PathBuf, exe: PathBuf },
+    /// Run this setup program for the Graft at `exe`; it installs `version`.
+    Setup {
+        setup: PathBuf,
+        exe: PathBuf,
+        version: String,
+    },
 }
 
 /// Download `release` and check it. A Graft installed by the setup program
@@ -164,10 +170,11 @@ pub fn install(release: &Release) -> Result<Installed> {
     {
         let dir = update_dir();
         let setup = fetch_setup(release, url, &dir)?;
-        // Read on the next start, to tell whether the setup finished.
-        std::fs::write(dir.join(PENDING), &release.version)
-            .with_context(|| format!("Could not write to {}", dir.display()))?;
-        return Ok(Installed::Setup { setup, exe });
+        return Ok(Installed::Setup {
+            setup,
+            exe,
+            version: release.version.clone(),
+        });
     }
     install_to(release, &exe)?;
     Ok(Installed::Program(exe))
@@ -219,10 +226,20 @@ pub fn restart(installed: &Installed) -> Result<()> {
             command.args(after_update_args(std::process::id()));
             (command, exe)
         }
-        Installed::Setup { setup, exe } => (
-            setup_command(setup, exe, std::process::id(), &setup.with_file_name(LOG)),
+        Installed::Setup {
             setup,
-        ),
+            exe,
+            version,
+        } => {
+            // Read on the next start, to tell whether the setup finished.
+            let pending = setup.with_file_name(PENDING);
+            std::fs::write(&pending, version)
+                .with_context(|| format!("Could not write {}", pending.display()))?;
+            (
+                setup_command(setup, exe, std::process::id(), &setup.with_file_name(LOG)),
+                setup,
+            )
+        }
     };
     if let Err(e) = command.spawn() {
         if let Installed::Setup { setup, .. } = installed {

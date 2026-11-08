@@ -531,21 +531,27 @@ impl GraftApp {
         );
     }
 
-    /// The window is closing (its close button, Alt+F4, an update's
-    /// restart): not while an operation runs in a tab, as for closing the
-    /// tab, unless the user closes again right away.
+    /// What runs that quitting would cut off: an operation in a tab, the
+    /// start page's clone or init. E.g. `Wait for "Pushing" to finish (or
+    /// cancel it) in the graft tab`.
+    fn waits(&self) -> Vec<String> {
+        let tabs = self.projects.iter().filter_map(|p| {
+            let wait = p.wait_before_closing()?;
+            Some(format!("{wait} in the {} tab", p.name))
+        });
+        let start = self
+            .start
+            .wait_before_closing()
+            .map(|wait| format!("{wait} on the start page"));
+        tabs.chain(start).collect()
+    }
+
+    /// The window is closing (its close button, Alt+F4): not while anything
+    /// runs (see [`Self::waits`]), unless the user closes again right away.
+    /// An update's restart is not asked: the new Graft already waits for
+    /// this one, and it is started only while nothing runs.
     fn close_requested(&mut self, ctx: &egui::Context) {
-        let waits: Vec<String> = self
-            .projects
-            .iter()
-            .filter_map(|p| {
-                let wait = p.wait_before_closing()?;
-                Some(format!(
-                    "{wait} in the {} tab before quitting. Close again to quit anyway.",
-                    p.name
-                ))
-            })
-            .collect();
+        let waits = self.waits();
         let now = Instant::now();
         if self.closing || may_quit(!waits.is_empty(), self.close_refused, now) {
             return;
@@ -553,8 +559,28 @@ impl GraftApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         self.close_refused = Some(now);
         for wait in waits {
-            self.toasts.error(wait);
+            self.toasts.error(format!(
+                "{wait} before quitting. Close again to quit anyway."
+            ));
         }
+    }
+
+    /// Start the downloaded update, which closes Graft: only while nothing
+    /// runs, else it waits as [`update::Status::Ready`].
+    fn restart_for_update(&mut self, release: update::Release, installed: update::Installed) {
+        if !self.waits().is_empty() {
+            self.update = update::Status::Ready(release, installed);
+            return;
+        }
+        self.update = update::Status::Installing(release);
+        self.jobs.spawn(
+            move || update::restart(&installed),
+            |app, restarted| match restarted {
+                // The new Graft runs: close this one.
+                Ok(()) => app.closing = true,
+                Err(e) => app.update = update::Status::Failed(format!("{e:#}")),
+            },
+        );
     }
 
     /// Close a project's tab, unless an operation still runs there (see
@@ -751,7 +777,8 @@ impl GraftApp {
         if !self.about_open {
             return;
         }
-        match ui::about::show(ctx, &self.update) {
+        let blocked = wait_first(&self.waits(), "updating");
+        match ui::about::show(ctx, &self.update, blocked.as_deref()) {
             None => {}
             Some(AboutAction::Close) => self.about_open = false,
             Some(AboutAction::Check) => self.check_update(true),
@@ -774,15 +801,21 @@ impl GraftApp {
                 let release = release.clone();
                 self.update = update::Status::Installing(release.clone());
                 self.jobs.spawn_long(
-                    // Starting the new Graft (or its setup) happens here too,
-                    // off the UI thread.
-                    move |_| update::install(&release).and_then(|i| update::restart(&i)),
-                    |app, restarted| match restarted {
-                        // The new Graft runs: close this one.
-                        Ok(()) => app.closing = true,
+                    {
+                        let release = release.clone();
+                        move |_| update::install(&release)
+                    },
+                    // Something may have started during the download.
+                    |app, installed| match installed {
+                        Ok(installed) => app.restart_for_update(release, installed),
                         Err(e) => app.update = update::Status::Failed(format!("{e:#}")),
                     },
                 );
+            }
+            Some(AboutAction::Restart) => {
+                if let update::Status::Ready(release, installed) = &self.update {
+                    self.restart_for_update(release.clone(), installed.clone());
+                }
             }
         }
     }
@@ -1047,7 +1080,9 @@ impl eframe::App for GraftApp {
             .show_separator_line(false)
             .show(ui, |ui| {
                 let update = match &self.update {
-                    update::Status::Available(release) => Some(release.version.as_str()),
+                    update::Status::Available(release) | update::Status::Ready(release, _) => {
+                        Some(release.version.as_str())
+                    }
                     _ => None,
                 };
                 project_tabs::show(
@@ -1161,6 +1196,18 @@ fn may_quit(busy: bool, refused: Option<Instant>, now: Instant) -> bool {
     !busy || refused.is_some_and(|at| now.saturating_duration_since(at) < CLOSE_AGAIN)
 }
 
+/// Why `doing` (e.g. "updating") must wait while `waits` (see
+/// [`GraftApp::waits`]) run, one line each.
+fn wait_first(waits: &[String], doing: &str) -> Option<String> {
+    (!waits.is_empty()).then(|| {
+        waits
+            .iter()
+            .map(|wait| format!("{wait} before {doing}."))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1175,6 +1222,22 @@ mod tests {
         assert!(
             !may_quit(true, Some(ago(6)), now),
             "closed again much later"
+        );
+    }
+
+    /// Updating waits for each thing that runs; with nothing running it may
+    /// go ahead.
+    #[test]
+    fn updating_waits_for_what_runs() {
+        assert_eq!(wait_first(&[], "updating"), None);
+        let waits = [
+            "Wait for \"Pushing\" to finish (or cancel it) in the graft tab".to_owned(),
+            "Wait for \"Creating x\" to finish on the start page".to_owned(),
+        ];
+        assert_eq!(
+            wait_first(&waits, "updating").unwrap(),
+            "Wait for \"Pushing\" to finish (or cancel it) in the graft tab before updating.\n\
+             Wait for \"Creating x\" to finish on the start page before updating."
         );
     }
 }

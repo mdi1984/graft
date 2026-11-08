@@ -340,6 +340,12 @@ impl StartPage {
         self.busy.as_ref().map(Running::status)
     }
 
+    /// While a clone or init runs: what to wait for before closing, see
+    /// [`Running::wait_text`].
+    pub fn wait_before_closing(&self) -> Option<String> {
+        self.busy.as_ref().map(Running::wait_text)
+    }
+
     /// A repository was opened: forget the forms, unless a clone or init
     /// runs. That one ends with [`StartPage::stop`] and opens its own.
     pub fn opened(&mut self) {
@@ -1022,6 +1028,22 @@ mod tests {
         page.opened();
         assert_eq!(page.mode, Mode::Home);
         assert!(page.url.is_empty() && page.error.is_none());
+    }
+
+    /// Quitting or updating waits for a running clone, as for an operation
+    /// in a tab.
+    #[test]
+    fn quitting_waits_for_a_clone() {
+        let mut page = StartPage::new(PathBuf::from(r"C:\dev"));
+        assert_eq!(page.wait_before_closing(), None);
+        let (running, _cancel) = Running::cancellable("Cloning https://example.com/x.git");
+        page.begin(running);
+        assert_eq!(
+            page.wait_before_closing().as_deref(),
+            Some("Wait for \"Cloning https://example.com/x.git\" to finish (or cancel it)")
+        );
+        page.stop(None);
+        assert_eq!(page.wait_before_closing(), None);
     }
 
     #[test]

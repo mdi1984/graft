@@ -2,6 +2,7 @@
 
 use egui::{Align, Layout, RichText, Sense, Ui, vec2};
 
+use super::can::{Can, yes};
 use super::icons::paint_app_icon;
 use super::widgets::dialog::{self, footer_row};
 use super::widgets::{ButtonKind, button, error_label, inline_spinner};
@@ -13,12 +14,16 @@ const WIDTH: f32 = 420.0;
 pub enum AboutAction {
     Check,
     Install,
+    /// Start the downloaded update.
+    Restart,
     /// Open a web page (the release notes, the repository).
     Open(String),
     Close,
 }
 
-pub fn show(ctx: &egui::Context, status: &Status) -> Option<AboutAction> {
+/// `blocked`: why Graft may not restart for an update now.
+pub fn show(ctx: &egui::Context, status: &Status, blocked: Option<&str>) -> Option<AboutAction> {
+    let restart = yes("").unless(blocked);
     let mut action = None;
     let shown = dialog::show(ctx, "about-modal", WIDTH, false, |ui| {
         ui.horizontal(|ui| {
@@ -45,7 +50,7 @@ pub fn show(ctx: &egui::Context, status: &Status) -> Option<AboutAction> {
         );
 
         ui.add_space(10.0);
-        updates(ui, status, &mut action);
+        updates(ui, status, &restart, &mut action);
 
         ui.add_space(4.0);
         let (github, close) = footer_row(
@@ -65,7 +70,11 @@ pub fn show(ctx: &egui::Context, status: &Status) -> Option<AboutAction> {
     action
 }
 
-fn updates(ui: &mut Ui, status: &Status, action: &mut Option<AboutAction>) {
+fn updates(ui: &mut Ui, status: &Status, restart: &Can, action: &mut Option<AboutAction>) {
+    let restart_button = |ui: &mut Ui, label: &str| {
+        let response = button(ui, label, ButtonKind::Primary, restart.ok);
+        restart.why_not(response).clicked()
+    };
     let busy = |ui: &mut Ui, text: String| {
         ui.horizontal(|ui| {
             inline_spinner(ui);
@@ -96,7 +105,7 @@ fn updates(ui: &mut Ui, status: &Status, action: &mut Option<AboutAction>) {
                     .color(color::text()),
             );
             ui.horizontal(|ui| {
-                if button(ui, "Update and restart", ButtonKind::Primary, true).clicked() {
+                if restart_button(ui, "Update and restart") {
                     *action = Some(AboutAction::Install);
                 }
                 if button(ui, "What's new", ButtonKind::Secondary, true).clicked() {
@@ -105,6 +114,16 @@ fn updates(ui: &mut Ui, status: &Status, action: &mut Option<AboutAction>) {
             });
         }
         Status::Installing(release) => busy(ui, format!("Downloading Graft {}…", release.version)),
+        Status::Ready(release, _) => {
+            ui.label(
+                RichText::new(format!("Graft {} is downloaded.", release.version))
+                    .font(theme::semibold(theme::BODY_SIZE))
+                    .color(color::text()),
+            );
+            if restart_button(ui, "Restart to update") {
+                *action = Some(AboutAction::Restart);
+            }
+        }
         Status::Failed(error) => {
             error_label(ui, error);
             if button(ui, "Try again", ButtonKind::Secondary, true).clicked() {

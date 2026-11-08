@@ -81,17 +81,10 @@ impl Project {
         false
     }
 
-    /// While an operation runs: what to wait for before closing, e.g.
-    /// `Wait for "Pushing" to finish (or cancel it)`.
+    /// While an operation runs: what to wait for before closing, see
+    /// [`Running::wait_text`].
     pub fn wait_before_closing(&self) -> Option<String> {
-        let op = self.op.as_ref()?;
-        let what = op.label.trim_end_matches('…');
-        let cancel = if op.can_cancel() {
-            " (or cancel it)"
-        } else {
-            ""
-        };
-        Some(format!("Wait for \"{what}\" to finish{cancel}"))
+        self.op.as_ref().map(Running::wait_text)
     }
 
     /// The running operation's progress, while it has any to show.
