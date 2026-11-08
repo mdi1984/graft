@@ -98,8 +98,9 @@ impl Project {
                 self.ask(Confirm {
                     title: "The remote has commits you don't have".to_owned(),
                     body: "Pull first to combine them with yours. Or force push to replace \
-                           the remote branch with yours; Graft uses --force-with-lease, so it \
-                           only goes through if nobody pushed since your last fetch."
+                           the remote branch with yours; Graft uses --force-with-lease and \
+                           --force-if-includes, so it is refused if the remote has commits \
+                           that were never in your branch, even ones fetched since."
                         .to_owned(),
                     confirm_label: "Force push".to_owned(),
                     action: Action::Remote(RemoteOp::ForcePush { worktree }),
@@ -256,5 +257,39 @@ mod tests {
         assert!(project.notices.is_empty(), "{:?}", project.notices);
         assert_eq!(tip(&origin, "a"), tip(&a, "HEAD"));
         assert_eq!(tip(&origin, "b"), "", "b was not pushed");
+    }
+
+    /// Someone else pushes to a, a background fetch brings their commit in,
+    /// and a's force push is refused instead of replacing it.
+    #[test]
+    fn force_push_keeps_commits_that_were_only_fetched() {
+        let Setup {
+            _dir: dir,
+            mut project,
+            origin,
+            a,
+            ..
+        } = setup();
+        git(&a, &["push", "-q", "-u", "origin", "a"]);
+        let colleague = dir.path().join("colleague");
+        let url = origin.to_str().unwrap();
+        git(dir.path(), &["clone", "-q", "-b", "a", url, "colleague"]);
+        std::fs::write(colleague.join("theirs.txt"), "theirs\n").unwrap();
+        git(&colleague, &["add", "theirs.txt"]);
+        git(&colleague, &["commit", "-q", "-m", "theirs"]);
+        git(&colleague, &["push", "-q", "origin", "a"]);
+        let theirs = tip(&colleague, "HEAD");
+        git(&a, &["commit", "-q", "--amend", "-m", "rewritten"]);
+        git(&a, &["fetch", "-q", "origin"]);
+        project.apply(Action::Remote(RemoteOp::Push));
+        wait(&mut project, "no force push offer", |p| {
+            p.confirm().is_some()
+        });
+        project.apply(Action::ConfirmYes);
+        wait(&mut project, "the force push never ended", |p| {
+            !p.is_operating()
+        });
+        assert_eq!(project.notices.len(), 1, "{:?}", project.notices);
+        assert_eq!(tip(&origin, "a"), theirs);
     }
 }

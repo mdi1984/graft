@@ -104,7 +104,8 @@ pub fn push(git: &Git, cancel: &CancelToken, on_progress: impl FnMut(Progress)) 
 }
 
 /// Push the current branch over a diverged upstream, but only if the upstream
-/// is still where we last saw it (someone else's new commits are never lost).
+/// is still where we last saw it and its commits were once in our branch:
+/// someone else's commits are never lost, even after a background fetch.
 pub fn force_push(
     git: &Git,
     cancel: &CancelToken,
@@ -115,7 +116,12 @@ pub fn force_push(
         return push(git, cancel, on_progress);
     }
     git.run_progress(
-        &["push", "--progress", "--force-with-lease"],
+        &[
+            "push",
+            "--progress",
+            "--force-with-lease",
+            "--force-if-includes",
+        ],
         cancel,
         on_progress,
     )
