@@ -321,7 +321,18 @@ pub struct Confirm {
 #[derive(Clone, Debug)]
 pub struct Selection {
     worktree: PathBuf,
-    branch: Option<String>,
+    /// Its branch; `None` once any branch will do (see
+    /// [`Self::branch_changed_by_us`]).
+    branch: Option<Option<String>>,
+}
+
+impl Selection {
+    /// Graft's own operation may have switched the branch (`git stash
+    /// branch` switches before it applies, and can fail after): the
+    /// worktree must still be the same, its branch need not.
+    pub(super) fn branch_changed_by_us(&mut self) {
+        self.branch = None;
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -944,7 +955,7 @@ impl Project {
     pub(super) fn selection(&self) -> Selection {
         Selection {
             worktree: self.nav.worktree.clone(),
-            branch: self.worktree().and_then(|wt| wt.branch.clone()),
+            branch: Some(self.worktree().and_then(|wt| wt.branch.clone())),
         }
     }
 
@@ -953,7 +964,7 @@ impl Project {
     pub(super) fn still_selected(&mut self, asked: &Selection) -> bool {
         let now = self.selection();
         let same = graft_core::paths::same_path(&now.worktree, &asked.worktree)
-            && now.branch == asked.branch;
+            && (asked.branch.is_none() || now.branch == asked.branch);
         if !same {
             self.notices.push(
                 "Nothing was done: the selected worktree or its branch changed while \

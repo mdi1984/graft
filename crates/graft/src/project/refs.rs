@@ -147,7 +147,8 @@ impl Dialog {
 }
 
 /// The ending of an operation submitted from the open dialog: success
-/// closes it, then `then` runs; an error shows in the dialog.
+/// closes it, then `then` runs; an error shows in the dialog, which can be
+/// tried again even if the operation switched the branch before failing.
 fn from_dialog<T>(
     then: impl FnOnce(&mut Project, PathBuf, anyhow::Result<T>) + Send,
 ) -> impl FnOnce(&mut Project, PathBuf, anyhow::Result<T>) + Send {
@@ -157,6 +158,7 @@ fn from_dialog<T>(
         {
             dialog.submitting = false;
             dialog.error = shown_error(e);
+            dialog.asked.branch_changed_by_us();
             return;
         }
         if result.is_ok() {
@@ -817,6 +819,51 @@ mod tests {
         project.apply(Action::OpenWorktree(main));
         assert_eq!(project.nav.tab, Tab::Review);
         assert!(project.diff_view.is_none(), "main is clean: no diff");
+    }
+
+    /// `git stash branch` switches to the new branch before it applies the
+    /// stash. When applying fails, the dialog stays open and its OK still
+    /// works, although the branch changed.
+    #[test]
+    fn branch_from_stash_can_be_tried_again_after_it_failed() {
+        let Setup {
+            _dir,
+            mut project,
+            main,
+            ..
+        } = setup(|main| {
+            std::fs::write(main.join("u.txt"), "stashed\n").unwrap();
+            git(main, &["stash", "push", "-q", "-u"]);
+            std::fs::write(main.join("u.txt"), "in the way\n").unwrap();
+        });
+        project.apply(Action::OpenWorktree(main.clone()));
+        let out = Cmd::new("git")
+            .args(["rev-parse", "stash@{0}"])
+            .current_dir(&main)
+            .output()
+            .unwrap();
+        let id = Oid::from_hex(String::from_utf8_lossy(&out.stdout).trim().as_bytes()).unwrap();
+        let named = |name: &str| DialogKind::StashBranch {
+            id,
+            label: "stash@{0}".to_owned(),
+            name: name.to_owned(),
+        };
+        project.apply(Action::OpenDialog(named("first")));
+        project.apply(Action::SubmitDialog);
+        wait(&mut project, "the stash branch never failed", |p| {
+            p.dialog.as_ref().is_some_and(|d| d.error.is_some())
+                && branch_at(p, &main).as_deref() == Some("first")
+        });
+
+        std::fs::remove_file(main.join("u.txt")).unwrap();
+        project.dialog.as_mut().unwrap().kind = named("second");
+        project.apply(Action::SubmitDialog);
+        assert!(project.notices.is_empty(), "{:?}", project.notices);
+        wait(&mut project, "the stash branch never succeeded", |p| {
+            p.dialog.is_none() && branch_at(p, &main).as_deref() == Some("second")
+        });
+        let restored = std::fs::read_to_string(main.join("u.txt")).unwrap();
+        assert_eq!(restored.trim_end(), "stashed");
     }
 
     /// An action refused because another operation runs changes nothing.
