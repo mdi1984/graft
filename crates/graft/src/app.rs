@@ -10,7 +10,7 @@ use egui::{CentralPanel, Frame, Margin, Panel};
 use graft_core::console::Console;
 use graft_core::paths::same_path;
 use graft_core::repo::{self, Location};
-use graft_core::{JobPool, Waker, is_cancelled};
+use graft_core::{JobPool, Waker, is_cancelled, is_panic};
 use serde::{Deserialize, Serialize};
 
 use crate::groups::{self, GroupId, TabGroup};
@@ -81,7 +81,7 @@ impl Persisted {
 
 impl crate::jobs::Owner for GraftApp {
     fn panicked(&mut self, message: String) {
-        self.open_failed(message);
+        self.toasts.error(message);
     }
 }
 
@@ -270,7 +270,8 @@ impl GraftApp {
     fn opened(&mut self, result: anyhow::Result<Location>) {
         match result {
             Ok(location) => self.add_project(location),
-            Err(e) if is_cancelled(&e) => self.start.stop(None),
+            // A panic was announced when it happened.
+            Err(e) if is_cancelled(&e) || is_panic(&e) => self.start.stop(None),
             Err(e) => self.open_failed(format!("{e:#}")),
         }
     }
@@ -489,16 +490,18 @@ impl GraftApp {
         let paths: Vec<PathBuf> = self.recent.iter().map(|r| r.path.clone()).collect();
         self.jobs.spawn(
             move || {
-                paths
-                    .into_iter()
-                    .map(|path| {
-                        let there = Recent::is_there(&path);
-                        (path, there)
-                    })
-                    .collect::<Vec<_>>()
+                Some(
+                    paths
+                        .into_iter()
+                        .map(|path| {
+                            let there = Recent::is_there(&path);
+                            (path, there)
+                        })
+                        .collect::<Vec<_>>(),
+                )
             },
             |app, checked| {
-                for (path, there) in checked {
+                for (path, there) in checked.into_iter().flatten() {
                     for r in app.recent.iter_mut().filter(|r| r.path == path) {
                         r.exists = there;
                     }
@@ -606,9 +609,10 @@ impl GraftApp {
                 self.pick("Open a git repository", start, Self::open_folder);
             }
             StartAction::LoadDistros => {
-                self.jobs.spawn(graft_core::wsl::distros, |app, distros| {
-                    app.start.set_distros(distros)
-                });
+                self.jobs.spawn(
+                    || Some(graft_core::wsl::distros()),
+                    |app, distros| app.start.set_distros(distros.unwrap_or_default()),
+                );
             }
             StartAction::LoadHome(distro) => {
                 let asked = distro.clone();

@@ -373,8 +373,9 @@ impl Project {
         }
         let diff = diff.clone();
         self.jobs.spawn(
-            move || graft_core::syntax::highlight(&diff),
+            move || Some(graft_core::syntax::highlight(&diff)),
             move |p, syntax| {
+                let Some(syntax) = syntax else { return };
                 if let Some(view) = p.view_mut(slot).filter(|v| v.ticket == ticket) {
                     view.highlights.syntax = syntax;
                 }

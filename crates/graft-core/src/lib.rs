@@ -35,7 +35,7 @@ pub mod wsl;
 
 // The basic types, each reachable at one path: here.
 pub use cli::{Git, Output, Progress};
-pub use jobs::{CancelToken, JobPool, Panicked, Waker, is_cancelled};
+pub use jobs::{CancelToken, JobPool, Panicked, Waker, catch, is_cancelled, is_panic};
 pub use model::{
     Branch, Change, EntryKind, FileList, InProgress, Oid, Operation, Preview, Remote, RemoteBranch,
     RepoSnapshot, Restore, StatusEntry, Tag, Upstream, Worktree, WorktreeStatus, null_oid, short,

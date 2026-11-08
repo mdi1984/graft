@@ -56,6 +56,19 @@ pub fn is_cancelled(error: &anyhow::Error) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Panicked(pub String);
 
+impl std::fmt::Display for Panicked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Panicked {}
+
+/// Whether `error` is a job's panic, which was announced when it happened.
+pub fn is_panic(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<Panicked>().is_some()
+}
+
 impl Panicked {
     fn from_payload(payload: &(dyn std::any::Any + Send)) -> Self {
         let what = payload
@@ -67,10 +80,15 @@ impl Panicked {
     }
 }
 
+/// Run `job`, catching a panic.
+pub fn catch<T>(job: impl FnOnce() -> T) -> Result<T, Panicked> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(job))
+        .map_err(|payload| Panicked::from_payload(payload.as_ref()))
+}
+
 /// Run `job`; a panic becomes a [`Panicked`] reply.
 fn run_caught<T: From<Panicked>>(job: impl FnOnce() -> T) -> T {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(job))
-        .unwrap_or_else(|payload| T::from(Panicked::from_payload(payload.as_ref())))
+    catch(job).unwrap_or_else(T::from)
 }
 
 #[derive(Clone)]

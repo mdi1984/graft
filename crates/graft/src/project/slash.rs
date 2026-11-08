@@ -124,7 +124,7 @@ impl Project {
         let started = self.run_long(
             At::Main,
             "Slashing",
-            move |git, cancel, report| slash::execute(&git, &chosen, cancel, report),
+            move |git, cancel, report| Some(slash::execute(&git, &chosen, cancel, report)),
             Self::on_slash_done,
         );
         if started && let Some(view) = &mut self.slash {
@@ -132,7 +132,14 @@ impl Project {
         }
     }
 
-    fn on_slash_done(&mut self, outcome: Outcome) {
+    /// `None`: Slash panicked, which was announced.
+    fn on_slash_done(&mut self, outcome: Option<Outcome>) {
+        let Some(outcome) = outcome else {
+            if let Some(view) = &mut self.slash {
+                view.running = false;
+            }
+            return;
+        };
         let now = jiff::Timestamp::now().as_second();
         let slashed = &mut self.memory.slashed;
         for s in outcome.slashed.iter().rev() {

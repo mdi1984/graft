@@ -33,8 +33,8 @@ use graft_core::ops::LineOp;
 use graft_core::stash::{Stash, StashFile};
 use graft_core::watch::Watcher;
 use graft_core::{
-    CancelToken, Git, JobPool, Oid, Operation, RepoSnapshot, Worktree, is_cancelled, null_oid,
-    snapshot,
+    CancelToken, Git, JobPool, Oid, Operation, RepoSnapshot, Worktree, is_cancelled, is_panic,
+    null_oid, snapshot,
 };
 
 pub use changes::{CommitForm, DiffView, FileKey};
@@ -387,7 +387,6 @@ enum Pending {
 
 impl crate::jobs::Owner for Project {
     fn panicked(&mut self, message: String) {
-        self.op = None;
         self.notices.push(message);
     }
 }
@@ -588,7 +587,7 @@ impl Project {
         let git = self.git.clone();
         self.jobs.spawn(
             move || snapshot::load(&git),
-            |p, result| p.on_snapshot(readable(result)),
+            |p, result| p.on_snapshot(result),
         );
     }
 
@@ -632,12 +631,14 @@ impl Project {
         self.snapshot.as_ref()?.worktree_at(&self.nav.worktree)
     }
 
-    fn on_snapshot(&mut self, result: Result<RepoSnapshot, String>) {
+    fn on_snapshot(&mut self, result: anyhow::Result<RepoSnapshot>) {
         self.loading = false;
         match result {
             Ok(snap) => self.take_snapshot(snap),
-            Err(e) if self.snapshot.is_none() => self.error = Some(e),
-            Err(e) => self.notices.push(e),
+            Err(e) if self.snapshot.is_none() => self.error = Some(format!("{e:#}")),
+            // A panic was announced when it happened.
+            Err(e) if is_panic(&e) => {}
+            Err(e) => self.notices.push(format!("{e:#}")),
         }
         if self.refresh_queued {
             self.refresh_queued = false;
@@ -761,7 +762,7 @@ impl Project {
                     self.select_head();
                 }
             }
-            Err(e) if is_cancelled(&e) => {}
+            Err(e) if is_cancelled(&e) || is_panic(&e) => {}
             Err(e) => self.notices.push(format!("Could not load history: {e:#}")),
         }
     }
