@@ -58,9 +58,9 @@ fn branches_tags_and_commit_ops() {
     assert!(refs::create_tag(&git, "bad tag", "HEAD", None).is_err());
     let snap = snapshot::load(&git).unwrap();
     let tag = |name: &str| snap.tags.iter().find(|t| t.name == name).unwrap();
-    assert!(tag("v1").annotated);
+    assert_eq!(sh(&dir, &["cat-file", "-t", "v1"]), "tag");
     assert_eq!(tag("v1").target.to_string(), rev(&dir, "HEAD"));
-    assert!(!tag("light").annotated);
+    assert_eq!(sh(&dir, &["cat-file", "-t", "light"]), "commit");
     assert_eq!(tag("light").target.to_string(), rev(&dir, "HEAD~1"));
     refs::delete_tag(&git, "light").unwrap();
     let names: Vec<String> = snapshot::load(&git)

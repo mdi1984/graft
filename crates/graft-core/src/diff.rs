@@ -637,12 +637,6 @@ fn partial_header(diff: &FileDiff, direction: Direction) -> Vec<u8> {
     format!("diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n").into_bytes()
 }
 
-/// The header of a diff that adds `path` as a new file.
-pub(crate) fn new_file_header(path: &str) -> Vec<u8> {
-    format!("diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n")
-        .into_bytes()
-}
-
 /// Character ranges that differ between a removed and an added line, for
 /// word-level highlights: the part between the common prefix and suffix,
 /// widened to word boundaries.

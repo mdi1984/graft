@@ -262,14 +262,12 @@ pub struct Tag {
     pub name: String,
     /// The commit the tag points at (annotated tags are peeled).
     pub target: Oid,
-    pub annotated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Remote {
     pub name: String,
     pub fetch_url: String,
-    pub push_url: String,
 }
 
 /// A worktree's uncommitted changes and how far it is ahead of and behind

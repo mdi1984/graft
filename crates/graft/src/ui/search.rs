@@ -737,7 +737,6 @@ mod tests {
             id: oid(0xab),
             parents: Default::default(),
             author: "Ada".to_owned(),
-            email: String::new(),
             time: 0,
             commit_time: 0,
             summary: "Fix the topic".to_owned(),
