@@ -595,7 +595,6 @@ pub fn spinner(ui: &Ui, center: Pos2, radius: f32, color: Color32) {
     ui.ctx().request_repaint();
 }
 
-/// A thin progress bar; without a fraction it shows a moving segment.
 /// Whether a row whose content was measured under `id` (see
 /// [`remember_width`]) fits into `width`; true until it was measured.
 pub fn fits(ui: &Ui, id: egui::Id, width: f32) -> bool {
@@ -608,6 +607,7 @@ pub fn remember_width(ui: &Ui, id: egui::Id, width: f32) {
     ui.data_mut(|d| d.insert_temp(id, width));
 }
 
+/// A thin progress bar; without a fraction it shows a moving segment.
 pub fn progress_bar(ui: &mut Ui, fraction: Option<f32>, width: f32) {
     let (rect, _) = ui.allocate_exact_size(vec2(width, 4.0), Sense::hover());
     let painter = ui.painter();
