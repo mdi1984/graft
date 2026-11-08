@@ -220,13 +220,15 @@ pub fn plan(git: &Git, snap: &RepoSnapshot, patterns: &str) -> Result<Plan> {
         // A branch created from the default branch is "merged" before it has
         // commits of its own: a new worktree an agent has not committed in
         // yet, with its ignored .env and build output. Without a reflog to
-        // tell, it is offered but not pre-selected.
+        // tell (expired on old branches), a lone branch is pre-selected (undo
+        // brings it back) but a worktree, whose folder undo can't restore, is
+        // not.
         let suggested = match (reason, created_at.get(name)) {
             (Reason::Merged, Some(start)) if *start == branch.target => {
                 out.kept.push(keep("it has no commits of its own yet"));
                 continue;
             }
-            (Reason::Merged, created) => created.is_some(),
+            (Reason::Merged, created) => created.is_some() || worktree.is_none(),
             (reason, _) => reason != Reason::NeverPushed,
         };
         out.candidates.push(Candidate {

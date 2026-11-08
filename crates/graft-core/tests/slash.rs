@@ -163,7 +163,8 @@ fn branches_without_commits_of_their_own_are_not_merged() {
     .unwrap();
     sh(&main, &["branch", "fresh"]);
     merged_branch(&main, "done");
-    // Merged, but its reflog (where it started) is gone.
+    // Merged, but its reflog (where it started) is gone: with no worktree
+    // to lose, it is still pre-selected.
     merged_branch(&main, "old");
     sh(
         &main,
@@ -195,7 +196,7 @@ fn branches_without_commits_of_their_own_are_not_merged() {
     let done = find("done").unwrap();
     assert_eq!((done.reason, done.suggested), (Reason::Merged, true));
     let old = find("old").unwrap();
-    assert_eq!((old.reason, old.suggested), (Reason::Merged, false));
+    assert_eq!((old.reason, old.suggested), (Reason::Merged, true));
 
     let chosen: Vec<_> = plan
         .candidates
