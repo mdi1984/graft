@@ -11,14 +11,14 @@ use graft_core::file_log::Blame;
 
 use super::diff_view;
 use super::widgets::{
-    ButtonKind, button, elided, empty_state, paint_galley_left, paint_row_bg, waiting,
+    ButtonKind, TWO_LINE_HEIGHT, button, elided, empty_state, paint_galley_left, two_line_row,
+    waiting,
 };
 use crate::project::{Action, FileHistoryMode, FileHistoryView, Project};
 use crate::text::plural;
 use crate::theme::{self, color};
 use crate::ui::Actions;
 
-const ROW: f32 = 46.0;
 const LINE: f32 = 18.0;
 const GUTTER: f32 = 250.0;
 
@@ -141,22 +141,10 @@ fn commit_list(
     let now = crate::time::now();
     ScrollArea::vertical()
         .auto_shrink([false, false])
-        .show_rows(ui, ROW, commits.len(), |ui, range| {
+        .show_rows(ui, TWO_LINE_HEIGHT, commits.len(), |ui, range| {
             for i in range {
                 let commit = &commits[i];
-                let (rect, response) =
-                    ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
                 let selected = view.selected == Some(i);
-                paint_row_bg(
-                    ui.painter(),
-                    rect.shrink2(vec2(6.0, 2.0)),
-                    &response,
-                    selected,
-                );
-                let x = rect.left() + 14.0;
-                let width = rect.width() - 28.0;
-                let summary = elided(ui, &commit.summary, theme::body(), color::text(), width);
-                paint_galley_left(ui.painter(), x, rect.top() + 15.0, summary);
                 let mut meta = format!(
                     "{} · {} · {}",
                     commit.author,
@@ -166,8 +154,7 @@ fn commit_list(
                 if commit.path != view.path {
                     meta.push_str(&format!(" · as {}", commit.path));
                 }
-                let meta = elided(ui, &meta, theme::small(), color::text_weak(), width);
-                paint_galley_left(ui.painter(), x, rect.top() + 33.0, meta);
+                let response = two_line_row(ui, vec2(6.0, 2.0), selected, &commit.summary, &meta);
                 if response.clicked() {
                     actions.push(Action::SelectFileCommit(i));
                 }
@@ -186,14 +173,14 @@ fn blame_view(
     actions: &mut Actions,
 ) {
     let now = crate::time::now();
-    let digits = blame.lines.len().max(1).to_string().len() as f32;
-    let number_width = digits * 8.0 + 12.0;
     let selected_id = view.selected.and_then(|i| commits.get(i)).map(|c| c.id);
     let char_width = ui
         .painter()
         .layout_no_wrap("0".to_owned(), theme::mono(), color::text())
         .size()
         .x;
+    let digits = blame.lines.len().max(1).to_string().len() as f32;
+    let number_width = digits * char_width + 12.0;
     let longest = blame
         .lines
         .iter()

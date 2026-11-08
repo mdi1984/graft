@@ -8,7 +8,7 @@ use std::sync::Arc;
 use egui::text::{LayoutJob, TextFormat};
 use egui::{
     Align2, Color32, FontId, Galley, Painter, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui,
-    pos2, vec2,
+    Vec2, pos2, vec2,
 };
 
 pub use form::*;
@@ -199,6 +199,26 @@ pub fn paint_check(painter: &Painter, rect: Rect, checked: bool, hovered: bool) 
 pub fn section_heading_row(ui: &mut Ui, title: &str) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 16.0), Sense::hover());
     section_heading(ui, ui.painter(), rect.left(), rect.center().y, title);
+}
+
+/// Height of a [`two_line_row`].
+pub const TWO_LINE_HEIGHT: f32 = 46.0;
+
+/// A clickable list row the full width: `title` above, the smaller `meta`
+/// below. Its background is inset by `inset` from the row's edges.
+pub fn two_line_row(ui: &mut Ui, inset: Vec2, selected: bool, title: &str, meta: &str) -> Response {
+    const PAD_X: f32 = 10.0;
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(ui.available_width(), TWO_LINE_HEIGHT), Sense::click());
+    let bg = rect.shrink2(inset);
+    paint_row_bg(ui.painter(), bg, &response, selected);
+    let x = bg.left() + PAD_X;
+    let width = bg.width() - 2.0 * PAD_X;
+    let title = elided(ui, title, theme::body(), color::text(), width);
+    paint_galley_left(ui.painter(), x, rect.top() + 15.0, title);
+    let meta = elided(ui, meta, theme::small(), color::text_weak(), width);
+    paint_galley_left(ui.painter(), x, rect.top() + 33.0, meta);
+    response
 }
 
 /// Row background: selected, hovered, or nothing.
@@ -507,6 +527,14 @@ pub fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Res
         .inner
 }
 
+const CHIP_PAD_X: f32 = 5.0;
+const CHIP_HEIGHT: f32 = 17.0;
+
+/// The size of a [`chip`] around `galley`, when it has room.
+pub fn chip_size(galley: &Galley) -> Vec2 {
+    vec2(galley.size().x + 2.0 * CHIP_PAD_X, CHIP_HEIGHT)
+}
+
 /// A rounded label like a ref name on a commit. Returns its width.
 pub fn chip(
     painter: &Painter,
@@ -516,10 +544,8 @@ pub fn chip(
     fg: Color32,
     max_width: f32,
 ) -> f32 {
-    const PAD_X: f32 = 5.0;
-    const HEIGHT: f32 = 17.0;
-    let width = (galley.size().x + 2.0 * PAD_X).min(max_width);
-    let rect = Rect::from_min_size(pos2(x, y - HEIGHT / 2.0), vec2(width, HEIGHT));
+    let width = chip_size(&galley).x.min(max_width);
+    let rect = Rect::from_min_size(pos2(x, y - CHIP_HEIGHT / 2.0), vec2(width, CHIP_HEIGHT));
     painter.rect(
         rect,
         4,
@@ -527,9 +553,9 @@ pub fn chip(
         Stroke::new(1.0, fg.gamma_multiply(0.35)),
         StrokeKind::Inside,
     );
-    let clip = rect.shrink2(vec2(PAD_X - 1.0, 0.0));
+    let clip = rect.shrink2(vec2(CHIP_PAD_X - 1.0, 0.0));
     painter.with_clip_rect(clip).galley(
-        pos2(rect.left() + PAD_X, y - galley.size().y / 2.0),
+        pos2(rect.left() + CHIP_PAD_X, y - galley.size().y / 2.0),
         galley,
         fg,
     );

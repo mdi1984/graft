@@ -17,7 +17,8 @@ use super::diff_view;
 use super::file_row::{self, file_row, paint_file};
 use super::icons::Icon;
 use super::widgets::{
-    ButtonKind, button, chip, elided, empty_state, icon_button, loading, paint_galley_left,
+    ButtonKind, button, chip, chip_size, elided, empty_state, icon_button, loading,
+    paint_galley_left,
 };
 use crate::project::{Action, DialogKind, FileKey, Project, RefKind, RefLabel};
 use crate::text::plural;
@@ -423,7 +424,7 @@ fn paint_row(
 
 /// Like the sidebar: green is checked out in the main folder, orange in a
 /// linked worktree; the viewed worktree's HEAD is bold.
-pub fn label_style(label: &RefLabel) -> (Color32, egui::FontId) {
+fn label_style(label: &RefLabel) -> (Color32, egui::FontId) {
     let branch_color = checkout_color(label.checked_out);
     match label.kind {
         RefKind::Head => (branch_color, theme::semibold(theme::SMALL_SIZE + 0.5)),
@@ -648,15 +649,14 @@ fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &m
             for label in labels {
                 let (fg, font) = label_style(label);
                 let galley = ui.painter().layout_no_wrap(label.name.clone(), font, fg);
-                let width = galley.size().x + 10.0;
-                let (rect, _) = ui.allocate_exact_size(vec2(width, 18.0), Sense::hover());
+                let (rect, _) = ui.allocate_exact_size(chip_size(&galley), Sense::hover());
                 chip(
                     ui.painter(),
                     rect.left(),
                     rect.center().y,
                     galley,
                     fg,
-                    width,
+                    rect.width(),
                 );
             }
         });
