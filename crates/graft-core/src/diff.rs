@@ -153,9 +153,11 @@ pub fn load(git: &Git, source: &Source, path: &str) -> Result<FileDiff> {
         .iter()
         .map(|s| s.to_string())
         .collect();
+    // Stage and discard build patches from these diffs, which must apply to
+    // the bytes git stores, not to a textconv driver's text.
     match source {
-        Source::Unstaged => {}
-        Source::Staged => args.push("--cached".into()),
+        Source::Unstaged => args.push("--no-textconv".into()),
+        Source::Staged => args.extend(["--cached".into(), "--no-textconv".into()]),
         Source::Untracked => args.extend(["--no-index".into(), "--no-textconv".into()]),
         Source::Commit(id) => {
             args.push(parent(git, id)?.map_or_else(|| EMPTY_TREE.to_owned(), |p| p.to_string()));

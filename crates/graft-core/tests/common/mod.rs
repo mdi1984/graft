@@ -121,3 +121,13 @@ pub fn git(dir: &Path) -> Git {
 pub fn rev(dir: &Path, rev: &str) -> String {
     sh(dir, &["rev-parse", "--verify", rev])
 }
+
+/// A textconv driver that shows `*.dat` files of the repository at `dir`
+/// upper-cased: like git-crypt or a lock file viewer, git diff then shows
+/// other text than the bytes it stores.
+pub fn upper_textconv(dir: &Path) {
+    sh(dir, &["config", "diff.upper.textconv", "tr a-z A-Z <"]);
+    let info = dir.join(".git").join("info");
+    std::fs::create_dir_all(&info).unwrap();
+    std::fs::write(info.join("attributes"), "*.dat diff=upper\n").unwrap();
+}

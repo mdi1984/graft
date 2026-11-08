@@ -248,6 +248,21 @@ fn changes_in_main_since_the_preview_are_noticed() {
     assert!(preview::main_changed(&git).is_err(), "no preview");
 }
 
+/// A worktree's change to a file with a textconv driver shows in main as
+/// the stored bytes.
+#[test]
+fn a_file_with_a_textconv_driver_is_previewed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (git, agent) = main_and_agent(tmp.path(), "");
+    let main = git.cwd().to_path_buf();
+    common::upper_textconv(&main);
+    common::commit(&agent, "a.dat", "one\ntwo\n", "dat");
+    std::fs::write(agent.join("a.dat"), "one\nthree\n").unwrap();
+    preview::start(&git, &git.at(&agent)).unwrap();
+    assert_eq!(std::fs::read(main.join("a.dat")).unwrap(), b"one\nthree\n");
+    preview::restore_main(&git).unwrap();
+}
+
 /// A commit made in main during the preview moves its HEAD: leaving would
 /// leave the commit behind, even with main's files as the preview left them.
 #[test]

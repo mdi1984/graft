@@ -226,6 +226,7 @@ fn uncommitted_patch(source: &Git) -> Result<(Vec<u8>, Vec<String>)> {
                 "--binary",
                 "--no-color",
                 "--no-ext-diff",
+                "--no-textconv",
                 "HEAD",
             ])?
             .stdout;

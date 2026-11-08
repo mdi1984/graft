@@ -578,3 +578,28 @@ fn discarding_lines_of_a_new_file_with_mixed_line_endings() {
     let kept = std::fs::read_to_string(dir.join("mixed.txt")).unwrap();
     assert_eq!(kept.lines().collect::<Vec<_>>(), ["l1", "l3"]);
 }
+
+/// With a textconv driver, staging, unstaging and discarding a hunk work
+/// on the stored bytes, not on the converted text.
+#[test]
+fn hunks_of_a_file_with_a_textconv_driver() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = common::init(&tmp.path().join("r"));
+    common::upper_textconv(&dir);
+    common::commit(&dir, "a.dat", "one\ntwo\n", "init");
+    let git = common::git(&dir);
+    std::fs::write(dir.join("a.dat"), "one\nthree\n").unwrap();
+
+    let d = diff::load(&git, &Source::Unstaged, "a.dat").unwrap();
+    assert_eq!(d.hunks[0].lines[0].text(), "one");
+    ops::apply_lines(&git, &d, &Source::Unstaged, LineOp::Stage, |_, _| true).unwrap();
+    assert_eq!(sh(&dir, &["show", ":a.dat"]), "one\nthree");
+
+    let d = diff::load(&git, &Source::Staged, "a.dat").unwrap();
+    ops::apply_lines(&git, &d, &Source::Staged, LineOp::Unstage, |_, _| true).unwrap();
+    assert_eq!(sh(&dir, &["show", ":a.dat"]), "one\ntwo");
+
+    let d = diff::load(&git, &Source::Unstaged, "a.dat").unwrap();
+    ops::apply_lines(&git, &d, &Source::Unstaged, LineOp::Discard, |_, _| true).unwrap();
+    assert_eq!(std::fs::read(dir.join("a.dat")).unwrap(), b"one\ntwo\n");
+}
