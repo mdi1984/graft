@@ -11,7 +11,7 @@ use graft_core::conflicts::{
 use graft_core::{InProgress, Operation, Worktree};
 
 use super::widgets::{ButtonKind, button, button_width, empty_state, section_heading_row, waiting};
-use crate::project::{Action, ConflictView, Project};
+use crate::project::{Action, Confirm, ConflictView, Project};
 use crate::text::plural;
 use crate::theme::{self, RADIUS, color};
 use crate::ui::Actions;
@@ -63,14 +63,11 @@ pub fn banner(ui: &mut Ui, project: &Project, wt: &Worktree, actions: &mut Actio
                         actions.push(Action::ContinueOp(*kind));
                     }
                     if button(ui, "Abort", ButtonKind::Secondary, !busy).clicked() {
-                        actions.push(Action::AbortOp {
-                            kind: *kind,
-                            confirmed: false,
-                        });
+                        actions.push(abort(*kind));
                     }
                     let text = match left {
                         0 => "All conflicts resolved".to_owned(),
-                        n => format!("{} with conflicts", plural(n, "file")),
+                        n => format!("{} with conflicts", plural(n, "file", "files")),
                     };
                     ui.label(RichText::new(text).color(if left == 0 {
                         color::added()
@@ -80,6 +77,19 @@ pub fn banner(ui: &mut Ui, project: &Project, wt: &Worktree, actions: &mut Actio
                 });
             });
         });
+}
+
+/// Ask first: resolutions made so far are lost.
+fn abort(kind: Operation) -> Action {
+    let noun = kind.noun().to_lowercase();
+    Action::Ask(Box::new(Confirm {
+        title: format!("Abort the {noun}?"),
+        body: "The worktree goes back to how it was before it started. Conflict resolutions \
+               made so far are lost."
+            .to_owned(),
+        confirm_label: format!("Abort {noun}"),
+        action: Action::AbortOp(kind),
+    }))
 }
 
 /// The resolver for `project.conflict`, in place of the diff.

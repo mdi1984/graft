@@ -36,19 +36,17 @@ fn main() -> eframe::Result {
     // `graft <folder>…` opens those folders as projects.
     let mut folders: Vec<std::path::PathBuf> =
         std::env::args_os().skip(1).map(Into::into).collect();
-    let after_update = folders
-        .first()
-        .is_some_and(|a| a.as_os_str() == update::AFTER_UPDATE);
-    if after_update {
-        // Started by an update: let the old Graft save and close first.
-        if let Some(pid) = folders.get(1).and_then(|p| p.to_str()?.parse().ok()) {
+    let after_update = update::after_update(&folders);
+    if let Some(after) = &after_update {
+        // Let the old Graft save and close first.
+        if let Some(pid) = after.old_pid {
             native::wait_for_exit(pid);
         }
         folders.clear();
     }
     // Graft runs once: a second start hands its folders to the first. After
     // an update the old Graft may still be closing; never hand over to it.
-    let _instance = match single::claim(&folders, !after_update) {
+    let _instance = match single::claim(&folders, after_update.is_none()) {
         single::Start::First(instance) => instance,
         single::Start::Forwarded => return Ok(()),
     };
@@ -88,8 +86,8 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             let _ = repaint.set(cc.egui_ctx.clone());
             let app = app::GraftApp::new(cc, folders, forwarded, last_update);
-            // After the app picked the theme, for the border color.
-            native::style_window(cc);
+            // After the app picked the theme, which sets the border color.
+            native::style_window(cc, theme::color::border());
             Ok(Box::new(app))
         }),
     );

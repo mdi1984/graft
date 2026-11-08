@@ -9,6 +9,7 @@ use crate::cli::{Git, Progress, failure_message};
 use crate::console::Console;
 use crate::jobs::CancelToken;
 use crate::paths::display;
+use crate::refusal;
 
 /// Where a repository lives on disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,7 +36,7 @@ pub fn locate(path: &Path, console: &Console) -> Result<Location> {
     ])?;
     if !out.success() {
         let msg = failure_message(&out);
-        if msg.contains("not a git repository") {
+        if refusal::not_a_repository(&msg) {
             bail!("{} is not a git repository", display(path));
         }
         bail!(msg);

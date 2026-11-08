@@ -3,8 +3,20 @@
 //! `LC_ALL=C` (see [`crate::Git`]); a git release that rewords one breaks
 //! only the matcher here.
 
-/// Part of git's message when `branch -d` refuses an unmerged branch.
-pub const NOT_MERGED: &str = "not fully merged";
+/// `branch -d` refused to delete a branch that is not merged.
+pub fn not_merged(error: &str) -> bool {
+    error.contains("not fully merged")
+}
+
+/// The folder is not inside a git repository.
+pub(crate) fn not_a_repository(error: &str) -> bool {
+    error.contains("not a git repository")
+}
+
+/// `stash push` found nothing to stash; `output` is its stdout.
+pub(crate) fn nothing_to_stash(output: &str) -> bool {
+    output.contains("No local changes to save")
+}
 
 /// Git refused to switch branches because local changes would be lost.
 pub fn blocked_by_changes(error: &str) -> bool {

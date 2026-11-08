@@ -393,7 +393,7 @@ fn commit_box(ui: &mut Ui, project: &mut Project, status: &WorktreeStatus, actio
             let note = match (staged, form.amend) {
                 (0, false) => "Nothing staged yet".to_owned(),
                 (0, true) => "Rewords the last commit".to_owned(),
-                (n, _) => format!("{} staged", plural(n, "file")),
+                (n, _) => format!("{} staged", plural(n, "file", "files")),
             };
             ui.label(RichText::new(note).color(color::text_weak()));
         });

@@ -216,9 +216,7 @@ pub fn restart(installed: &Installed) -> Result<()> {
     let (mut command, program) = match installed {
         Installed::Program(exe) => {
             let mut command = Command::new(exe);
-            command
-                .arg(AFTER_UPDATE)
-                .arg(std::process::id().to_string());
+            command.args(after_update_args(std::process::id()));
             (command, exe)
         }
         Installed::Setup { setup, exe } => (
@@ -271,7 +269,28 @@ const PENDING: &str = "pending";
 const LOG: &str = "setup.log";
 
 /// The argument a restarted Graft gets, followed by the old one's process id.
-pub const AFTER_UPDATE: &str = "--after-update";
+const AFTER_UPDATE: &str = "--after-update";
+
+/// The arguments for the Graft an update by file swap starts.
+fn after_update_args(old_pid: u32) -> [String; 2] {
+    [AFTER_UPDATE.to_owned(), old_pid.to_string()]
+}
+
+/// Graft was started by an update.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AfterUpdate {
+    /// The old Graft, still closing.
+    pub old_pid: Option<u32>,
+}
+
+/// Whether the command line `args` (without the program) are those of a
+/// Graft an update started.
+pub fn after_update(args: &[PathBuf]) -> Option<AfterUpdate> {
+    let (first, rest) = args.split_first()?;
+    (first.as_os_str() == AFTER_UPDATE).then(|| AfterUpdate {
+        old_pid: rest.first().and_then(|p| p.to_str()?.parse().ok()),
+    })
+}
 
 /// Remove what the last update left behind, and correct the version in
 /// "Installed apps" if an update by file swap left the old one there. Only
@@ -369,6 +388,24 @@ fn expected_hash(sums: &str, name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_restarted_graft_reads_its_arguments_back() {
+        let args: Vec<PathBuf> = after_update_args(42).iter().map(Into::into).collect();
+        assert_eq!(after_update(&args), Some(AfterUpdate { old_pid: Some(42) }));
+        assert_eq!(
+            after_update(&args[..1]),
+            Some(AfterUpdate { old_pid: None })
+        );
+        assert_eq!(
+            after_update(&[PathBuf::from(
+                r"C:
+epo"
+            )]),
+            None
+        );
+        assert_eq!(after_update(&[]), None);
+    }
 
     #[test]
     fn a_github_release_is_read() {

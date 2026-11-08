@@ -870,7 +870,7 @@ fn selection_bar(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Actions
             ui.horizontal(|ui| {
                 let n = view.selection.len();
                 ui.label(
-                    RichText::new(format!("{} selected", plural(n, "line")))
+                    RichText::new(format!("{} selected", plural(n, "line", "lines")))
                         .font(theme::semibold(theme::BODY_SIZE))
                         .color(color::text()),
                 );
@@ -896,7 +896,7 @@ fn selection_bar(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Actions
                                     title: "Discard the selected lines?".to_owned(),
                                     body: format!(
                                         "{} in {} will be reverted. This cannot be undone.",
-                                        plural(n, "selected line"),
+                                        plural(n, "selected line", "selected lines"),
                                         view.key.path
                                     ),
                                     confirm_label: "Discard lines".to_owned(),
@@ -1118,7 +1118,7 @@ fn gap_row(ui: &mut Ui, rect: Rect, view: &DiffView, g: usize, actions: &mut Act
     let painter = ui.painter();
     painter.rect_filled(rect, 0, color::muted_bg());
     let n = gap.len();
-    let label = plural(n as usize, "unchanged line");
+    let label = plural(n as usize, "unchanged line", "unchanged lines");
     let galley = painter.layout_no_wrap(label, theme::small(), color::text_faint());
     let left = ui.clip_rect().left().max(rect.left()) + GUTTER;
     let mut x = left + galley.size().x + 12.0;

@@ -403,7 +403,10 @@ fn paint_row(
     }
 
     if commit.is_worktree() {
-        let text = format!("Uncommitted changes · {}", plural(worktree_dirty, "file"));
+        let text = format!(
+            "Uncommitted changes · {}",
+            plural(worktree_dirty, "file", "files")
+        );
         let galley = elided(
             ui,
             &text,
@@ -746,9 +749,12 @@ fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &m
     let removed: usize = d.files.iter().filter_map(|f| f.removed).sum();
     ui.horizontal(|ui| {
         ui.label(
-            RichText::new(format!("{} changed", plural(d.files.len(), "file")))
-                .font(theme::semibold(theme::BODY_SIZE))
-                .color(color::text()),
+            RichText::new(format!(
+                "{} changed",
+                plural(d.files.len(), "file", "files")
+            ))
+            .font(theme::semibold(theme::BODY_SIZE))
+            .color(color::text()),
         );
         ui.label(RichText::new(format!("+{added}")).color(color::added()));
         ui.label(RichText::new(format!("−{removed}")).color(color::removed()));

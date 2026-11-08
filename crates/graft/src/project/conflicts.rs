@@ -7,7 +7,7 @@ use graft_core::Operation;
 use graft_core::conflicts::{self, ConflictFile, Resolution, Segment};
 
 use super::ops::{At, say};
-use super::{Action, Confirm, DialogKind, Project, Tab, WorkspaceView, readable};
+use super::{DialogKind, Project, Tab, WorkspaceView, readable};
 
 /// The resolver for one conflicted file of the selected worktree.
 pub struct ConflictView {
@@ -273,22 +273,7 @@ impl Project {
         );
     }
 
-    pub(super) fn abort_op(&mut self, kind: Operation, confirmed: bool) {
-        let noun = kind.noun().to_lowercase();
-        if !confirmed {
-            self.confirm = Some(Confirm {
-                title: format!("Abort the {noun}?"),
-                body: "The worktree goes back to how it was before it started. \
-                       Conflict resolutions made so far are lost."
-                    .to_owned(),
-                confirm_label: format!("Abort {noun}"),
-                action: Action::AbortOp {
-                    kind,
-                    confirmed: true,
-                },
-            });
-            return;
-        }
+    pub(super) fn abort_op(&mut self, kind: Operation) {
         self.run_op(
             At::Selected,
             "Aborting",

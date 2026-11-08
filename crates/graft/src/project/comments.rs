@@ -179,12 +179,14 @@ pub fn place<'a>(
 }
 
 /// File notes and line comments as Markdown for a coding agent.
-pub fn export(title: &str, notes: &BTreeMap<String, String>, comments: &[LineComment]) -> String {
-    let notes: BTreeMap<&str, &str> = notes
-        .iter()
-        .map(|(path, note)| (path.as_str(), note.trim()))
-        .filter(|(_, note)| !note.is_empty())
-        .collect();
+/// `notes` are the written file notes by path (see
+/// `ReviewState::written_notes`).
+pub fn export<'a>(
+    title: &str,
+    notes: impl IntoIterator<Item = (&'a str, &'a str)>,
+    comments: &[LineComment],
+) -> String {
+    let notes: BTreeMap<&str, &str> = notes.into_iter().collect();
     let paths: BTreeSet<&str> = notes
         .keys()
         .copied()
@@ -360,11 +362,26 @@ mod tests {
             excerpt: "+```x\n".into(),
             text: " Rename this. ".into(),
         };
-        let notes = BTreeMap::from([
-            ("src/a.rs".to_owned(), "Split the module.".to_owned()),
-            ("empty.rs".to_owned(), "  ".to_owned()),
-        ]);
-        let text = export("feature against main", &notes, &[c]);
+        let state = crate::project::ReviewState {
+            notes: BTreeMap::from([
+                (
+                    "src/a.rs".to_owned(),
+                    " Split the module.
+"
+                    .to_owned(),
+                ),
+                ("empty.rs".to_owned(), "  ".to_owned()),
+            ]),
+            comments: vec![c],
+            ..Default::default()
+        };
+        assert_eq!(state.comment_count(), 2, "a blank note is none");
+        assert_eq!(state.file_comment_count("empty.rs"), 0);
+        let text = export(
+            "feature against main",
+            state.written_notes(),
+            &state.comments,
+        );
         assert!(text.starts_with("# Review comments: feature against main"));
         assert!(text.contains(
             "## src/a.rs\n\nAbout the whole file:\nSplit the module.\n\n### Lines 2–3\n\

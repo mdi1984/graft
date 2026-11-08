@@ -140,7 +140,7 @@ impl Project {
             }
             return;
         };
-        let now = jiff::Timestamp::now().as_second();
+        let now = crate::time::now();
         let slashed = &mut self.memory.slashed;
         for s in outcome.slashed.iter().rev() {
             slashed.insert(
@@ -156,13 +156,10 @@ impl Project {
         let branches = outcome.slashed.len();
         let mut parts = Vec::new();
         if branches > 0 {
-            parts.push(match branches {
-                1 => "1 branch".to_owned(),
-                n => format!("{n} branches"),
-            });
+            parts.push(plural(branches, "branch", "branches"));
         }
         if outcome.worktrees_removed > 0 {
-            parts.push(plural(outcome.worktrees_removed, "worktree"));
+            parts.push(plural(outcome.worktrees_removed, "worktree", "worktrees"));
         }
         if !parts.is_empty() {
             let stopped = if outcome.cancelled {

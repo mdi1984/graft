@@ -240,10 +240,7 @@ pub enum Action {
     /// The user fixed the file in an editor: stage it.
     MarkResolved(String),
     ContinueOp(Operation),
-    AbortOp {
-        kind: Operation,
-        confirmed: bool,
-    },
+    AbortOp(Operation),
 
     // Review
     SelectReviewFile(String),
@@ -367,7 +364,7 @@ impl RepoMemory {
     /// Without blank file notes and the reviews that remember nothing.
     pub fn pruned(mut self) -> Self {
         for state in self.reviews.values_mut() {
-            state.notes.retain(|_, note| !note.trim().is_empty());
+            state.forget_blank_notes();
         }
         self.reviews.retain(|_, state| !state.is_empty());
         self
@@ -959,7 +956,7 @@ impl Project {
             Action::TakeSide { path, ours } => self.take_side(path, ours),
             Action::MarkResolved(path) => self.mark_resolved(path),
             Action::ContinueOp(kind) => self.continue_op(kind),
-            Action::AbortOp { kind, confirmed } => self.abort_op(kind, confirmed),
+            Action::AbortOp(kind) => self.abort_op(kind),
 
             Action::SelectReviewFile(path) => self.open_review_file(path, false),
             Action::ToggleViewed(path) => self.toggle_viewed(path),

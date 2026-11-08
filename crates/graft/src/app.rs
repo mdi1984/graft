@@ -29,7 +29,7 @@ use crate::ui::start::{Recent, StartAction, StartPage};
 use crate::ui::toasts::Toasts;
 use crate::ui::{Actions, AppAction};
 use crate::update;
-use crate::{fonts, theme, ui};
+use crate::{fonts, launch, theme, ui};
 
 const STORAGE_KEY: &str = "graft";
 const MAX_RECENT: usize = 12;
@@ -571,7 +571,7 @@ impl GraftApp {
                     self.group_form = Some(GroupForm::new(
                         GroupTarget::New(p.root.clone()),
                         String::new(),
-                        groups::free_color(&self.groups),
+                        groups::free_color(&self.groups, color::GROUP_COUNT),
                     ));
                 }
             }
@@ -668,13 +668,7 @@ impl GraftApp {
         picked: impl FnOnce(&mut GraftApp, PathBuf) + Send + 'static,
     ) {
         self.jobs.spawn_long(
-            move |_| {
-                let mut dialog = rfd::FileDialog::new().set_title(title);
-                if let Some(dir) = start.filter(|d| d.is_dir()) {
-                    dialog = dialog.set_directory(dir);
-                }
-                dialog.pick_folder()
-            },
+            move |_| launch::pick_folder(title, start),
             |app, folder| {
                 if let Some(folder) = folder {
                     picked(app, folder);

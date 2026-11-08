@@ -257,9 +257,10 @@ fn can_push(snap: Option<&RepoSnapshot>, wt: Option<&Worktree>) -> Can {
         (Ok(PushPlan::Upstream), Upstream::Tracking { name, .. }) if ahead == 0 => no(format!(
             "Nothing to push: {branch} has no commits that {name} lacks"
         )),
-        (Ok(PushPlan::Upstream), Upstream::Tracking { name, .. }) => {
-            yes(format!("Push {} to {name}", plural(ahead, "commit")))
-        }
+        (Ok(PushPlan::Upstream), Upstream::Tracking { name, .. }) => yes(format!(
+            "Push {} to {name}",
+            plural(ahead, "commit", "commits")
+        )),
         (Ok(_), Upstream::Gone { name }) => yes(format!(
             "Push {branch} again ({name} was deleted on the remote)"
         )),

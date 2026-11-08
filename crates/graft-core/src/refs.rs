@@ -120,7 +120,7 @@ pub fn rename_branch(git: &Git, old: &str, new: &str) -> Result<()> {
 }
 
 /// Delete a local branch. Without `force`, git refuses if it is not merged;
-/// the error then contains [`NOT_MERGED`].
+/// [`crate::refusal::not_merged`] then tells that refusal apart.
 pub fn delete_branch(git: &Git, name: &str, force: bool) -> Result<()> {
     git.run([
         "branch",

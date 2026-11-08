@@ -6,6 +6,7 @@ use anyhow::{Result, bail};
 use crate::changes::{FileChange, between};
 use crate::cli::Git;
 use crate::model::{Change, Oid};
+use crate::refusal;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Stash {
@@ -113,7 +114,7 @@ pub fn push(git: &Git, options: &Options) -> Result<()> {
         args.extend(["--message", message]);
     }
     let out = git.without_literal_pathspecs().run(args)?;
-    if out.stdout_str().contains("No local changes to save") {
+    if refusal::nothing_to_stash(&out.stdout_str()) {
         bail!("There are no changes to stash.");
     }
     Ok(())

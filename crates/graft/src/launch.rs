@@ -11,6 +11,16 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Ask for a folder in Windows' folder picker, opened at `start` if that
+/// is one. Waits for the user: run it on a thread of its own.
+pub fn pick_folder(title: &str, start: Option<PathBuf>) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new().set_title(title);
+    if let Some(dir) = start.filter(|d| d.is_dir()) {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog.pick_folder()
+}
+
 /// Extensions that Windows runs, or follows to something it runs, instead of
 /// opening them as a document. `PATHEXT` adds to these.
 const RUNNABLE: &[&str] = &[

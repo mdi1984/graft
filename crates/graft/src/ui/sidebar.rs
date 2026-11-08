@@ -437,7 +437,7 @@ fn remove_confirm(wt: &Worktree) -> Confirm {
         format!(
             "The folder {} will be deleted, including {}, which will be lost. {branch}",
             paths::display(&wt.path),
-            plural(dirty, "uncommitted change")
+            plural(dirty, "uncommitted change", "uncommitted changes")
         )
     } else {
         format!(

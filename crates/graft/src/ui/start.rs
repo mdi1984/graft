@@ -20,6 +20,7 @@ use super::widgets::{
 use crate::groups::{GroupId, TabGroup};
 use crate::keys::{Command, Keymap};
 use crate::running::Running;
+use crate::text::plural;
 use crate::theme::{self, RADIUS, color};
 
 const WIDTH: f32 = 600.0;
@@ -835,8 +836,7 @@ fn group_list(ui: &mut Ui, groups: &[TabGroup], width: f32, action: &mut Option<
         painter.circle_filled(pos2(rect.left() + 14.0, rect.top() + 14.0), 4.0, fg);
         let count = match group.repos.len() {
             0 => "no repositories yet".to_owned(),
-            1 => "1 repository".to_owned(),
-            n => format!("{n} repositories"),
+            n => plural(n, "repository", "repositories"),
         };
         let name = elided(
             ui,

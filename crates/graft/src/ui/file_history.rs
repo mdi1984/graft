@@ -96,7 +96,9 @@ fn toolbar(ui: &mut Ui, view: &FileHistoryView, actions: &mut Actions) {
                 );
                 if let Some(Ok(commits)) = &view.commits {
                     let n = commits.len();
-                    ui.label(RichText::new(plural(n, "commit")).color(color::text_faint()));
+                    ui.label(
+                        RichText::new(plural(n, "commit", "commits")).color(color::text_faint()),
+                    );
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     for (mode, label) in [

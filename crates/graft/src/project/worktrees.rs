@@ -3,15 +3,16 @@
 
 use std::path::{Path, PathBuf};
 
-use graft_core::RepoSnapshot;
 use graft_core::paths::folder_name;
 use graft_core::paths::same_path;
 use graft_core::refs::{RefKind, check_ref_name};
 use graft_core::watch::Watcher;
 use graft_core::worktree::{self, Start};
+use graft_core::{RepoSnapshot, is_panic};
 
 use super::Project;
 use super::ops::{At, quietly, say};
+use crate::launch;
 use crate::text::plural;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -204,7 +205,7 @@ impl Project {
                 0 => "Created the worktree. No ignored files matched to copy.".to_owned(),
                 n => format!(
                     "Created the worktree and copied {}: {}",
-                    plural(n, "ignored file"),
+                    plural(n, "ignored file", "ignored files"),
                     copied.join(", ")
                 ),
             }))
@@ -242,11 +243,7 @@ impl Project {
         self.jobs.spawn_long(
             move |_| {
                 let start = typed.filter(|p| p.is_dir()).or(fallback);
-                let mut dialog = rfd::FileDialog::new().set_title("Where should the worktree go?");
-                if let Some(dir) = start {
-                    dialog = dialog.set_directory(dir);
-                }
-                let folder = dialog.pick_folder()?;
+                let folder = launch::pick_folder("Where should the worktree go?", start)?;
                 let empty = folder
                     .read_dir()
                     .map(|mut d| d.next().is_none())
@@ -306,7 +303,8 @@ impl Project {
         );
     }
 
-    /// Watch every worktree that exists on disk; rebuild when the set changes.
+    /// Watch every worktree that exists on disk; rebuild when the set
+    /// changes. Setting up the watches reads the disk, so it runs as a job.
     pub(super) fn sync_watcher(&mut self) {
         let Some(snap) = &self.snapshot else { return };
         let roots: Vec<PathBuf> = snap
@@ -324,7 +322,8 @@ impl Project {
             return;
         }
         self.watched = roots.clone();
-        self.watcher = None;
+        // The old watcher stops on the job's thread too.
+        let old = self.watcher.take();
         let post = self.jobs.poster();
         let changed = move || {
             post(Box::new(|p: &mut Project| {
@@ -333,9 +332,25 @@ impl Project {
                 }
             }))
         };
-        match Watcher::new(roots, changed) {
-            Ok(watcher) => self.watcher = Some(watcher),
-            Err(e) => tracing::warn!("file watcher unavailable: {e:#}"),
-        }
+        let asked = roots.clone();
+        self.jobs.spawn(
+            move || {
+                drop(old);
+                Watcher::new(roots, changed)
+            },
+            move |p, result| {
+                // A newer set of worktrees is being watched by now.
+                if p.watched != asked {
+                    return;
+                }
+                match result {
+                    Ok(watcher) => p.watcher = Some(watcher),
+                    Err(e) if is_panic(&e) => {}
+                    Err(e) => p.notices.push(format!(
+                        "Graft cannot watch this repository's files, so changes made outside                          Graft show when you come back to its window: {e:#}"
+                    )),
+                }
+            },
+        );
     }
 }

@@ -2,7 +2,7 @@
 //! and what happens when git says no (unmerged branch, changes in the way).
 
 use graft_core::refs::{self, RefKind, ResetMode, check_ref_name};
-use graft_core::refusal::{NOT_MERGED, blocked_by_changes, blocked_by_untracked, files_in_the_way};
+use graft_core::refusal::{blocked_by_changes, blocked_by_untracked, files_in_the_way, not_merged};
 use graft_core::{Git, Oid, Worktree, conflicts, remote, stash};
 
 use super::conflicts::after_conflicts;
@@ -520,7 +520,7 @@ impl Project {
             move |git| refs::delete_branch(&git, &target, force),
             move |p, result| match result {
                 Ok(()) => p.infos.push(format!("Deleted branch {name}")),
-                Err(e) if format!("{e:#}").contains(NOT_MERGED) => {
+                Err(e) if not_merged(&format!("{e:#}")) => {
                     p.confirm = Some(Confirm {
                         title: format!("{name} is not merged"),
                         body: format!(

@@ -36,7 +36,7 @@ fn branches_tags_and_commit_ops() {
         "{:#}",
         refs::delete_branch(&git, "topic", false).unwrap_err()
     );
-    assert!(err.contains(refusal::NOT_MERGED), "{err}");
+    assert!(refusal::not_merged(&err), "{err}");
     let topic = rev(&dir, "topic");
     refs::rename_branch(&git, "topic", "topic2").unwrap();
     assert_eq!(branches(), ["main", "topic2"]);

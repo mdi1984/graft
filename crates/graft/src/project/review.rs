@@ -44,25 +44,39 @@ impl ReviewState {
         base.is_none() && viewed.is_empty() && notes.is_empty() && comments.is_empty()
     }
 
-    /// Line comments plus non-empty file notes.
-    pub fn comment_count(&self) -> usize {
-        let notes = self.notes.values().filter(|n| !n.trim().is_empty()).count();
-        notes + self.comments.len()
-    }
-
-    /// Like [`Self::comment_count`], for the file at `path`.
-    pub fn file_comment_count(&self, path: &str) -> usize {
-        let note = self.notes.get(path).is_some_and(|n| !n.trim().is_empty());
-        self.comments.iter().filter(|c| c.path == path).count() + usize::from(note)
+    /// The file notes that say something, trimmed, by path. A blank note
+    /// counts as none.
+    pub fn written_notes(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.notes
+            .iter()
+            .filter_map(|(path, note)| Some((path.as_str(), written(note)?)))
     }
 
     /// The note on the file at `path`, unless it is blank.
     pub fn file_note(&self, path: &str) -> Option<&str> {
-        self.notes
-            .get(path)
-            .map(String::as_str)
-            .filter(|n| !n.trim().is_empty())
+        written(self.notes.get(path)?)
     }
+
+    /// Line comments plus file notes.
+    pub fn comment_count(&self) -> usize {
+        self.written_notes().count() + self.comments.len()
+    }
+
+    /// Like [`Self::comment_count`], for the file at `path`.
+    pub fn file_comment_count(&self, path: &str) -> usize {
+        let note = self.file_note(path).is_some();
+        self.comments.iter().filter(|c| c.path == path).count() + usize::from(note)
+    }
+
+    /// Drop the blank file notes.
+    pub fn forget_blank_notes(&mut self) {
+        self.notes.retain(|_, note| written(note).is_some());
+    }
+}
+
+/// `note` trimmed, unless it is blank.
+fn written(note: &str) -> Option<&str> {
+    Some(note.trim()).filter(|n| !n.is_empty())
 }
 
 pub struct ReviewView {
@@ -445,10 +459,14 @@ impl Project {
             return;
         }
         let title = format!("{} against {}", wt.label(), review.base);
-        self.clipboard = Some(comments::export(&title, &state.notes, &state.comments));
+        self.clipboard = Some(comments::export(
+            &title,
+            state.written_notes(),
+            &state.comments,
+        ));
         self.infos.push(format!(
             "Copied {} for your agent",
-            plural(count, "comment")
+            plural(count, "comment", "comments")
         ));
     }
 

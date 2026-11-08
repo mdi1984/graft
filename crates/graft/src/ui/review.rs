@@ -216,8 +216,8 @@ const ONE_LINE_WIDTH: f32 = 1240.0;
 
 /// "12 commits · 30 files  +120 −45".
 fn stats(ui: &mut Ui, review: &Review) {
-    let commits = plural(review.commits, "commit");
-    let files = plural(review.files.len(), "file");
+    let commits = plural(review.commits, "commit", "commits");
+    let files = plural(review.files.len(), "file", "files");
     ui.label(
         RichText::new(format!("{commits} · {files}"))
             .color(color::text_weak())
@@ -511,7 +511,7 @@ fn comments_bar(ui: &mut Ui, project: &Project, wt: &Worktree, actions: &mut Act
             ui.horizontal(|ui| {
                 let label = match count {
                     0 => "No comments yet".to_owned(),
-                    n => plural(n, "comment"),
+                    n => plural(n, "comment", "comments"),
                 };
                 ui.label(
                     RichText::new(label)

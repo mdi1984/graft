@@ -11,8 +11,6 @@ use std::path::{Path, PathBuf};
 use graft_core::paths::same_path;
 use serde::{Deserialize, Serialize};
 
-use crate::theme::color::GROUP_COUNT;
-
 pub type GroupId = u64;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -55,11 +53,12 @@ pub fn next_id(groups: &[TabGroup]) -> GroupId {
     groups.iter().map(|g| g.id).max().map_or(1, |m| m + 1)
 }
 
-/// The first group color no group uses yet; with all taken, one in turn.
-pub fn free_color(groups: &[TabGroup]) -> usize {
-    (0..GROUP_COUNT)
+/// The first of `colors` group colors no group uses yet; with all taken,
+/// one in turn.
+pub fn free_color(groups: &[TabGroup], colors: usize) -> usize {
+    (0..colors)
         .find(|c| groups.iter().all(|g| g.color != *c))
-        .unwrap_or(next_id(groups) as usize % GROUP_COUNT)
+        .unwrap_or(next_id(groups) as usize % colors)
 }
 
 /// The tab order with each group's tabs together, where its first tab is,
@@ -334,7 +333,7 @@ mod tests {
             g.color = 1;
             g
         }];
-        assert_eq!((next_id(&groups), free_color(&groups)), (8, 2));
-        assert_eq!((next_id(&[]), free_color(&[])), (1, 0));
+        assert_eq!((next_id(&groups), free_color(&groups, 6)), (8, 2));
+        assert_eq!((next_id(&[]), free_color(&[], 6)), (1, 0));
     }
 }
