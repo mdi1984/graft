@@ -38,8 +38,12 @@ pub fn checkout_color(checked_out: CheckedOut) -> Color32 {
 /// What opening a branch (double-click, or the first entry of its menu)
 /// does.
 pub enum Open<'a> {
-    /// Go to the worktree that has it checked out.
-    GoTo(&'a Worktree),
+    /// Go to the worktree that has `branch` checked out (main's during a
+    /// preview, which git sees detached).
+    GoTo {
+        worktree: &'a Worktree,
+        branch: String,
+    },
     /// Check out the local branch in the main folder.
     Checkout(String),
     /// Check out a remote branch as a new local branch that tracks it.
@@ -52,7 +56,10 @@ impl Open<'_> {
     pub fn local<'a>(project: &Project, repo: &'a RepoSnapshot, name: &str) -> Option<Open<'a>> {
         match repo.worktree_for_branch(name) {
             Some(wt) if same_path(&wt.path, &project.nav.worktree) => None,
-            Some(wt) => Some(Open::GoTo(wt)),
+            Some(worktree) => Some(Open::GoTo {
+                worktree,
+                branch: name.to_owned(),
+            }),
             None => Some(Open::Checkout(name.to_owned())),
         }
     }
@@ -76,7 +83,7 @@ impl Open<'_> {
 
     pub fn action(&self) -> Action {
         match self {
-            Open::GoTo(wt) => Action::OpenWorktree(wt.path.clone()),
+            Open::GoTo { worktree, .. } => Action::OpenWorktree(worktree.path.clone()),
             Open::Checkout(name) => Action::Checkout(name.clone()),
             Open::Track { local, remote } => Action::CheckoutRemote {
                 local: local.clone(),
@@ -89,7 +96,7 @@ impl Open<'_> {
     /// checkout only when [`can::checkout`].
     pub fn can(&self, project: &Project) -> Can {
         match self {
-            Open::GoTo(_) => can::yes(""),
+            Open::GoTo { .. } => can::yes(""),
             _ => can::checkout(project),
         }
     }
@@ -98,15 +105,12 @@ impl Open<'_> {
     fn label(&self, project: &Project, named: bool) -> String {
         let in_main = project.in_main_suffix();
         match self {
-            Open::GoTo(wt) => {
-                let name = wt.branch.as_deref().unwrap_or_default();
-                match (wt.is_main, named) {
-                    (true, true) => format!("Go to {name} in the main folder"),
-                    (true, false) => "Go to the main folder".to_owned(),
-                    (false, true) => format!("Open the worktree of {name}"),
-                    (false, false) => "Open its worktree".to_owned(),
-                }
-            }
+            Open::GoTo { worktree, branch } => match (worktree.is_main, named) {
+                (true, true) => format!("Go to {branch} in the main folder"),
+                (true, false) => "Go to the main folder".to_owned(),
+                (false, true) => format!("Open the worktree of {branch}"),
+                (false, false) => "Open its worktree".to_owned(),
+            },
             Open::Checkout(name) => format!("Check out {name}{in_main}"),
             Open::Track { local, remote } if named => {
                 format!("Check out {remote} as {local}{in_main}")
@@ -121,7 +125,7 @@ impl Open<'_> {
         can_item(ui, &label, &self.can(project), actions, self.action());
         let can = can::new_worktree(project);
         match self {
-            Open::GoTo(_) => {}
+            Open::GoTo { .. } => {}
             Open::Checkout(name) => new_worktree_item(ui, name, named, &can, actions),
             Open::Track { remote, .. } => new_worktree_item(ui, remote, named, &can, actions),
         }
@@ -192,4 +196,36 @@ fn new_worktree_item(ui: &mut Ui, name: &str, named: bool, can: &Can, actions: &
         actions,
         Action::NewWorktree(Some(name.to_owned())),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{git, open, wait};
+
+    /// During a preview git sees main detached, but its branch's menu still
+    /// names the branch.
+    #[test]
+    fn going_to_main_names_its_branch_during_a_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        git(&main, &["init", "-q", "-b", "main"]);
+        std::fs::write(main.join("a.txt"), "a\n").unwrap();
+        git(&main, &["add", "a.txt"]);
+        git(&main, &["commit", "-q", "-m", "first"]);
+        let agent = dir.path().join("agent");
+        let agent_arg = agent.to_str().unwrap();
+        git(&main, &["worktree", "add", "-q", "-b", "agent", agent_arg]);
+        let mut project = open(&main);
+        let agent = project.snapshot.as_ref().unwrap().worktrees[1].path.clone();
+        project.apply(Action::PreviewInMain(agent.clone()));
+        wait(&mut project, "the preview never showed", |p| {
+            p.snapshot.as_ref().is_some_and(|s| s.preview.is_some())
+        });
+        project.apply(Action::OpenWorktree(agent));
+        let snap = project.snapshot.clone().unwrap();
+        let open = Open::local(&project, &snap, "main").unwrap();
+        assert_eq!(open.label(&project, true), "Go to main in the main folder");
+    }
 }
