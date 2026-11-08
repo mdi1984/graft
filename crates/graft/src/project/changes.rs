@@ -1,6 +1,7 @@
 //! File status: the selected file's diff, line selection, staging and
-//! discarding, and the commit form. Also loads the read-only diff of a
-//! commit, stash or review file.
+//! discarding, and the commit form. Also loads the read-only diffs: each
+//! screen that shows one (History, Stashes, Review, File history) holds its
+//! own, see [`DiffOwner`].
 
 use std::collections::BTreeSet;
 use std::ops::Range;
@@ -14,7 +15,8 @@ use super::comments::{Pick, Side};
 use super::ops::{At, quietly};
 use super::{Action, Confirm, Project, RemoteOp, readable};
 
-/// One file in one of the File status lists.
+/// Which file a diff shows, and from where: a File status list, a commit
+/// or stash, or the review's base.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileKey {
     pub source: Source,
@@ -125,13 +127,35 @@ impl Highlights {
     }
 }
 
-/// Which of the two diffs a project shows.
+/// The screen a diff belongs to. Each holds its own diff, so a result that
+/// arrives late lands where it was asked for, or nowhere.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Slot {
+pub enum DiffOwner {
     /// File status: the selected worktree's file, with staging.
     Status,
-    /// A file of a commit, stash or review.
-    ReadOnly,
+    /// History: a file of the selected commit.
+    Commit,
+    /// Stashes: a file of the selected stash.
+    Stash,
+    /// Review: the open file of the review.
+    Review,
+    /// File history: the file in the selected commit.
+    FileHistory,
+}
+
+impl DiffOwner {
+    const ALL: [DiffOwner; 5] = [
+        DiffOwner::Status,
+        DiffOwner::Commit,
+        DiffOwner::Stash,
+        DiffOwner::Review,
+        DiffOwner::FileHistory,
+    ];
+
+    /// A diff with a close button (and Esc): a commit's or stash's file.
+    pub fn closes(self) -> bool {
+        matches!(self, DiffOwner::Commit | DiffOwner::Stash)
+    }
 }
 
 /// What a diff can change in the worktree. Only File status stages; a
@@ -146,17 +170,18 @@ pub enum Staging {
 }
 
 impl Staging {
-    fn of(slot: Slot, source: &Source) -> Option<Self> {
-        match (slot, source) {
-            (Slot::ReadOnly, _) | (_, Source::Commit(_) | Source::Base(_)) => None,
-            (Slot::Status, Source::Staged) => Some(Staging::Staged),
-            (Slot::Status, Source::Unstaged | Source::Untracked) => Some(Staging::Unstaged),
+    fn of(owner: DiffOwner, source: &Source) -> Option<Self> {
+        match (owner, source) {
+            (DiffOwner::Status, Source::Staged) => Some(Staging::Staged),
+            (DiffOwner::Status, Source::Unstaged | Source::Untracked) => Some(Staging::Unstaged),
+            _ => None,
         }
     }
 }
 
-/// The diff shown next to the file lists.
+/// One file's diff, as one screen shows it.
 pub struct DiffView {
+    pub owner: DiffOwner,
     pub key: FileKey,
     pub diff: Option<FileDiff>,
     pub highlights: Highlights,
@@ -176,9 +201,10 @@ pub struct DiffView {
 }
 
 impl DiffView {
-    fn new(key: FileKey, slot: Slot) -> Self {
+    fn new(key: FileKey, owner: DiffOwner) -> Self {
         Self {
-            staging: Staging::of(slot, &key.source),
+            staging: Staging::of(owner, &key.source),
+            owner,
             key,
             diff: None,
             highlights: Highlights::default(),
@@ -285,49 +311,60 @@ impl Action {
 }
 
 impl Project {
-    fn view(&self, slot: Slot) -> Option<&DiffView> {
-        match slot {
-            Slot::Status => self.diff_view.as_ref(),
-            Slot::ReadOnly => self.read_only_diff.as_ref(),
+    /// The diff `owner` shows, if any.
+    pub fn diff(&self, owner: DiffOwner) -> Option<&DiffView> {
+        match owner {
+            DiffOwner::Status => self.diff_view.as_ref(),
+            DiffOwner::Commit => self.commit_diff.as_ref(),
+            DiffOwner::Stash => self.stash_diff.as_ref(),
+            DiffOwner::Review => self.review.as_ref()?.diff.as_ref(),
+            DiffOwner::FileHistory => self.file_history.as_ref()?.diff.as_ref(),
         }
     }
 
-    fn view_mut(&mut self, slot: Slot) -> Option<&mut DiffView> {
-        match slot {
-            Slot::Status => self.diff_view.as_mut(),
-            Slot::ReadOnly => self.read_only_diff.as_mut(),
+    /// Where `owner` keeps its diff; `None` while its screen is not open.
+    fn diff_slot(&mut self, owner: DiffOwner) -> Option<&mut Option<DiffView>> {
+        match owner {
+            DiffOwner::Status => Some(&mut self.diff_view),
+            DiffOwner::Commit => Some(&mut self.commit_diff),
+            DiffOwner::Stash => Some(&mut self.stash_diff),
+            DiffOwner::Review => Some(&mut self.review.as_mut()?.diff),
+            DiffOwner::FileHistory => Some(&mut self.file_history.as_mut()?.diff),
         }
     }
 
-    /// The slot whose diff shows `key`.
-    fn slot_of(&self, key: &FileKey) -> Option<Slot> {
-        [Slot::Status, Slot::ReadOnly]
-            .into_iter()
-            .find(|&slot| self.view(slot).is_some_and(|v| v.key == *key))
+    fn diff_mut(&mut self, owner: DiffOwner) -> Option<&mut DiffView> {
+        self.diff_slot(owner)?.as_mut()
+    }
+
+    /// Close the diff `owner` shows.
+    pub(super) fn close_diff(&mut self, owner: DiffOwner) {
+        if let Some(slot) = self.diff_slot(owner) {
+            *slot = None;
+        }
     }
 
     pub(super) fn select_file(&mut self, key: FileKey) {
-        if self.diff_view.as_ref().is_some_and(|v| v.key == key) {
-            return;
-        }
-        self.diff_view = Some(DiffView::new(key, Slot::Status));
-        self.load_view(Slot::Status);
+        self.open_diff(DiffOwner::Status, key);
         self.sync_conflict();
     }
 
-    /// Show one file of a commit, stash or review (read-only).
-    pub(super) fn select_commit_file(&mut self, key: FileKey) {
-        if self.read_only_diff.as_ref().is_some_and(|v| v.key == key) {
+    /// Show `key` in `owner`'s diff, unless it shows it already.
+    pub(super) fn open_diff(&mut self, owner: DiffOwner, key: FileKey) {
+        let Some(slot) = self.diff_slot(owner) else {
+            return;
+        };
+        if slot.as_ref().is_some_and(|v| v.key == key) {
             return;
         }
-        self.read_only_diff = Some(DiffView::new(key, Slot::ReadOnly));
-        self.load_view(Slot::ReadOnly);
+        *slot = Some(DiffView::new(key, owner));
+        self.load_view(owner);
     }
 
-    /// (Re)load the diff in `slot`; what is selected or picked in it
-    /// survives if only the unchanged lines shown change.
-    pub(super) fn load_view(&mut self, slot: Slot) {
-        let Some(key) = self.view(slot).map(|v| v.key.clone()) else {
+    /// (Re)load `owner`'s diff; what is selected or picked in it survives
+    /// if only the unchanged lines shown change.
+    pub(super) fn load_view(&mut self, owner: DiffOwner) {
+        let Some(key) = self.diff(owner).map(|v| v.key.clone()) else {
             return;
         };
         let ticket = self.ticket();
@@ -338,18 +375,20 @@ impl Project {
             _ => self.wt_git(),
         };
         let kept = self.comment_lines(&key);
-        let view = self.view_mut(slot).expect("checked above");
+        let view = self.diff_mut(owner).expect("checked above");
         view.ticket = ticket;
         let revealed = view.revealed.clone();
         self.jobs.spawn(
             move || load_shown(&git, &key, whole, &revealed, &kept),
-            move |p, result| p.on_view_loaded(slot, ticket, result),
+            move |p, result| p.on_view_loaded(owner, ticket, result),
         );
     }
 
-    fn on_view_loaded(&mut self, slot: Slot, ticket: u64, result: anyhow::Result<Loaded>) {
-        let picked = self.picked_in(slot);
-        let Some(view) = self.view_mut(slot).filter(|v| v.ticket == ticket) else {
+    /// A loaded diff, if `owner` still shows the load asked for (the ticket
+    /// of a closed or replaced diff matches nothing).
+    fn on_view_loaded(&mut self, owner: DiffOwner, ticket: u64, result: anyhow::Result<Loaded>) {
+        let picked = self.picked_in(owner);
+        let Some(view) = self.diff_mut(owner).filter(|v| v.ticket == ticket) else {
             return;
         };
         let Loaded {
@@ -401,22 +440,30 @@ impl Project {
         if let (Some(pick), Some(review)) = (pick, &mut self.review) {
             review.pick = pick;
         }
-        self.color_later(slot, ticket);
+        self.color_later(owner, ticket);
     }
 
-    /// The review's picked lines, if the diff in `slot` is the review's file.
-    fn picked_in(&self, slot: Slot) -> Option<Pick> {
+    /// The review's picked lines, for the review's diff of its open file.
+    fn picked_in(&self, owner: DiffOwner) -> Option<Pick> {
+        if owner != DiffOwner::Review {
+            return None;
+        }
         let review = self.review.as_ref()?;
-        let view = self.view(slot)?;
-        let reviewed = slot == Slot::ReadOnly
-            && !matches!(view.key.source, Source::Commit(_))
-            && review.selected.as_deref() == Some(view.key.path.as_str());
+        let view = review.diff.as_ref()?;
+        let reviewed = review.selected.as_deref() == Some(view.key.path.as_str());
         review.pick.filter(|_| reviewed)
     }
 
+    /// Reload every open diff (the "Whole file" setting changed).
+    pub(super) fn reload_diffs(&mut self) {
+        for owner in DiffOwner::ALL {
+            self.load_view(owner);
+        }
+    }
+
     /// Syntax colors for a diff too big to color with the diff itself.
-    fn color_later(&self, slot: Slot, ticket: u64) {
-        let Some(view) = self.view(slot) else { return };
+    fn color_later(&self, owner: DiffOwner, ticket: u64) {
+        let Some(view) = self.diff(owner) else { return };
         let Some(diff) = &view.diff else { return };
         if !view.highlights.syntax.is_empty() || line_count(diff) <= INLINE_SYNTAX_LINES {
             return;
@@ -426,7 +473,7 @@ impl Project {
             move || Some(graft_core::syntax::highlight(&diff)),
             move |p, syntax| {
                 let Some(syntax) = syntax else { return };
-                if let Some(view) = p.view_mut(slot).filter(|v| v.ticket == ticket) {
+                if let Some(view) = p.diff_mut(owner).filter(|v| v.ticket == ticket) {
                     view.highlights.syntax = syntax;
                 }
             },
@@ -434,19 +481,24 @@ impl Project {
     }
 
     /// Show more unchanged lines, `old` and `new` being their numbers on
-    /// each side, in the diff that shows `key`.
-    pub(super) fn show_lines(&mut self, key: &FileKey, old: Range<u32>, new: Range<u32>) {
-        let Some(slot) = self.slot_of(key) else {
+    /// each side, in `owner`'s diff if it still shows `key`.
+    pub(super) fn show_lines(
+        &mut self,
+        owner: DiffOwner,
+        key: &FileKey,
+        old: Range<u32>,
+        new: Range<u32>,
+    ) {
+        let Some(view) = self.diff_mut(owner).filter(|v| v.key == *key) else {
             return;
         };
-        let view = self.view_mut(slot).expect("found above");
         // Staging a hunk above moves the index's numbers, not the working
         // tree's.
         view.revealed.push(match view.key.source {
             Source::Unstaged => (Side::New, new),
             _ => (Side::Old, old),
         });
-        self.load_view(slot);
+        self.load_view(owner);
     }
 
     /// After a status refresh: keep the selected file if it is still in its
@@ -471,7 +523,7 @@ impl Project {
             None => keys.first().cloned(),
         };
         match next {
-            Some(key) if Some(&key) == current.as_ref() => self.load_view(Slot::Status),
+            Some(key) if Some(&key) == current.as_ref() => self.load_view(DiffOwner::Status),
             Some(key) => {
                 self.diff_view = None;
                 self.select_file(key);
@@ -647,15 +699,15 @@ mod tests {
     #[test]
     fn only_file_status_stages() {
         assert_eq!(
-            Staging::of(Slot::Status, &Source::Untracked),
+            Staging::of(DiffOwner::Status, &Source::Untracked),
             Some(Staging::Unstaged)
         );
         assert_eq!(
-            Staging::of(Slot::Status, &Source::Staged),
+            Staging::of(DiffOwner::Status, &Source::Staged),
             Some(Staging::Staged)
         );
         // Review shows untracked files too; they stay read-only there.
-        assert_eq!(Staging::of(Slot::ReadOnly, &Source::Untracked), None);
-        assert_eq!(Staging::of(Slot::ReadOnly, &Source::Staged), None);
+        assert_eq!(Staging::of(DiffOwner::Review, &Source::Untracked), None);
+        assert_eq!(Staging::of(DiffOwner::Stash, &Source::Staged), None);
     }
 }

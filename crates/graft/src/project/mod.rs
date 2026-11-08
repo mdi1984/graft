@@ -34,7 +34,7 @@ use graft_core::stash::{Stash, StashFile};
 use graft_core::watch::Watcher;
 use graft_core::{CancelToken, Git, JobPool, Oid, Operation, RepoSnapshot, Worktree, snapshot};
 
-pub use changes::{CommitForm, DiffView, FileKey, Staging};
+pub use changes::{CommitForm, DiffOwner, DiffView, FileKey, Staging};
 pub use conflicts::{ConflictView, merge_dialog};
 pub use file_history::{FileHistoryMode, FileHistoryView};
 pub use refs::{Dialog, DialogKind};
@@ -129,8 +129,9 @@ pub enum Action {
     },
     ClearLines,
     /// Show these unchanged lines (their numbers in the old and the new
-    /// file) in the diff that shows `key`.
+    /// file) in `owner`'s diff, if it still shows `key`.
     ShowLines {
+        owner: DiffOwner,
         key: FileKey,
         old: std::ops::Range<u32>,
         new: std::ops::Range<u32>,
@@ -175,9 +176,12 @@ pub enum Action {
     OpenFolder(PathBuf),
 
     // Diffs of commits and stashes
-    /// Show one file of a commit or stash.
+    /// Show one file of the commit selected in History.
     SelectCommitFile(FileKey),
-    CloseCommitFile,
+    /// Show one file of the selected stash.
+    SelectStashFile(FileKey),
+    /// Close the diff of a commit's or stash's file.
+    CloseDiff(DiffOwner),
 
     // Stashes
     SelectStash(Oid),
@@ -427,14 +431,16 @@ pub struct Project {
     /// Bumped when the history list should scroll the selection into view.
     pub scroll_request: u64,
 
+    /// File status: the selected file's diff.
     pub diff_view: Option<DiffView>,
-    /// A file diff that only shows: of the selected commit or stash, of the
-    /// Review tab, or of a commit in File history.
-    pub read_only_diff: Option<DiffView>,
+    /// History: the open file of the selected commit.
+    pub commit_diff: Option<DiffView>,
     /// `None` until the Stashes tab was opened.
     pub stashes: Option<Result<Vec<Stash>, String>>,
     pub selected_stash: Option<Oid>,
     pub stash_files: Option<Result<Vec<StashFile>, String>>,
+    /// The open file of the selected stash.
+    pub stash_diff: Option<DiffView>,
     /// The resolver, while the selected file has conflicts.
     pub conflict: Option<ConflictView>,
     /// The Review tab, once opened.
@@ -511,10 +517,11 @@ impl Project {
             details_error: None,
             scroll_request: 0,
             diff_view: None,
-            read_only_diff: None,
+            commit_diff: None,
             stashes: None,
             selected_stash: None,
             stash_files: None,
+            stash_diff: None,
             conflict: None,
             review: None,
             memory,
@@ -567,8 +574,7 @@ impl Project {
         let reload = settings.whole_file != self.settings.whole_file;
         self.settings = settings.clone();
         if reload {
-            self.load_view(changes::Slot::Status);
-            self.load_view(changes::Slot::ReadOnly);
+            self.reload_diffs();
         }
     }
 
@@ -792,7 +798,7 @@ impl Project {
         }
         self.selected = Some(id);
         self.details = None;
-        self.read_only_diff = None;
+        self.commit_diff = None;
         self.details_error = None;
         if worktree {
             return;
@@ -859,21 +865,19 @@ impl Project {
 
     fn set_tab(&mut self, tab: Tab) {
         self.nav.tab = tab;
-        self.read_only_diff = None;
         match tab {
             Tab::Workspace => {}
             Tab::Stashes => self.load_stashes(),
-            Tab::Review => {
-                if let Some(view) = &mut self.review {
-                    view.selected = None;
-                }
-                self.load_review();
-            }
+            Tab::Review => self.load_review(),
         }
     }
 
+    /// Show `view` in the Workspace tab; leaving File history closes it.
     fn show_view(&mut self, view: WorkspaceView) {
         self.nav.tab = Tab::Workspace;
+        if view != WorkspaceView::FileHistory {
+            self.file_history = None;
+        }
         self.nav.view = view;
     }
 
@@ -896,7 +900,12 @@ impl Project {
             Action::ClickLine { hunk, line, shift } => self.click_line(hunk, line, shift),
             Action::DragLine { hunk, line } => self.drag_line(hunk, line),
             Action::ClearLines => self.clear_lines(),
-            Action::ShowLines { key, old, new } => self.show_lines(&key, old, new),
+            Action::ShowLines {
+                owner,
+                key,
+                old,
+                new,
+            } => self.show_lines(owner, &key, old, new),
             Action::HunkOp(hunk, op) => self.lines_op(op, Some(hunk)),
             Action::LinesOp(op) => self.lines_op(op, None),
             Action::StageFiles(paths) => self.stage_files(paths),
@@ -926,8 +935,9 @@ impl Project {
             Action::OpenTerminal(dir) => self.open_terminal(dir),
             Action::OpenFolder(dir) => self.open_folder(dir),
 
-            Action::SelectCommitFile(key) => self.select_commit_file(key),
-            Action::CloseCommitFile => self.read_only_diff = None,
+            Action::SelectCommitFile(key) => self.open_diff(DiffOwner::Commit, key),
+            Action::SelectStashFile(key) => self.open_diff(DiffOwner::Stash, key),
+            Action::CloseDiff(owner) => self.close_diff(owner),
 
             Action::SelectStash(id) => self.select_stash(id),
             Action::ApplyStash { id, worktree, pop } => self.apply_stash(id, worktree, pop),

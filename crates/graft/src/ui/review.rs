@@ -19,7 +19,7 @@ use super::widgets::{
 };
 use crate::keys::{self, Command};
 use crate::project::comments::{self, LineComment};
-use crate::project::{Action, Confirm, Project};
+use crate::project::{Action, Confirm, DiffOwner, Project};
 use crate::text::plural;
 use crate::theme::{self, color};
 use crate::ui::Actions;
@@ -102,8 +102,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
     file_header(ui, project, wt, &file, split, actions);
     let path = file.change.path.as_str();
     let diff = project
-        .read_only_diff
-        .as_ref()
+        .diff(DiffOwner::Review)
         .and_then(|d| d.diff.as_ref());
     // Copies: the comment panel below may change the comments.
     let (placed, outdated): (Vec<_>, Vec<LineComment>) = match (diff, project.review_state()) {
@@ -122,7 +121,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
         pick: project.review.as_ref().and_then(|v| v.pick),
         placed: placed.iter().map(|(at, c)| (*at, c)).collect(),
     };
-    match &project.read_only_diff {
+    match project.diff(DiffOwner::Review) {
         Some(diff) => diff_view::body(
             ui,
             diff,
@@ -479,7 +478,7 @@ fn file_header(
                             actions.push(Action::ToggleReviewSplit);
                         }
                     }
-                    if let Some(view) = &project.read_only_diff {
+                    if let Some(view) = project.diff(DiffOwner::Review) {
                         diff_view::whole_file_button(ui, view, project.settings(), actions);
                     }
                 });
@@ -560,8 +559,7 @@ fn comment_panel(
 ) {
     let Some(view) = &project.review else { return };
     let diff = project
-        .read_only_diff
-        .as_ref()
+        .diff(DiffOwner::Review)
         .and_then(|d| d.diff.as_ref());
     let target = match (view.editing, view.pick, diff) {
         (Some(id), _, _) => project

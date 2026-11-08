@@ -412,8 +412,8 @@ pub fn show_view(
     settings: &Settings,
     actions: &mut Actions,
 ) {
-    if matches!(view.key.source, Source::Commit(_)) && keys::plain_key(ui.ctx(), Key::Escape) {
-        actions.push(Action::CloseCommitFile);
+    if view.owner.closes() && keys::plain_key(ui.ctx(), Key::Escape) {
+        actions.push(Action::CloseDiff(view.owner));
     }
     header(ui, view, busy, settings, actions);
     if !view.selection.is_empty() {
@@ -789,7 +789,7 @@ fn header(ui: &mut Ui, view: &DiffView, busy: bool, settings: &Settings, actions
                                 .on_hover_text("Close the diff (Esc)")
                                 .clicked()
                             {
-                                actions.push(Action::CloseCommitFile);
+                                actions.push(Action::CloseDiff(view.owner));
                             }
                         }
                     }
@@ -1137,6 +1137,7 @@ fn gap_row(ui: &mut Ui, rect: Rect, view: &DiffView, g: usize, actions: &mut Act
             .clicked()
         {
             actions.push(Action::ShowLines {
+                owner: view.owner,
                 key: view.key.clone(),
                 new: gap.in_new(&lines),
                 old: lines,

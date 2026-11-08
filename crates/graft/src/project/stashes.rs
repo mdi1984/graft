@@ -26,7 +26,7 @@ impl Project {
             if !still_there {
                 self.selected_stash = None;
                 self.stash_files = None;
-                self.read_only_diff = None;
+                self.stash_diff = None;
                 if let Some(first) = list.first() {
                     self.select_stash(first.id);
                 }
@@ -41,7 +41,7 @@ impl Project {
         }
         self.selected_stash = Some(id);
         self.stash_files = None;
-        self.read_only_diff = None;
+        self.stash_diff = None;
         let git = self.git.clone();
         self.jobs.spawn(
             move || stash::files(&git, id),

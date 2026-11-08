@@ -72,7 +72,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
             details(ui, project, snap, stash, max_height, actions)
         });
 
-    match &project.read_only_diff {
+    match &project.stash_diff {
         Some(view) => diff_view::show_view(
             ui,
             view,
@@ -250,7 +250,7 @@ fn details(
         }
         Some(Ok(files)) => files,
     };
-    let open = project.read_only_diff.as_ref().map(|v| &v.key);
+    let open = project.stash_diff.as_ref().map(|v| &v.key);
     let room = (max_height - ui.min_rect().height()).max(FILE_ROW_HEIGHT);
     ScrollArea::vertical()
         .id_salt("stash-files")
@@ -265,7 +265,7 @@ fn details(
                 };
                 let note = file.is_untracked(stash).then_some("untracked");
                 if file_row(ui, &file.change, open == Some(&key), note).clicked() {
-                    actions.push(Action::SelectCommitFile(key));
+                    actions.push(Action::SelectStashFile(key));
                 }
             }
         });

@@ -57,7 +57,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
     let busy = project.is_operating();
     let wrap = project.settings().wrap_lines;
     match view.mode {
-        FileHistoryMode::Changes => match &project.read_only_diff {
+        FileHistoryMode::Changes => match &view.diff {
             Some(diff) => diff_view::body(ui, diff, busy, false, wrap, None, actions),
             None => {
                 waiting(ui);

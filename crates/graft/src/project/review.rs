@@ -13,9 +13,9 @@ use graft_core::paths::same_path;
 use graft_core::review::{self, Review, ReviewFile};
 use serde::{Deserialize, Serialize};
 
-use super::changes::{SideLines, Slot};
+use super::changes::SideLines;
 use super::comments::{self, LineComment, Pick, Side};
-use super::{FileKey, Project, readable};
+use super::{DiffOwner, DiffView, FileKey, Project, readable};
 use crate::text::plural;
 
 /// What Graft remembers about reviewing one worktree.
@@ -84,6 +84,8 @@ pub struct ReviewView {
     pub data: Option<Result<Arc<Review>, String>>,
     /// Path of the file whose diff is open.
     pub selected: Option<String>,
+    /// The open file's diff.
+    pub diff: Option<DiffView>,
     /// Show diffs side by side (else unified).
     pub split: bool,
     /// Lines picked in the open file's diff, to comment on.
@@ -152,6 +154,7 @@ impl Project {
                 worktree,
                 data: None,
                 selected: None,
+                diff: None,
                 split,
                 pick: None,
                 editing: None,
@@ -159,7 +162,6 @@ impl Project {
                 focus_draft: false,
                 ticket: 0,
             });
-            self.read_only_diff = None;
         }
         let ticket = self.ticket();
         self.review.as_mut().expect("just set").ticket = ticket;
@@ -191,7 +193,7 @@ impl Project {
         let old = view.selected.as_ref().and_then(|p| view.file(p)).cloned();
         view.data = Some(result.map(Arc::new));
         let Some(files) = view.review().map(|r| r.files.clone()) else {
-            self.read_only_diff = None;
+            view.diff = None;
             return;
         };
         // Keep the open file; else open the first one not viewed yet.
@@ -215,8 +217,8 @@ impl Project {
             None => {
                 if let Some(view) = &mut self.review {
                     view.selected = None;
+                    view.diff = None;
                 }
-                self.read_only_diff = None;
             }
         }
     }
@@ -239,16 +241,12 @@ impl Project {
         }
         view.selected = Some(path.clone());
         let key = FileKey { source, path };
-        let same = self.read_only_diff.as_ref().is_some_and(|d| d.key == key);
-        if same && reload {
+        if reload && view.diff.as_ref().is_some_and(|d| d.key == key) {
             // Keeps the lines shown and the unchanged lines opened up.
-            self.load_view(Slot::ReadOnly);
+            self.load_view(DiffOwner::Review);
             return;
         }
-        if !same {
-            self.read_only_diff = None;
-        }
-        self.select_commit_file(key);
+        self.open_diff(DiffOwner::Review, key);
     }
 
     /// The lines of the review comments on the file `key` shows, so they
@@ -275,7 +273,7 @@ impl Project {
         let Some(pick) = self.review.as_ref().and_then(|v| v.pick) else {
             return;
         };
-        let Some(view) = &mut self.read_only_diff else {
+        let Some(view) = self.review.as_mut().and_then(|r| r.diff.as_mut()) else {
             return;
         };
         let (lo, hi) = (
@@ -294,7 +292,7 @@ impl Project {
         }
         view.revealed
             .extend(inside.into_iter().map(|lines| (Side::Old, lines)));
-        self.load_view(Slot::ReadOnly);
+        self.load_view(DiffOwner::Review);
     }
 
     /// Mark or unmark a file as viewed; marking the open file moves on to the
@@ -380,7 +378,7 @@ impl Project {
             let (Some(pick), Some(path), Some(diff)) = (
                 view.pick,
                 view.selected.clone(),
-                self.read_only_diff.as_ref().and_then(|d| d.diff.as_ref()),
+                view.diff.as_ref().and_then(|d| d.diff.as_ref()),
             ) else {
                 return;
             };
@@ -480,7 +478,106 @@ impl Project {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
+    use crate::project::{Action, Tab};
+    use crate::testing::{git, open, wait};
+
+    /// A repo on `feature`, one commit ahead of `main` (a.txt changed).
+    fn feature_repo() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        git(&root, &["init", "-q", "-b", "main"]);
+        std::fs::write(
+            root.join("a.txt"),
+            "a
+",
+        )
+        .unwrap();
+        git(&root, &["add", "a.txt"]);
+        git(&root, &["commit", "-q", "-m", "first"]);
+        git(&root, &["switch", "-q", "-c", "feature"]);
+        std::fs::write(
+            root.join("a.txt"),
+            "feature
+",
+        )
+        .unwrap();
+        git(&root, &["commit", "-q", "-am", "feature"]);
+        (dir, root)
+    }
+
+    fn commit_file(root: &Path, name: &str) {
+        std::fs::write(
+            root.join(name),
+            "new
+",
+        )
+        .unwrap();
+        git(root, &["add", name]);
+        git(root, &["commit", "-q", "-m", name]);
+    }
+
+    /// The review's diff of a.txt, loaded.
+    fn review_shows_a(p: &Project) -> bool {
+        p.diff(DiffOwner::Review)
+            .is_some_and(|d| d.key.path == "a.txt" && d.diff.is_some())
+    }
+
+    /// HEAD moving while Review is open selects the new HEAD in History;
+    /// the review's diff stays (it was wiped to a spinner).
+    #[test]
+    fn a_head_move_keeps_the_review_diff() {
+        let (_dir, root) = feature_repo();
+        let mut project = open(&root);
+        wait(&mut project, "no commit selected", |p| p.selected.is_some());
+        let before = project.selected;
+        project.apply(Action::SetTab(Tab::Review));
+        wait(&mut project, "the review diff never loaded", review_shows_a);
+        commit_file(&root, "b.txt");
+        project.refresh();
+        wait(&mut project, "the new HEAD was never selected", |p| {
+            assert!(review_shows_a(p), "the review diff went away");
+            p.selected.is_some() && p.selected != before
+        });
+    }
+
+    /// A review that finishes after the user left Review lands in the
+    /// review, not in the commit diff History shows meanwhile.
+    #[test]
+    fn a_late_review_leaves_the_commit_diff_alone() {
+        let (_dir, root) = feature_repo();
+        let mut project = open(&root);
+        wait(&mut project, "no commit selected", |p| p.selected.is_some());
+        project.apply(Action::SetTab(Tab::Review));
+        project.apply(Action::ShowHistory);
+        let key = FileKey {
+            source: Source::Commit(project.selected.unwrap()),
+            path: "a.txt".to_owned(),
+        };
+        project.apply(Action::SelectCommitFile(key.clone()));
+        wait(&mut project, "the review never loaded", |p| {
+            review_shows_a(p) && p.commit_diff.as_ref().is_some_and(|d| d.diff.is_some())
+        });
+        assert_eq!(project.commit_diff.as_ref().map(|d| &d.key), Some(&key));
+        assert_eq!(project.nav.tab, Tab::Workspace);
+    }
+
+    /// Going to another view closes File history, its diff with it.
+    #[test]
+    fn leaving_file_history_closes_it() {
+        let (_dir, root) = feature_repo();
+        let mut project = open(&root);
+        project.apply(Action::OpenFileHistory("a.txt".to_owned()));
+        wait(&mut project, "the file's diff never loaded", |p| {
+            p.diff(DiffOwner::FileHistory)
+                .is_some_and(|d| d.diff.is_some())
+        });
+        project.apply(Action::ShowHistory);
+        assert!(project.file_history.is_none());
+        assert!(project.diff(DiffOwner::FileHistory).is_none());
+    }
 
     /// A review with only line comments is worth remembering (they were
     /// lost on restart when only marks and notes counted).

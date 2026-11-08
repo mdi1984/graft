@@ -64,7 +64,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
         );
         return;
     }
-    if let Some(view) = &project.read_only_diff {
+    if let Some(view) = &project.commit_diff {
         let height = ui.available_height();
         Panel::bottom("history-diff")
             .exact_size((height * 0.55).max(160.0))
@@ -766,7 +766,7 @@ fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &m
                 .size(theme::SMALL_SIZE),
         );
     }
-    let open = project.read_only_diff.as_ref().map(|v| &v.key);
+    let open = project.commit_diff.as_ref().map(|v| &v.key);
     for file in &d.files {
         let key = FileKey {
             source: Source::Commit(d.id),

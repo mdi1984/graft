@@ -4,7 +4,7 @@
 use graft_core::diff::Source;
 use graft_core::file_log::{self, Blame, FileCommit};
 
-use super::{FileKey, Project, WorkspaceView, readable};
+use super::{DiffOwner, DiffView, FileKey, Project, WorkspaceView, readable};
 
 /// Commits listed at most.
 const LIMIT: usize = 2000;
@@ -26,6 +26,11 @@ pub struct FileHistoryView {
     pub mode: FileHistoryMode,
     /// Blame for the selected commit; `None` while loading.
     pub blame: Option<Result<Blame, String>>,
+    /// The selected commit's diff of the file.
+    pub diff: Option<DiffView>,
+    /// The commit list being loaded.
+    log_ticket: u64,
+    /// The blame being loaded.
     ticket: u64,
     /// The view to go back to.
     pub back: WorkspaceView,
@@ -41,31 +46,33 @@ impl Project {
             view => view,
         };
         self.show_view(WorkspaceView::FileHistory);
-        self.read_only_diff = None;
+        let log_ticket = self.ticket();
         self.file_history = Some(FileHistoryView {
             path: path.clone(),
             commits: None,
             selected: None,
             mode: FileHistoryMode::Changes,
             blame: None,
+            diff: None,
+            log_ticket,
             ticket: 0,
             back,
         });
         let git = self.wt_git();
-        let asked = path.clone();
         self.jobs.spawn(
-            move || file_log::log(&git, &asked, LIMIT),
-            move |p, result| p.on_file_log(path, readable(result)),
+            move || file_log::log(&git, &path, LIMIT),
+            move |p, result| p.on_file_log(log_ticket, readable(result)),
         );
     }
 
-    fn on_file_log(&mut self, path: String, result: Result<Vec<FileCommit>, String>) {
-        let Some(view) = &mut self.file_history else {
+    fn on_file_log(&mut self, ticket: u64, result: Result<Vec<FileCommit>, String>) {
+        let Some(view) = self
+            .file_history
+            .as_mut()
+            .filter(|v| v.log_ticket == ticket)
+        else {
             return;
         };
-        if view.path != path {
-            return;
-        }
         let first = result.as_ref().is_ok_and(|c| !c.is_empty());
         view.commits = Some(result);
         if first {
@@ -86,10 +93,13 @@ impl Project {
         view.selected = Some(index);
         view.blame = None;
         let mode = view.mode;
-        self.select_commit_file(FileKey {
-            source: Source::Commit(commit.id),
-            path: commit.path.clone(),
-        });
+        self.open_diff(
+            DiffOwner::FileHistory,
+            FileKey {
+                source: Source::Commit(commit.id),
+                path: commit.path.clone(),
+            },
+        );
         if mode == FileHistoryMode::Blame {
             self.load_blame();
         }
@@ -124,7 +134,6 @@ impl Project {
         if let Some(view) = self.file_history.take() {
             self.nav.view = view.back;
         }
-        self.read_only_diff = None;
     }
 
     pub(super) fn set_file_history_mode(&mut self, mode: FileHistoryMode) {
