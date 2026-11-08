@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use graft_core::diff::Source;
@@ -119,10 +119,14 @@ impl ReviewView {
 impl Project {
     /// The remembered review state of the selected worktree.
     pub fn review_state(&self) -> Option<&ReviewState> {
+        self.review_state_of(&self.nav.worktree)
+    }
+
+    fn review_state_of(&self, worktree: &Path) -> Option<&ReviewState> {
         self.memory
             .reviews
             .iter()
-            .find(|(path, _)| same_path(path, &self.nav.worktree))
+            .find(|(path, _)| same_path(path, worktree))
             .map(|(_, state)| state)
     }
 
@@ -249,13 +253,13 @@ impl Project {
         self.open_diff(DiffOwner::Review, key);
     }
 
-    /// The lines of the review comments on the file `key` shows, so they
-    /// never hide in a gap.
-    pub(super) fn comment_lines(&self, key: &FileKey) -> SideLines {
+    /// The lines of the review comments on the file `key` shows in the
+    /// review of `worktree`, so they never hide in a gap.
+    pub(super) fn comment_lines(&self, key: &FileKey, worktree: &Path) -> SideLines {
         if !matches!(key.source, Source::Base(_)) {
             return Vec::new();
         }
-        self.review_state()
+        self.review_state_of(worktree)
             .map(|state| {
                 state
                     .comments
@@ -605,5 +609,66 @@ mod tests {
         }
         .pruned();
         assert_eq!(memory.reviews.len(), 1);
+    }
+
+    /// Turning "Whole file" on while another worktree is selected reloads
+    /// the review's diff from the reviewed worktree, not the selected one.
+    #[test]
+    fn whole_file_toggled_elsewhere_keeps_the_reviewed_worktrees_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("main");
+        std::fs::create_dir_all(&root).unwrap();
+        let lines: String = (1..=20).map(|n| format!("l{n}\n")).collect();
+        let reviewed = lines.replace("l1\n", "feature\n");
+        git(&root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("a.txt"), &lines).unwrap();
+        git(&root, &["add", "a.txt"]);
+        git(&root, &["commit", "-q", "-m", "first"]);
+        git(&root, &["switch", "-q", "-c", "feature"]);
+        std::fs::write(root.join("a.txt"), &reviewed).unwrap();
+        git(&root, &["commit", "-q", "-am", "feature"]);
+        let other = dir.path().join("other");
+        let other_arg = other.to_str().unwrap();
+        git(
+            &root,
+            &["worktree", "add", "-q", "-b", "other", other_arg, "main"],
+        );
+        std::fs::write(other.join("a.txt"), "bbb from other\n").unwrap();
+
+        let mut project = open(&root);
+        let snap = project.snapshot.clone().unwrap();
+        let main = snap.main_worktree().unwrap().path.clone();
+        let other = snap.worktrees.iter().find(|w| !w.is_main).unwrap();
+        let other = other.path.clone();
+        project.apply(Action::SetTab(Tab::Review));
+        wait(&mut project, "the review diff never loaded", review_shows_a);
+        let hidden = |p: &Project| {
+            p.diff(DiffOwner::Review)
+                .and_then(|d| d.gaps.as_ref())
+                .is_some_and(|g| !g.is_empty())
+        };
+        assert!(hidden(&project), "unchanged lines are hidden at first");
+
+        project.apply(Action::ShowHistory);
+        project.apply(Action::OpenWorktree(other));
+        let mut settings = project.settings().clone();
+        settings.whole_file = true;
+        project.set_settings(&settings);
+        wait(&mut project, "the whole file never showed", |p| {
+            review_shows_a(p) && !hidden(p)
+        });
+        let shown = |p: &Project| -> String {
+            let diff = p.diff(DiffOwner::Review).unwrap().diff.as_ref().unwrap();
+            let lines = diff.hunks.iter().flat_map(|h| &h.lines);
+            lines.map(|l| l.text() + "\n").collect()
+        };
+        assert_eq!(shown(&project), format!("l1\n{reviewed}"));
+
+        project.apply(Action::OpenWorktree(main));
+        project.apply(Action::SetTab(Tab::Review));
+        wait(&mut project, "the review never loaded again", |p| {
+            p.review.as_ref().is_some_and(|r| r.review().is_some())
+        });
+        assert!(!shown(&project).contains("bbb"), "{}", shown(&project));
     }
 }

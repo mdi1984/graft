@@ -5,6 +5,7 @@
 
 use std::collections::BTreeSet;
 use std::ops::Range;
+use std::path::PathBuf;
 
 use graft_core::diff::{self, FileDiff, Gap, Source};
 use graft_core::ops::{self, LineOp};
@@ -183,6 +184,9 @@ impl Staging {
 pub struct DiffView {
     pub owner: DiffOwner,
     pub key: FileKey,
+    /// The worktree it shows: the one selected when it opened, or the
+    /// review's. Its file is read from there, whatever is selected later.
+    pub worktree: PathBuf,
     pub diff: Option<FileDiff>,
     pub highlights: Highlights,
     pub error: Option<String>,
@@ -201,11 +205,12 @@ pub struct DiffView {
 }
 
 impl DiffView {
-    fn new(key: FileKey, owner: DiffOwner) -> Self {
+    fn new(key: FileKey, owner: DiffOwner, worktree: PathBuf) -> Self {
         Self {
             staging: Staging::of(owner, &key.source),
             owner,
             key,
+            worktree,
             diff: None,
             highlights: Highlights::default(),
             error: None,
@@ -383,32 +388,41 @@ impl Project {
         self.sync_conflict();
     }
 
-    /// Show `key` in `owner`'s diff, unless it shows it already.
+    /// Show `key` in `owner`'s diff, unless it shows it already. The diff
+    /// shows the review's worktree on Review, else the selected one.
     pub(super) fn open_diff(&mut self, owner: DiffOwner, key: FileKey) {
+        let review = self.review.as_ref().filter(|_| owner == DiffOwner::Review);
+        let worktree = review.map_or(&self.nav.worktree, |r| &r.worktree).clone();
         let Some(slot) = self.diff_slot(owner) else {
             return;
         };
-        if slot.as_ref().is_some_and(|v| v.key == key) {
+        if slot
+            .as_ref()
+            .is_some_and(|v| v.key == key && same_path(&v.worktree, &worktree))
+        {
             return;
         }
-        *slot = Some(DiffView::new(key, owner));
+        *slot = Some(DiffView::new(key, owner, worktree));
         self.load_view(owner);
     }
 
     /// (Re)load `owner`'s diff; what is selected or picked in it survives
     /// if only the unchanged lines shown change.
     pub(super) fn load_view(&mut self, owner: DiffOwner) {
-        let Some(key) = self.diff(owner).map(|v| v.key.clone()) else {
+        let Some((key, worktree)) = self
+            .diff(owner)
+            .map(|v| (v.key.clone(), v.worktree.clone()))
+        else {
             return;
         };
         let ticket = self.ticket();
         let whole = self.settings.whole_file;
-        // Commits are the same everywhere; the rest reads the worktree.
+        // Commits are the same everywhere; the rest reads the diff's worktree.
         let git = match key.source {
             Source::Commit(_) => self.git.clone(),
-            _ => self.wt_git(),
+            _ => self.git.at(&worktree),
         };
-        let kept = self.comment_lines(&key);
+        let kept = self.comment_lines(&key, &worktree);
         let view = self.diff_mut(owner).expect("checked above");
         view.ticket = ticket;
         let revealed = view.revealed.clone();
