@@ -533,10 +533,7 @@ impl Project {
         };
         match next {
             Some(key) if Some(&key) == current.as_ref() => self.load_view(DiffOwner::Status),
-            Some(key) => {
-                self.diff_view = None;
-                self.select_file(key);
-            }
+            Some(key) => self.select_file(key),
             None => self.diff_view = None,
         }
         self.sync_conflict();
