@@ -91,7 +91,7 @@ impl DialogKind {
     pub fn add_remote(first: bool) -> Self {
         Self::Remote {
             original: None,
-            name: if first { "origin" } else { "" }.to_owned(),
+            name: if first { remote::ORIGIN } else { "" }.to_owned(),
             url: String::new(),
             fetch: true,
         }
@@ -651,6 +651,36 @@ mod tests {
             main,
             linked,
         }
+    }
+
+    /// After a merge stopped with conflicts, File status selects the first
+    /// conflict (the top of the list), so the resolver opens, even when a
+    /// clean file is staged too.
+    #[test]
+    fn a_conflicted_merge_opens_the_resolver() {
+        let Setup {
+            _dir,
+            mut project,
+            main,
+            ..
+        } = setup(|main| {
+            std::fs::write(main.join("a.txt"), "main\n").unwrap();
+            git(main, &["commit", "-q", "-am", "main"]);
+            let merge = Cmd::new("git")
+                .args(["merge", "other"])
+                .current_dir(main)
+                .output()
+                .unwrap();
+            assert!(!merge.status.success(), "the merge must stop");
+            std::fs::write(main.join("b.txt"), "b\n").unwrap();
+            git(main, &["add", "b.txt"]);
+        });
+        project.apply(Action::OpenWorktree(main));
+        wait(&mut project, "the conflict never opened", |p| {
+            p.conflict.is_some()
+        });
+        let selected = project.diff_view.as_ref().map(|v| v.key.path.as_str());
+        assert_eq!(selected, Some("a.txt"));
     }
 
     /// With a linked worktree selected, Check out switches the main folder,

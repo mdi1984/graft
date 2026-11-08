@@ -36,7 +36,7 @@ impl CancelToken {
 /// The error of a job the user cancelled: nothing went wrong, so there is
 /// nothing to report.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Cancelled;
+pub(crate) struct Cancelled;
 
 impl std::fmt::Display for Cancelled {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

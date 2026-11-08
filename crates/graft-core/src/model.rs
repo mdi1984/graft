@@ -9,7 +9,7 @@ use crate::paths::same_path;
 
 /// Names taken as the default branch, in this order, when origin/HEAD does
 /// not name one that exists locally.
-pub const DEFAULT_BRANCHES: [&str; 4] = ["main", "master", "trunk", "develop"];
+pub(crate) const DEFAULT_BRANCHES: [&str; 4] = ["main", "master", "trunk", "develop"];
 
 /// Everything the sidebar, toolbar and tabs need to know about one repository.
 #[derive(Clone, Debug, Default)]
@@ -52,7 +52,7 @@ impl RepoSnapshot {
 
     /// Local branches that could be the default branch, best first:
     /// origin/HEAD's target, then [`DEFAULT_BRANCHES`].
-    pub fn default_branches(&self) -> impl Iterator<Item = &str> {
+    pub(crate) fn default_branches(&self) -> impl Iterator<Item = &str> {
         self.remote_default
             .as_deref()
             .into_iter()
@@ -348,7 +348,7 @@ impl StatusEntry {
     }
 
     /// Badge for the unstaged list ("?" counts as added).
-    pub fn unstaged_change(&self) -> Change {
+    pub(crate) fn unstaged_change(&self) -> Change {
         match self.kind {
             EntryKind::Untracked => Change::Added,
             _ => self.worktree,
