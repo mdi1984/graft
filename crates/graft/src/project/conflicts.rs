@@ -176,7 +176,7 @@ impl Project {
     ) {
         let done = format!("Merged {branch} into {into}");
         let doing = format!("Merging {branch} into {into}");
-        self.run_op(
+        self.run_head_op(
             At::Path(worktree),
             "Merging",
             move |git| review::merge(&git, &branch, head),
@@ -187,7 +187,7 @@ impl Project {
     pub(super) fn rebase(&mut self, onto: String) {
         let done = format!("Rebased onto {onto}");
         let doing = format!("Rebasing onto {onto}");
-        self.run_op(
+        self.run_head_op(
             At::Selected,
             "Rebasing",
             move |git| conflicts::rebase(&git, &onto),
@@ -287,7 +287,7 @@ impl Project {
         let done = format!("{} finished", kind.noun());
         let noun = kind.noun().to_lowercase();
         let doing = format!("Continuing the {noun}");
-        self.run_op(
+        self.run_head_op(
             At::Selected,
             &format!("Continuing {noun}"),
             move |git| conflicts::continue_op(&git, kind),

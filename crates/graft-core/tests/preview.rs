@@ -5,6 +5,7 @@ mod common;
 use std::path::{Path, PathBuf};
 
 use common::sh;
+use graft_core::preview::Changed;
 use graft_core::worktree::{self, Start};
 use graft_core::{Git, Restore, preview};
 
@@ -207,31 +208,31 @@ fn changes_in_main_since_the_preview_are_noticed() {
     std::fs::write(agent.join("a.txt"), "agent\n").unwrap();
     std::fs::write(agent.join("new.txt"), "agent's new file\n").unwrap();
     preview::start(&git, &git.at(&agent)).unwrap();
-    assert!(!preview::main_changed(&git).unwrap());
+    assert_eq!(preview::main_changed(&git).unwrap(), None);
 
     // Ignored files (build output) are not changes.
     std::fs::create_dir(main.join("build")).unwrap();
     std::fs::write(main.join("build").join("app.exe"), "binary").unwrap();
-    assert!(!preview::main_changed(&git).unwrap());
+    assert_eq!(preview::main_changed(&git).unwrap(), None);
 
     std::fs::write(main.join("a.txt"), "edited in main\n").unwrap();
-    assert!(preview::main_changed(&git).unwrap());
+    assert_eq!(preview::main_changed(&git).unwrap(), Some(Changed::Files));
     std::fs::write(main.join("a.txt"), "agent\n").unwrap();
-    assert!(!preview::main_changed(&git).unwrap());
+    assert_eq!(preview::main_changed(&git).unwrap(), None);
     std::fs::write(main.join("mine.txt"), "new in main\n").unwrap();
-    assert!(!preview::main_changed(&git).unwrap());
+    assert_eq!(preview::main_changed(&git).unwrap(), None);
     sh(&main, &["add", "mine.txt"]);
-    assert!(preview::main_changed(&git).unwrap());
+    assert_eq!(preview::main_changed(&git).unwrap(), Some(Changed::Files));
     sh(&main, &["rm", "-q", "--cached", "mine.txt"]);
-    assert!(!preview::main_changed(&git).unwrap());
+    assert_eq!(preview::main_changed(&git).unwrap(), None);
     std::fs::write(main.join("new.txt"), "edited in main\n").unwrap();
-    assert!(preview::main_changed(&git).unwrap());
+    assert_eq!(preview::main_changed(&git).unwrap(), Some(Changed::Files));
     std::fs::remove_file(main.join("new.txt")).unwrap();
-    assert!(preview::main_changed(&git).unwrap());
+    assert_eq!(preview::main_changed(&git).unwrap(), Some(Changed::Files));
 
     // Update shows the agent's state again: unchanged from there.
     preview::update(&git).unwrap();
-    assert!(!preview::main_changed(&git).unwrap());
+    assert_eq!(preview::main_changed(&git).unwrap(), None);
 
     let marker = main.join(".git").join("graft-preview");
     let text = std::fs::read_to_string(&marker).unwrap();
@@ -242,9 +243,24 @@ fn changes_in_main_since_the_preview_are_noticed() {
         .collect();
     assert_ne!(old, text);
     std::fs::write(&marker, old).unwrap();
-    assert!(preview::main_changed(&git).unwrap());
+    assert_eq!(preview::main_changed(&git).unwrap(), Some(Changed::Files));
     preview::restore_main(&git).unwrap();
     assert!(preview::main_changed(&git).is_err(), "no preview");
+}
+
+/// A commit made in main during the preview moves its HEAD: leaving would
+/// leave the commit behind, even with main's files as the preview left them.
+#[test]
+fn a_commit_in_main_since_the_preview_is_noticed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (git, agent) = main_and_agent(tmp.path(), "build/\n");
+    let main = git.cwd().to_path_buf();
+    std::fs::write(agent.join("a.txt"), "agent\n").unwrap();
+    preview::start(&git, &git.at(&agent)).unwrap();
+    sh(&main, &["add", "-A"]);
+    sh(&main, &["commit", "-q", "-m", "made in main"]);
+    assert_eq!(preview::main_changed(&git).unwrap(), Some(Changed::Head));
+    preview::restore_main(&git).unwrap();
 }
 
 /// A file in main that git cannot read (locked by an app running from
@@ -271,7 +287,7 @@ fn a_file_git_cannot_read_counts_as_changed() {
     };
 
     let db = lock(&main.join("app.db"));
-    assert!(!preview::main_changed(&git).unwrap());
+    assert_eq!(preview::main_changed(&git).unwrap(), None);
 
     // Same content, but git has to read it again to know.
     let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
@@ -283,8 +299,8 @@ fn a_file_git_cannot_read_counts_as_changed() {
     file.set_modified(later).unwrap();
     drop(file);
     let locked = lock(&tracked);
-    assert!(preview::main_changed(&git).unwrap());
+    assert_eq!(preview::main_changed(&git).unwrap(), Some(Changed::Files));
     drop((db, locked));
-    assert!(!preview::main_changed(&git).unwrap());
+    assert_eq!(preview::main_changed(&git).unwrap(), None);
     preview::restore_main(&git).unwrap();
 }

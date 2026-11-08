@@ -121,6 +121,19 @@ impl DialogKind {
             fetch: false,
         }
     }
+
+    /// Whether submitting moves HEAD in the selected worktree (see
+    /// [`Project::head_blocked`]).
+    fn moves_head(&self) -> bool {
+        match self {
+            Self::NewBranch { checkout, .. } => *checkout,
+            Self::Reset { .. } | Self::StashBranch { .. } | Self::Merge { .. } => true,
+            Self::RenameBranch { .. }
+            | Self::NewTag { .. }
+            | Self::Stash { .. }
+            | Self::Remote { .. } => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -217,6 +230,11 @@ impl Project {
     /// Problems in the open dialog's fields that git would only report
     /// after a round trip.
     fn dialog_problem(&self, kind: &DialogKind) -> Option<String> {
+        if kind.moves_head()
+            && let Some(reason) = self.head_blocked(&self.nav.worktree)
+        {
+            return Some(reason.to_owned());
+        }
         let snap = self.snapshot.as_deref();
         match kind {
             DialogKind::NewBranch { name, .. }
@@ -441,20 +459,10 @@ impl Project {
 
     /// Why the main folder can't switch now, for a readable notice.
     fn checkout_blocked(&self) -> Option<&'static str> {
-        let snap = self.snapshot.as_ref()?;
-        if snap.preview.is_some() {
-            Some("The main folder shows a preview. Restore main first, then check out.")
-        } else if self
-            .main_worktree()
-            .is_some_and(|wt| wt.in_progress.is_some())
-        {
-            Some(
-                "A merge, rebase, cherry-pick or revert is still going on in the main folder. \
-                 Finish or abort it first, then check out.",
-            )
-        } else {
-            None
-        }
+        self.main_worktree()?.in_progress.is_some().then_some(
+            "A merge, rebase, cherry-pick or revert is still going on in the main folder. \
+             Finish or abort it first, then check out.",
+        )
     }
 
     /// " in the main folder" while a linked worktree is selected, so a menu
@@ -480,7 +488,7 @@ impl Project {
             self.notices.push(reason.to_owned());
             return;
         }
-        if !self.run_op(At::Main, label, job, done) {
+        if !self.run_head_op(At::Main, label, job, done) {
             return;
         }
         if self.nav.tab != Tab::Review
@@ -589,7 +597,7 @@ impl Project {
         let short = graft_core::short(&id);
         let done = format!("Cherry-picked {short}");
         let doing = format!("Cherry-picking {short}");
-        self.run_op(
+        self.run_head_op(
             At::Selected,
             "Cherry-picking",
             move |git| conflicts::cherry_pick(&git, &id.to_string()),
@@ -601,7 +609,7 @@ impl Project {
         let short = graft_core::short(&id);
         let done = format!("Reverted {short}");
         let doing = format!("Reverting {short}");
-        self.run_op(
+        self.run_head_op(
             At::Selected,
             "Reverting",
             move |git| conflicts::revert(&git, &id.to_string()),
@@ -610,7 +618,7 @@ impl Project {
     }
 
     pub(super) fn undo_commit(&mut self) {
-        let started = self.run_op(
+        let started = self.run_head_op(
             At::Selected,
             "Undoing commit",
             move |git| refs::undo_last_commit(&git),

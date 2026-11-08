@@ -86,11 +86,11 @@ impl Open<'_> {
     }
 
     /// Whether it can happen now: going to a worktree always can, a
-    /// checkout waits for the running operation.
+    /// checkout only when [`can::checkout`].
     pub fn can(&self, project: &Project) -> Can {
         match self {
             Open::GoTo(_) => can::yes(""),
-            _ => can::act(project, ""),
+            _ => can::checkout(project),
         }
     }
 

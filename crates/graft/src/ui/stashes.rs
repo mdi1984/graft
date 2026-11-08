@@ -212,7 +212,11 @@ fn details(
             .response
         });
         can.why_not(apply_to.inner);
-        let can = can::act(project, "New branch with this stash applied");
+        let can = can::moves_head(
+            project,
+            &project.nav.worktree,
+            "New branch with this stash applied",
+        );
         if button(ui, "Branch…", ButtonKind::Secondary, can.ok)
             .on_hover_text(can.hint)
             .clicked()

@@ -41,6 +41,8 @@ your main folder, and clean up afterwards with one click.
 Your dev server, database and IDE usually live in your main folder, not in the agent's worktree.
 **Preview in main folder** checks out the agent's commits and uncommitted changes there, so you can run
 them. **Restore main folder** puts it back the way it was.
+Until then Graft makes no commits, checkouts, resets or merges in the main folder, so Restore
+leaves nothing behind.
 
 ### Slash: clean up in one go
 

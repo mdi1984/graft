@@ -283,18 +283,30 @@ fn show(main: &Git, source: &Git, restore: Restore) -> Result<Preview> {
     Ok(preview)
 }
 
-/// Whether the files leaving the preview throws away (see
-/// [`discarded_tree`]) differ from what the preview left there: changes
-/// made in main since would be lost. True when that is unknown (a marker
-/// from an older Graft, a file git cannot read).
-pub fn main_changed(main: &Git) -> Result<bool> {
+/// What changed in main since the preview showed, which leaving it loses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Changed {
+    /// The files leaving the preview throws away (see [`discarded_tree`]),
+    /// or whether they changed is unknown (a marker from an older Graft, a
+    /// file git cannot read).
+    Files,
+    /// HEAD moved (e.g. a commit made there): going back leaves those
+    /// commits behind.
+    Head,
+}
+
+/// What changed in main since the preview showed, if anything.
+pub fn main_changed(main: &Git) -> Result<Option<Changed>> {
     let Some(preview) = active(main.cwd()) else {
         bail!("Main shows no preview.");
     };
-    Ok(match preview.shown {
-        Some(shown) => discarded_tree(main, &preview.added).ok() != Some(shown),
-        None => true,
-    })
+    if main.rev("HEAD")? != Some(preview.head) {
+        return Ok(Some(Changed::Head));
+    }
+    let same = preview
+        .shown
+        .is_some_and(|shown| discarded_tree(main, &preview.added).ok() == Some(shown));
+    Ok((!same).then_some(Changed::Files))
 }
 
 /// Show the worktree at `source` in the main worktree (`main`).

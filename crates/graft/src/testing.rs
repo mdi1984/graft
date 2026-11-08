@@ -28,6 +28,16 @@ pub fn git(dir: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?}");
 }
 
+/// The commit `rev` names in `repo`, or empty.
+pub fn tip(repo: &Path, rev: &str) -> String {
+    let out = Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", rev])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
 /// Poll the project until `done` holds; fail with `what` after 20 seconds.
 pub fn wait(project: &mut Project, what: &str, done: impl Fn(&Project) -> bool) {
     let start = Instant::now();

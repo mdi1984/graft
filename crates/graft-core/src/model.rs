@@ -46,6 +46,15 @@ impl RepoSnapshot {
         self.branches.iter().find(|b| b.name == name)
     }
 
+    /// Why git must not move HEAD (commit, check out, reset, cherry-pick,
+    /// merge, …) in the worktree at `path` now: main shows a preview, and
+    /// Restore main would leave what that made behind.
+    pub fn head_blocked(&self, path: &Path) -> Option<&'static str> {
+        let main = self.main_worktree()?;
+        (self.preview.is_some() && same_path(&main.path, path))
+            .then_some("The main folder shows a preview. Restore main first.")
+    }
+
     /// The branch the main worktree is on. During a preview git sees main
     /// detached, but it is still on the branch Restore main goes back to.
     pub fn main_branch(&self) -> Option<&str> {

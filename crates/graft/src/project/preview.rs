@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use graft_core::preview;
+use graft_core::preview::{self, Changed};
 
 use super::ops::{At, say};
 use super::{Action, Confirm, Project};
@@ -52,24 +52,32 @@ impl Project {
             At::Main,
             label,
             move |git| {
-                if !confirmed && preview::main_changed(&git)? {
-                    return Ok(false);
+                if !confirmed && let Some(changed) = preview::main_changed(&git)? {
+                    return Ok(Some(changed));
                 }
                 match leave {
                     LeavePreview::Update => preview::update(&git).map(|_| ()),
                     LeavePreview::Restore => preview::restore_main(&git),
                 }?;
-                Ok(true)
+                Ok(None)
             },
             move |p, _, result| match result {
-                Ok(true) => p.infos.push(done.to_owned()),
-                Ok(false) => p.ask(Confirm {
+                Ok(None) => p.infos.push(done.to_owned()),
+                Ok(Some(changed)) => p.ask(Confirm {
                     title: "Discard changes made in the main folder?".to_owned(),
-                    body: "Files in the main folder changed since the preview, or Graft \
-                           could not read them all to check. Changes made since to tracked \
-                           files and to files the preview added are discarded; other new \
-                           files stay."
-                        .to_owned(),
+                    body: format!(
+                        "{} Changes made since to tracked files and to files the preview \
+                         added are discarded; other new files stay.",
+                        match changed {
+                            Changed::Head =>
+                                "The main folder is on another commit than the preview \
+                                 checked out (e.g. a commit was made there): commits made \
+                                 in main since are left behind, on no branch.",
+                            Changed::Files =>
+                                "Files in the main folder changed since the preview, or \
+                                 Graft could not read them all to check.",
+                        }
+                    ),
                     confirm_label: confirm_label.to_owned(),
                     action: Action::LeavePreviewAnyway(leave),
                 }),
@@ -82,7 +90,7 @@ impl Project {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{git, open, wait};
+    use crate::testing::{git, open, tip, wait};
 
     /// Main with a worktree `agent` shown in it.
     fn previewing() -> (tempfile::TempDir, std::path::PathBuf, Project) {
@@ -117,6 +125,44 @@ mod tests {
         assert!(project.confirm.is_none());
         let restored = std::fs::read_to_string(main.join("a.txt")).unwrap();
         assert_eq!(restored.trim_end(), "a");
+    }
+
+    /// Committing in main while it shows a preview is refused: Restore main
+    /// would leave the commit behind.
+    #[test]
+    fn a_commit_in_main_is_refused_during_a_preview() {
+        let (_dir, main, mut project) = previewing();
+        let before = tip(&main, "HEAD");
+        git(&main, &["add", "a.txt"]);
+        project.refresh();
+        wait(&mut project, "the staged file never showed", |p| {
+            p.worktree()
+                .and_then(|wt| wt.status.as_ref())
+                .is_some_and(|s| s.staged().count() == 1)
+        });
+        project.commit_form.summary = "made in main".to_owned();
+        project.apply(Action::Commit);
+        assert!(!project.is_operating());
+        assert_eq!(project.notices.len(), 1, "{:?}", project.notices);
+        assert!(project.notices[0].contains("Restore main first"));
+        assert_eq!(tip(&main, "HEAD"), before);
+    }
+
+    /// A commit made in main during the preview by other means (git itself)
+    /// is not left behind without asking.
+    #[test]
+    fn a_moved_head_asks_before_restoring() {
+        let (_dir, main, mut project) = previewing();
+        git(&main, &["commit", "-q", "-am", "made in main"]);
+        project.apply(Action::RestoreMain);
+        wait(&mut project, "nothing was asked", |p| {
+            p.confirm.is_some() && !p.is_operating()
+        });
+        let (confirm, _) = project.confirm.as_ref().unwrap();
+        assert!(confirm.body.contains("left behind"), "{}", confirm.body);
+        project.apply(Action::ConfirmNo);
+        let preview = project.snapshot.as_ref().unwrap().preview.as_ref();
+        assert!(preview.is_some());
     }
 
     /// An edit made in main during the preview is kept until the user

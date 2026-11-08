@@ -113,23 +113,10 @@ impl Project {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-    use std::process::Command;
-
     use graft_core::paths::same_path;
 
     use super::*;
-    use crate::testing::{git, open, wait};
-
-    /// The commit `branch` points at in `repo`, or empty.
-    fn tip(repo: &Path, branch: &str) -> String {
-        let out = Command::new("git")
-            .args(["rev-parse", "--verify", "--quiet", branch])
-            .current_dir(repo)
-            .output()
-            .unwrap();
-        String::from_utf8_lossy(&out.stdout).trim().to_owned()
-    }
+    use crate::testing::{git, open, tip, wait};
 
     struct Setup {
         _dir: tempfile::TempDir,

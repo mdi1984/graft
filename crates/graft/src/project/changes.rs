@@ -705,7 +705,7 @@ impl Project {
         let summary = self.commit_form.summary.trim().to_owned();
         // The follow-ups belong to this worktree even if another is
         // selected by the time the commit ends.
-        self.run_op(
+        self.run_head_op(
             At::Selected,
             if amend { "Amending" } else { "Committing" },
             move |git| ops::commit(&git, &message, amend).map(|_| ()),

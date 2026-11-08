@@ -2,7 +2,7 @@
 //! ends the project refreshes and the operation's own handler says what
 //! happened.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use graft_core::{CancelToken, Git, Progress};
 
@@ -99,6 +99,33 @@ impl Project {
             },
         );
         true
+    }
+
+    /// Why a command that moves HEAD (see [`RepoSnapshot::head_blocked`])
+    /// can't run in the worktree at `path` now.
+    ///
+    /// [`RepoSnapshot::head_blocked`]: graft_core::RepoSnapshot::head_blocked
+    pub fn head_blocked(&self, path: &Path) -> Option<&'static str> {
+        self.snapshot.as_ref()?.head_blocked(path)
+    }
+
+    /// [`Self::run_op`] for a command that moves HEAD where it runs (commit,
+    /// check out, reset, cherry-pick, merge, …). False, after saying why,
+    /// while [`Self::head_blocked`].
+    pub(super) fn run_head_op<R: JobResult>(
+        &mut self,
+        at: At,
+        label: &str,
+        job: impl FnOnce(Git) -> R + Send + 'static,
+        done: impl FnOnce(&mut Project, PathBuf, R) + Send + 'static,
+    ) -> bool {
+        let path = self.path_of(at);
+        if let Some(reason) = self.head_blocked(&path) {
+            self.notices
+                .push(format!("{label} did not start. {reason}"));
+            return false;
+        }
+        self.run_op(At::Path(path), label, job, done)
     }
 
     /// Like [`Self::run_op`], for commands that take a while (fetch, push,

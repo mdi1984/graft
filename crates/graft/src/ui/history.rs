@@ -559,11 +559,12 @@ fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Ac
     let mut item = |ui: &mut Ui, label: &str, can: &Can, action: Action| {
         can_item(ui, label, can, actions, action);
     };
+    let moves = can::moves_head(project, &project.nav.worktree, "");
     // Not on the commit the branch is on already.
     let not_head = if is_head {
         can::no("This is the current commit")
     } else {
-        can::act(project, "")
+        moves.clone()
     };
     item(
         ui,
@@ -591,7 +592,7 @@ fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Ac
         &if main_head == Some(commit.id) {
             can::no("The main folder is on this commit already")
         } else {
-            can::act(project, "")
+            can::checkout(project)
         },
         Action::CheckoutDetached(commit.id),
     );
@@ -614,7 +615,7 @@ fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Ac
     item(
         ui,
         "Revert this commit",
-        &not_merge("reverted", &act),
+        &not_merge("reverted", &moves),
         Action::Revert(commit.id),
     );
     if let Some(branch) = &branch {
@@ -634,7 +635,7 @@ fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Ac
         item(
             ui,
             "Undo this commit (keep changes)",
-            &act,
+            &moves,
             Action::UndoCommit,
         );
     }

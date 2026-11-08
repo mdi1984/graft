@@ -1,6 +1,8 @@
 //! Whether a button can act now, and its hover text: what it does, or why
 //! not. For buttons that show up in more than one place.
 
+use std::path::Path;
+
 use egui::Response;
 use graft_core::paths::{folder_name, same_path};
 use graft_core::preview::{self, Step};
@@ -65,6 +67,17 @@ pub fn act(project: &Project, hint: impl Into<String>) -> Can {
     yes(hint).unless(project.can_act().err())
 }
 
+/// Anything that moves HEAD in the worktree at `path` (commit, check out,
+/// reset, cherry-pick, …), see [`Project::head_blocked`].
+pub fn moves_head(project: &Project, path: &Path, hint: impl Into<String>) -> Can {
+    act(project, hint).unless(project.head_blocked(path))
+}
+
+/// A checkout, which always happens in the main folder.
+pub fn checkout(project: &Project) -> Can {
+    moves_head(project, &project.root, "")
+}
+
 /// A new worktree (toolbar, the sidebar's "+", a branch's menu).
 pub fn new_worktree(project: &Project) -> Can {
     act(project, "Check out a branch in a second folder")
@@ -80,6 +93,9 @@ pub fn merge(snap: Option<&RepoSnapshot>, wt: Option<&Worktree>) -> Can {
     let Some(wt) = wt else {
         return no("Select a worktree first");
     };
+    if let Some(reason) = snap.and_then(|s| s.head_blocked(&wt.path)) {
+        return no(reason);
+    }
     let Some(branch) = wt.branch.as_deref() else {
         return no("Check out a branch to merge into");
     };
@@ -113,9 +129,7 @@ pub fn merge_reviewed<'a>(
         (Some(_), Some(t)) if same_path(&t.path, &wt.path) => {
             no("This worktree is the base itself")
         }
-        (Some(_), Some(t)) if t.is_main && snap.preview.is_some() => {
-            no("The main folder shows a preview. Restore main first, then merge.")
-        }
+        (Some(_), Some(t)) if let Some(reason) = snap.head_blocked(&t.path) => no(reason),
         (Some(_), Some(t)) if t.in_progress.is_some() => {
             no(format!("{base} has a merge or rebase in progress"))
         }

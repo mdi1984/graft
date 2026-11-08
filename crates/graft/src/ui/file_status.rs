@@ -330,7 +330,7 @@ fn file_row(
 
 fn commit_box(ui: &mut Ui, project: &mut Project, status: &WorktreeStatus, actions: &mut Actions) {
     let staged = status.staged().count();
-    let act = can::act(project, "");
+    let act = can::moves_head(project, &project.nav.worktree, "");
     let keys = project.settings().keys.clone();
     let form = &mut project.commit_form;
     let width = ui.available_width();
