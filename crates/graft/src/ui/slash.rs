@@ -93,39 +93,12 @@ fn plan_ui(
                 ui.add_space(4.0);
                 ui.label(RichText::new("Nothing to clean up.").color(color::text()));
             }
-            let sections = [
-                (
-                    Reason::Gone,
-                    "Upstream gone",
-                    "Deleted on the remote, usually because the pull request was merged.",
-                ),
-                (
-                    Reason::Merged,
-                    "Merged",
-                    "Everything on these branches is already in the default branch.",
-                ),
-                (
-                    Reason::MissingWorktree,
-                    "Missing worktrees",
-                    "Worktrees whose folder was deleted. Only git's record of them goes.",
-                ),
-                (
-                    Reason::NeverPushed,
-                    "Never pushed",
-                    "Not merged and never pushed: their commits exist only on this computer. \
-                     They can still be restored from Recently slashed.",
-                ),
-            ];
-            for (reason, title, detail) in sections {
-                let rows: Vec<(usize, &Candidate)> = plan
-                    .candidates
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, c)| c.reason == reason)
-                    .collect();
-                if rows.is_empty() {
-                    continue;
-                }
+            // One section per reason, in the plan's order: every candidate
+            // shows, since "Slash" acts on every checked one.
+            let mut first = 0;
+            for rows in plan.candidates.chunk_by(|a, b| a.reason == b.reason) {
+                let reason = rows[0].reason;
+                let (title, detail) = section(reason);
                 ui.add_space(6.0);
                 section_label(ui, title);
                 if reason == Reason::NeverPushed {
@@ -133,9 +106,10 @@ fn plan_ui(
                 } else {
                     hint(ui, detail);
                 }
-                for (i, candidate) in rows {
-                    candidate_row(ui, view, i, candidate, actions);
+                for (i, candidate) in rows.iter().enumerate() {
+                    candidate_row(ui, view, first + i, candidate, actions);
                 }
+                first += rows.len();
             }
 
             if !plan.kept.is_empty() {
@@ -201,6 +175,29 @@ fn plan_ui(
         },
     );
     actions.extend(action);
+}
+
+/// A section's title and what it means.
+fn section(reason: Reason) -> (&'static str, &'static str) {
+    match reason {
+        Reason::Gone => (
+            "Upstream gone",
+            "Deleted on the remote, usually because the pull request was merged.",
+        ),
+        Reason::Merged => (
+            "Merged",
+            "Everything on these branches is already in the default branch.",
+        ),
+        Reason::MissingWorktree => (
+            "Missing worktrees",
+            "Worktrees whose folder was deleted. Only git's record of them goes.",
+        ),
+        Reason::NeverPushed => (
+            "Never pushed",
+            "Not merged and never pushed: their commits exist only on this computer. \
+             They can still be restored from Recently slashed.",
+        ),
+    }
 }
 
 fn candidate_row(
