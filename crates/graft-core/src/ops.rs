@@ -40,7 +40,8 @@ fn has_head(git: &Git) -> Result<bool> {
 }
 
 /// Throw away unstaged changes. Tracked files go back to their staged (or
-/// committed) state; untracked files go to the Recycle Bin, not oblivion.
+/// committed) state; untracked files go to the Recycle Bin, not oblivion,
+/// and leave the index if they were added with intent (`add -N`).
 pub fn discard_paths(git: &Git, tracked: &[String], untracked: &[String]) -> Result<()> {
     if !tracked.is_empty() {
         let mut args = vec!["restore", "--worktree", "--"];
@@ -50,6 +51,9 @@ pub fn discard_paths(git: &Git, tracked: &[String], untracked: &[String]) -> Res
     if !untracked.is_empty() {
         let files: Vec<_> = untracked.iter().map(|p| git.cwd().join(p)).collect();
         trash::delete_all(&files).context("move untracked files to the Recycle Bin")?;
+        let mut args = vec!["rm", "--cached", "--ignore-unmatch", "-q", "--"];
+        args.extend(untracked.iter().map(String::as_str));
+        git.run(args)?;
     }
     Ok(())
 }

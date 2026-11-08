@@ -65,13 +65,21 @@ fn parse(bytes: &[u8]) -> WorktreeStatus {
 }
 
 fn tracked(xy: &str, path: &str, orig_path: Option<String>) -> StatusEntry {
+    // `.A`: added with intent (`add -N`). The index holds no content for it,
+    // so it is a new file like an untracked one: restoring or reverse-applying
+    // it would empty or delete the file.
+    let kind = if xy == ".A" {
+        EntryKind::Untracked
+    } else {
+        EntryKind::Tracked
+    };
     let xy = xy.as_bytes();
     StatusEntry {
         path: path.to_owned(),
         orig_path,
         index: Change::from_code(xy[0]),
         worktree: Change::from_code(xy[1]),
-        kind: EntryKind::Tracked,
+        kind,
     }
 }
 
@@ -102,10 +110,12 @@ mod tests {
 1 A. N... 000000 100644 100644 0000 cccc new file.txt\0\
 2 R. N... 100644 100644 100644 aaaa aaaa R100 renamed.rs\0old.rs\0\
 u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
-? untracked.txt\0";
+? untracked.txt\0\
+1 .A N... 000000 000000 100644 0000 0000 intent.txt\0";
         let s = parse(raw);
         assert_eq!((s.ahead, s.behind), (2, 1));
-        assert_eq!(s.entries.len(), 5);
+        assert_eq!(s.entries.len(), 6);
+        assert_eq!(s.entries[5].kind, EntryKind::Untracked, "added with -N");
         assert!(s.entries[0].is_unstaged() && !s.entries[0].is_staged());
         assert_eq!(s.entries[1].path, "new file.txt");
         assert!(s.entries[1].is_staged());
@@ -114,7 +124,7 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
         assert!(s.entries[3].is_conflicted());
         assert_eq!(s.entries[4].kind, EntryKind::Untracked);
         assert_eq!(s.staged().count(), 2);
-        assert_eq!(s.unstaged().count(), 2);
+        assert_eq!(s.unstaged().count(), 3);
         assert_eq!(s.entries[3].shown_change(), Change::Unmerged);
         assert_eq!(s.entries[1].shown_change(), Change::Added);
     }

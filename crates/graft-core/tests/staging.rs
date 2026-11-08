@@ -417,3 +417,56 @@ fn amend_message_of_a_signed_commit_has_no_signature_lines() {
         Some("Signed")
     );
 }
+
+/// A file added with intent (`git add -N`) has no content in the index: it
+/// is a new file. Discarding some of its lines keeps the rest, discarding
+/// all of it moves it to the Recycle Bin and out of the index, never
+/// emptying or deleting it for good.
+#[test]
+fn discarding_a_file_added_with_intent_keeps_its_content() {
+    let (_tmp, git) = repo();
+    let dir = git.cwd().to_path_buf();
+    std::fs::write(dir.join("intent.txt"), "l1\r\nl2\r\nl3\r\n").unwrap();
+    sh(&dir, &["add", "-N", "intent.txt"]);
+    let s = status::load(&git).unwrap();
+    let entry = s.entries.iter().find(|e| e.path == "intent.txt").unwrap();
+    assert_eq!(entry.kind, graft_core::EntryKind::Untracked);
+    assert!(entry.is_unstaged() && !entry.is_staged());
+
+    let d = diff::load(&git, &Source::Untracked, "intent.txt").unwrap();
+    ops::apply_lines(
+        &git,
+        &d,
+        &Source::Untracked,
+        LineOp::Discard,
+        pick(&d, &["l2"]),
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read(dir.join("intent.txt")).unwrap(),
+        b"l1\r\nl3\r\n"
+    );
+
+    let d = diff::load(&git, &Source::Untracked, "intent.txt").unwrap();
+    ops::apply_lines(&git, &d, &Source::Untracked, LineOp::Discard, |_, _| true).unwrap();
+    assert!(!dir.join("intent.txt").exists());
+    assert_eq!(sh(&dir, &["ls-files", "--", "intent.txt"]), "");
+    assert!(status::load(&git).unwrap().entries.is_empty());
+
+    // It is in the Recycle Bin: put it back.
+    let here = std::fs::canonicalize(&dir).unwrap();
+    let trashed: Vec<_> = trash::os_limited::list()
+        .unwrap()
+        .into_iter()
+        .filter(|item| {
+            item.name == "intent.txt"
+                && std::fs::canonicalize(&item.original_parent).is_ok_and(|p| p == here)
+        })
+        .collect();
+    assert_eq!(trashed.len(), 1);
+    trash::os_limited::restore_all(trashed).unwrap();
+    assert_eq!(
+        std::fs::read(dir.join("intent.txt")).unwrap(),
+        b"l1\r\nl3\r\n"
+    );
+}
