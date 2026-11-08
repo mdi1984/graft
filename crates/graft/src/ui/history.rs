@@ -816,10 +816,7 @@ fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &m
     }
     let open = project.commit_diff.as_ref().map(|v| &v.key);
     for file in &d.files {
-        let key = FileKey {
-            source: Source::Commit(d.id),
-            path: file.path.clone(),
-        };
+        let key = FileKey::changed(Source::Commit(d.id), file);
         let response = file_row(ui, file, open == Some(&key), Extras::default());
         response.context_menu(|ui| file_row::menu_items(ui, &file.path, actions));
         if response.clicked() {

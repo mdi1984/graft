@@ -18,6 +18,8 @@ pub struct FileCommit {
     pub summary: String,
     /// The file's path in this commit (it may have been renamed since).
     pub path: String,
+    /// Its path before, if this commit renamed it.
+    pub orig_path: Option<String>,
 }
 
 /// The commits that changed `path`, newest first, up to `limit`.
@@ -44,17 +46,22 @@ pub fn log(git: &Git, path: &str, limit: usize) -> Result<Vec<FileCommit>> {
             continue;
         };
         // "M\tpath", "R087\told\tnew": the last field is the path here.
-        let here = lines
-            .filter(|l| !l.is_empty())
-            .filter_map(|l| l.rsplit('\t').next())
-            .next()
-            .unwrap_or(path);
+        let change: Vec<&str> = lines
+            .find(|l| !l.is_empty())
+            .map(|l| l.split('\t').collect())
+            .unwrap_or_default();
+        let here = change.last().copied().unwrap_or(path);
+        let orig_path = match change[..] {
+            [status, old, _] if status.starts_with('R') => Some(old.to_owned()),
+            _ => None,
+        };
         commits.push(FileCommit {
             id: Oid::from_hex(id.as_bytes()).context("bad commit id from git log")?,
             author: author.to_owned(),
             time: time.parse().unwrap_or(0),
             summary: summary.to_owned(),
             path: here.to_owned(),
+            orig_path,
         });
     }
     Ok(commits)

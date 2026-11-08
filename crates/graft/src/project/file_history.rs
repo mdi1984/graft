@@ -98,6 +98,7 @@ impl Project {
             FileKey {
                 source: Source::Commit(commit.id),
                 path: commit.path.clone(),
+                orig_path: commit.orig_path.clone(),
             },
         );
         if mode == FileHistoryMode::Blame {

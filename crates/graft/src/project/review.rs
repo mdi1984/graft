@@ -236,6 +236,7 @@ impl Project {
         } else {
             Source::Base(review.merge_base)
         };
+        let key = FileKey::changed(source, &file.change);
         if view.selected.as_ref() != Some(&path) {
             // Picked lines belong to the old file's diff.
             view.pick = None;
@@ -243,8 +244,7 @@ impl Project {
                 view.draft.clear();
             }
         }
-        view.selected = Some(path.clone());
-        let key = FileKey { source, path };
+        view.selected = Some(path);
         if reload && view.diff.as_ref().is_some_and(|d| d.key == key) {
             // Keeps the lines shown and the unchanged lines opened up.
             self.load_view(DiffOwner::Review);
@@ -559,6 +559,7 @@ mod tests {
         let key = FileKey {
             source: Source::Commit(project.selected.unwrap()),
             path: "a.txt".to_owned(),
+            orig_path: None,
         };
         project.apply(Action::SelectCommitFile(key.clone()));
         wait(&mut project, "the review never loaded", |p| {

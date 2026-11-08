@@ -41,7 +41,7 @@ fn stage_unstage_and_discard_lines_with_crlf() {
     // Change line 2 and line 4, the way a Windows editor writes files.
     std::fs::write(dir.join("a.txt"), "one\r\nTWO\r\nthree\r\nFOUR\r\nfive\r\n").unwrap();
 
-    let d = diff::load(&git, &Source::Unstaged, "a.txt").unwrap();
+    let d = diff::load(&git, &Source::Unstaged, "a.txt", None).unwrap();
     assert_eq!((d.added(), d.removed()), (2, 2));
     ops::apply_lines(
         &git,
@@ -59,12 +59,12 @@ fn stage_unstage_and_discard_lines_with_crlf() {
     assert!(unstaged.contains("+FOUR") && !unstaged.contains("+TWO"));
 
     // Unstage it again.
-    let d = diff::load(&git, &Source::Staged, "a.txt").unwrap();
+    let d = diff::load(&git, &Source::Staged, "a.txt", None).unwrap();
     ops::apply_lines(&git, &d, &Source::Staged, LineOp::Unstage, |_, _| true).unwrap();
     assert!(sh(&dir, &["diff", "--cached"]).is_empty());
 
     // Discard only the change to line 4; line 2 stays changed, CRLF stays.
-    let d = diff::load(&git, &Source::Unstaged, "a.txt").unwrap();
+    let d = diff::load(&git, &Source::Unstaged, "a.txt", None).unwrap();
     ops::apply_lines(
         &git,
         &d,
@@ -83,7 +83,7 @@ fn untracked_partial_stage_and_whole_files() {
     let dir = git.cwd().to_path_buf();
     std::fs::write(dir.join("new.txt"), "l1\r\nl2\r\nl3\r\n").unwrap();
 
-    let d = diff::load(&git, &Source::Untracked, "new.txt").unwrap();
+    let d = diff::load(&git, &Source::Untracked, "new.txt", None).unwrap();
     assert!(d.new_file);
     assert_eq!(d.added(), 3);
     ops::apply_lines(
@@ -134,7 +134,7 @@ fn untracked_partial_stage_follows_gitattributes() {
     let git = common::git(&dir);
 
     std::fs::write(dir.join("new.txt"), "l1\r\nl2\r\nl3\r\n").unwrap();
-    let d = diff::load(&git, &Source::Untracked, "new.txt").unwrap();
+    let d = diff::load(&git, &Source::Untracked, "new.txt", None).unwrap();
     ops::apply_lines(
         &git,
         &d,
@@ -152,7 +152,7 @@ fn untracked_partial_stage_follows_gitattributes() {
     std::fs::write(dir.join("x.bad"), "x1\nx2\n").unwrap();
     sh(&dir, &["config", "filter.bad.clean", "false"]);
     sh(&dir, &["config", "filter.bad.required", "true"]);
-    assert!(diff::load(&git, &Source::Untracked, "x.bad").is_err());
+    assert!(diff::load(&git, &Source::Untracked, "x.bad", None).is_err());
 }
 
 /// Picking lines of a new file works on git's form of it (here LF, and
@@ -188,7 +188,7 @@ fn untracked_lines_keep_the_files_form_on_disk() {
         ),
     ] {
         std::fs::write(dir.join(file), &on_disk).unwrap();
-        let d = diff::load(&git, &Source::Untracked, file).unwrap();
+        let d = diff::load(&git, &Source::Untracked, file, None).unwrap();
         assert_eq!(d.added(), 3, "{file}");
         ops::apply_lines(
             &git,
@@ -268,7 +268,7 @@ fn commit_diff_and_root_commit() {
     let (_tmp, git) = repo();
     let head = rev(git.cwd(), "HEAD");
     let id = graft_core::Oid::from_hex(head.as_bytes()).unwrap();
-    let d = diff::load(&git, &Source::Commit(id), "a.txt").unwrap();
+    let d = diff::load(&git, &Source::Commit(id), "a.txt", None).unwrap();
     assert!(d.new_file);
     assert_eq!(d.added(), 5);
 }
@@ -285,7 +285,7 @@ fn discarding_a_file_with_glob_characters_touches_only_that_file() {
     std::fs::write(dir.join("x[ab].txt"), "changed\n").unwrap();
     std::fs::write(dir.join("xa.txt"), "keep me\n").unwrap();
 
-    let d = diff::load(&git, &Source::Unstaged, "x[ab].txt").unwrap();
+    let d = diff::load(&git, &Source::Unstaged, "x[ab].txt", None).unwrap();
     assert_eq!(d.path, "x[ab].txt");
     let texts: Vec<String> = d
         .hunks
@@ -326,16 +326,30 @@ fn expanded_diffs_stage_unstage_and_discard() {
     std::fs::write(dir.join("n.txt"), lines(&[(2, "two"), (11, "eleven")])).unwrap();
 
     // With 3 lines of context, lines 6..8 are hidden.
-    let (d, gaps) =
-        diff::load_expanded(&git, &Source::Unstaged, "n.txt", |_, _| false, |_, _| false).unwrap();
+    let (d, gaps) = diff::load_expanded(
+        &git,
+        &Source::Unstaged,
+        "n.txt",
+        None,
+        |_, _| false,
+        |_, _| false,
+    )
+    .unwrap();
     let gaps = gaps.expect("expandable");
     assert_eq!(d.hunks.len(), 2);
     assert_eq!(gaps.len(), 1);
     assert_eq!(gaps[0].lines, 6..8);
 
     // The whole file: stage the second hunk only.
-    let (d, gaps) =
-        diff::load_expanded(&git, &Source::Unstaged, "n.txt", |_, _| true, |_, _| false).unwrap();
+    let (d, gaps) = diff::load_expanded(
+        &git,
+        &Source::Unstaged,
+        "n.txt",
+        None,
+        |_, _| true,
+        |_, _| false,
+    )
+    .unwrap();
     assert_eq!(gaps, Some(Vec::new()));
     let shown: usize = d.hunks.iter().map(|h| h.lines.len()).sum();
     assert_eq!(shown, 14);
@@ -347,15 +361,29 @@ fn expanded_diffs_stage_unstage_and_discard() {
     );
 
     // Unstage it again from the whole staged file.
-    let (d, _) =
-        diff::load_expanded(&git, &Source::Staged, "n.txt", |_, _| true, |_, _| false).unwrap();
+    let (d, _) = diff::load_expanded(
+        &git,
+        &Source::Staged,
+        "n.txt",
+        None,
+        |_, _| true,
+        |_, _| false,
+    )
+    .unwrap();
     assert_eq!(d.hunks[0].lines.len(), 13);
     ops::apply_lines(&git, &d, &Source::Staged, LineOp::Unstage, |_, _| true).unwrap();
     assert_eq!(sh(&dir, &["diff", "--cached"]), "");
 
     // Discard "two" from the expanded unstaged diff; CRLF stays.
-    let (d, _) =
-        diff::load_expanded(&git, &Source::Unstaged, "n.txt", |_, _| true, |_, _| false).unwrap();
+    let (d, _) = diff::load_expanded(
+        &git,
+        &Source::Unstaged,
+        "n.txt",
+        None,
+        |_, _| true,
+        |_, _| false,
+    )
+    .unwrap();
     ops::apply_lines(&git, &d, &Source::Unstaged, LineOp::Discard, |h, _| h == 0).unwrap();
     let now = std::fs::read(dir.join("n.txt")).unwrap();
     assert_eq!(now, lines(&[(11, "eleven")]).into_bytes());
@@ -368,20 +396,29 @@ fn expanded_diffs_stage_unstage_and_discard() {
         &git,
         &Source::Commit(id),
         "n.txt",
+        None,
         |_, _| false,
         |_, _| false,
     )
     .unwrap();
     assert_eq!(d.added(), 1);
     assert_eq!(gaps.map(|g| g.len()), Some(1));
-    let (_, gaps) =
-        diff::load_expanded(&git, &Source::Base(id), "n.txt", |_, _| false, |_, _| false).unwrap();
+    let (_, gaps) = diff::load_expanded(
+        &git,
+        &Source::Base(id),
+        "n.txt",
+        None,
+        |_, _| false,
+        |_, _| false,
+    )
+    .unwrap();
     assert_eq!(gaps, None, "no changes, nothing to expand");
     std::fs::write(dir.join("new.txt"), "fresh\n").unwrap();
     let (_, gaps) = diff::load_expanded(
         &git,
         &Source::Untracked,
         "new.txt",
+        None,
         |_, _| false,
         |_, _| false,
     )
@@ -433,7 +470,7 @@ fn discarding_a_file_added_with_intent_keeps_its_content() {
     assert_eq!(entry.kind, graft_core::EntryKind::Untracked);
     assert!(entry.is_unstaged() && !entry.is_staged());
 
-    let d = diff::load(&git, &Source::Untracked, "intent.txt").unwrap();
+    let d = diff::load(&git, &Source::Untracked, "intent.txt", None).unwrap();
     ops::apply_lines(
         &git,
         &d,
@@ -447,7 +484,7 @@ fn discarding_a_file_added_with_intent_keeps_its_content() {
         b"l1\r\nl3\r\n"
     );
 
-    let d = diff::load(&git, &Source::Untracked, "intent.txt").unwrap();
+    let d = diff::load(&git, &Source::Untracked, "intent.txt", None).unwrap();
     ops::apply_lines(&git, &d, &Source::Untracked, LineOp::Discard, |_, _| true).unwrap();
     assert!(!dir.join("intent.txt").exists());
     assert_eq!(sh(&dir, &["ls-files", "--", "intent.txt"]), "");
@@ -478,7 +515,7 @@ fn discarding_lines_of_a_new_lf_file_keeps_lf() {
     let (_tmp, git) = repo();
     let dir = git.cwd().to_path_buf();
     std::fs::write(dir.join("lf.txt"), "l1\nl2\nl3\n").unwrap();
-    let d = diff::load(&git, &Source::Untracked, "lf.txt").unwrap();
+    let d = diff::load(&git, &Source::Untracked, "lf.txt", None).unwrap();
     ops::apply_lines(
         &git,
         &d,
@@ -541,7 +578,7 @@ fn a_moved_file_added_with_intent_is_a_new_file() {
     assert_eq!(kind("moved.txt"), Some(graft_core::EntryKind::Untracked));
     assert_eq!(kind("a.txt"), Some(graft_core::EntryKind::Tracked));
 
-    let d = diff::load(&git, &Source::Untracked, "moved.txt").unwrap();
+    let d = diff::load(&git, &Source::Untracked, "moved.txt", None).unwrap();
     ops::apply_lines(
         &git,
         &d,
@@ -566,7 +603,7 @@ fn discarding_lines_of_a_new_file_with_mixed_line_endings() {
     let dir = git.cwd().to_path_buf();
     sh(&dir, &["config", "core.safecrlf", "true"]);
     std::fs::write(dir.join("mixed.txt"), "l1\r\nl2\nl3\r\n").unwrap();
-    let d = diff::load(&git, &Source::Untracked, "mixed.txt").unwrap();
+    let d = diff::load(&git, &Source::Untracked, "mixed.txt", None).unwrap();
     ops::apply_lines(
         &git,
         &d,
@@ -590,16 +627,16 @@ fn hunks_of_a_file_with_a_textconv_driver() {
     let git = common::git(&dir);
     std::fs::write(dir.join("a.dat"), "one\nthree\n").unwrap();
 
-    let d = diff::load(&git, &Source::Unstaged, "a.dat").unwrap();
+    let d = diff::load(&git, &Source::Unstaged, "a.dat", None).unwrap();
     assert_eq!(d.hunks[0].lines[0].text(), "one");
     ops::apply_lines(&git, &d, &Source::Unstaged, LineOp::Stage, |_, _| true).unwrap();
     assert_eq!(sh(&dir, &["show", ":a.dat"]), "one\nthree");
 
-    let d = diff::load(&git, &Source::Staged, "a.dat").unwrap();
+    let d = diff::load(&git, &Source::Staged, "a.dat", None).unwrap();
     ops::apply_lines(&git, &d, &Source::Staged, LineOp::Unstage, |_, _| true).unwrap();
     assert_eq!(sh(&dir, &["show", ":a.dat"]), "one\ntwo");
 
-    let d = diff::load(&git, &Source::Unstaged, "a.dat").unwrap();
+    let d = diff::load(&git, &Source::Unstaged, "a.dat", None).unwrap();
     ops::apply_lines(&git, &d, &Source::Unstaged, LineOp::Discard, |_, _| true).unwrap();
     assert_eq!(std::fs::read(dir.join("a.dat")).unwrap(), b"one\ntwo\n");
 }
@@ -615,7 +652,7 @@ fn unstaging_lines_of_a_renamed_file() {
     sh(&dir, &["mv", "a.txt", "b.txt"]);
     assert_eq!(short_status(), "R  a.txt -> b.txt");
 
-    let d = diff::load(&git, &Source::Staged, "b.txt").unwrap();
+    let d = diff::load(&git, &Source::Staged, "b.txt", None).unwrap();
     ops::apply_lines(&git, &d, &Source::Staged, LineOp::Unstage, |_, _| true).unwrap();
     assert_eq!(short_status(), " D a.txt\n?? b.txt");
 
@@ -626,7 +663,7 @@ fn unstaging_lines_of_a_renamed_file() {
     assert_eq!(short_status(), " D a.txt\n?? b.txt");
 
     ops::stage_paths(&git, &["a.txt".into(), "b.txt".into()]).unwrap();
-    let d = diff::load(&git, &Source::Staged, "b.txt").unwrap();
+    let d = diff::load(&git, &Source::Staged, "b.txt", None).unwrap();
     ops::apply_lines(
         &git,
         &d,
@@ -686,4 +723,38 @@ fn whole_files_beyond_the_command_line_limit() {
     }
     ops::discard_paths(&git, &names, &[]).unwrap();
     assert_eq!(sh(&dir, &["status", "--porcelain"]), "");
+}
+
+/// A commit that moved and edited a file shows a rename with the one line
+/// that changed (in Commit details and File history alike), and its
+/// unchanged lines can be opened up.
+#[test]
+fn a_renamed_file_in_a_commit_shows_as_a_rename() {
+    let (_tmp, git) = repo();
+    let dir = git.cwd().to_path_buf();
+    sh(&dir, &["mv", "a.txt", "b.txt"]);
+    std::fs::write(dir.join("b.txt"), "one\ntwo\nTHREE\nfour\nfive\n").unwrap();
+    sh(&dir, &["commit", "-q", "-am", "move"]);
+    let id = graft_core::Oid::from_hex(rev(&dir, "HEAD").as_bytes()).unwrap();
+
+    let files = graft_core::details::load(&git, id).unwrap().files;
+    assert_eq!(files[0].orig_path.as_deref(), Some("a.txt"));
+    let history = graft_core::file_log::log(&git, "b.txt", 10).unwrap();
+    assert_eq!(history[0].orig_path.as_deref(), Some("a.txt"));
+    assert_eq!(history[1].orig_path, None);
+
+    let (d, gaps) = diff::load_expanded(
+        &git,
+        &Source::Commit(id),
+        "b.txt",
+        Some("a.txt"),
+        |_, _| true,
+        |_, _| false,
+    )
+    .unwrap();
+    assert!(!d.new_file);
+    assert!(String::from_utf8_lossy(&d.header).contains("rename from a.txt"));
+    assert_eq!((d.added(), d.removed()), (1, 1));
+    assert_eq!(gaps, Some(Vec::new()), "every unchanged line shows");
+    assert_eq!(d.hunks.iter().map(|h| h.lines.len()).sum::<usize>(), 6);
 }

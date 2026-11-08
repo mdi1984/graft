@@ -49,7 +49,7 @@ fn branch_changes_since_fork_including_uncommitted() {
     assert_eq!(r.added(), 2 + 1 + 1 + 2);
 
     // The diff of a file goes from the merge-base to the working tree.
-    let d = diff::load(&git, &Source::Base(r.merge_base), "c.txt").unwrap();
+    let d = diff::load(&git, &Source::Base(r.merge_base), "c.txt", None).unwrap();
     assert_eq!(d.added(), 1);
 
     // Viewed marks follow the content.
@@ -229,4 +229,36 @@ fn merge_refuses_when_the_target_changed() {
     assert!(graft_core::conflicts::merge(&common::git(main), "side", false).unwrap());
     let err = format!("{:#}", merge().unwrap_err());
     assert!(err.contains("a merge is in progress"), "{err}");
+}
+
+/// A file moved and edited on the branch (not yet committed) shows as a
+/// rename with the line that changed, not as a whole new file.
+#[test]
+fn a_moved_file_shows_as_a_rename() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = &common::init(&tmp.path().join("r"));
+    common::commit(dir, "a.txt", "one\ntwo\nthree\nfour\nfive\n", "base");
+    sh(dir, &["switch", "-q", "-c", "feature"]);
+    sh(dir, &["mv", "a.txt", "b.txt"]);
+    std::fs::write(dir.join("b.txt"), "one\ntwo\nTHREE\nfour\nfive\n").unwrap();
+
+    let git = common::git(dir);
+    let r = review::load(&git, "main").unwrap();
+    let file = &r.files[0].change;
+    assert_eq!(
+        (file.path.as_str(), file.orig_path.as_deref()),
+        ("b.txt", Some("a.txt"))
+    );
+    let (d, gaps) = diff::load_expanded(
+        &git,
+        &Source::Base(r.merge_base),
+        "b.txt",
+        Some("a.txt"),
+        |_, _| true,
+        |_, _| false,
+    )
+    .unwrap();
+    assert!(!d.new_file);
+    assert_eq!((d.added(), d.removed()), (1, 1));
+    assert_eq!(gaps, Some(Vec::new()), "every unchanged line shows");
 }

@@ -264,10 +264,7 @@ fn details(
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
             for file in files {
-                let key = FileKey {
-                    source: Source::Commit(file.commit),
-                    path: file.change.path.clone(),
-                };
+                let key = FileKey::changed(Source::Commit(file.commit), &file.change);
                 let extras = Extras {
                     note: file
                         .is_untracked(stash)

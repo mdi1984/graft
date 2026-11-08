@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+use graft_core::changes::FileChange;
 use graft_core::diff::{self, FileDiff, Gap, Source};
 use graft_core::ops::{self, LineOp};
 use graft_core::paths::same_path;
@@ -22,9 +23,21 @@ use super::{Action, Confirm, Project, RemoteOp, readable};
 pub struct FileKey {
     pub source: Source,
     pub path: String,
+    /// The path before a rename, for a diff that shows it as one (see
+    /// [`diff::load`]).
+    pub orig_path: Option<String>,
 }
 
 impl FileKey {
+    /// The key for a file of a commit, stash or review.
+    pub fn changed(source: Source, file: &FileChange) -> Self {
+        Self {
+            source,
+            path: file.path.clone(),
+            orig_path: file.orig_path.clone(),
+        }
+    }
+
     /// The key for a status entry in the staged or the unstaged list.
     pub fn of(entry: &StatusEntry, staged: bool) -> Self {
         let source = if staged {
@@ -37,6 +50,7 @@ impl FileKey {
         Self {
             source,
             path: entry.path.clone(),
+            orig_path: None,
         }
     }
 
@@ -90,7 +104,14 @@ fn load_shown(
 ) -> anyhow::Result<Loaded> {
     let reveal = |old, new| whole || has(revealed, old, new);
     let keep = |old, new| has(kept, old, new);
-    let (diff, gaps) = diff::load_expanded(git, &key.source, &key.path, reveal, keep)?;
+    let (diff, gaps) = diff::load_expanded(
+        git,
+        &key.source,
+        &key.path,
+        key.orig_path.as_deref(),
+        reveal,
+        keep,
+    )?;
     let highlights = Highlights::of(&diff);
     Ok(Loaded {
         diff,
@@ -859,6 +880,7 @@ mod tests {
         let key = FileKey {
             source: Source::Unstaged,
             path: "f.txt".to_owned(),
+            orig_path: None,
         };
         project.apply(Action::SelectFile(key));
         let hunks = |p: &Project| p.diff_view.as_ref()?.diff.as_ref().map(|d| d.hunks.len());

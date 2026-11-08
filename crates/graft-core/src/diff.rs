@@ -147,8 +147,18 @@ impl FileDiff {
     }
 }
 
-/// Load the diff of one file.
-pub fn load(git: &Git, source: &Source, path: &str) -> Result<FileDiff> {
+/// The path a renamed file had on the old side (its `orig_path` in a file
+/// list), as far as `source` shows renames: commits and reviews do. File
+/// status shows a rename's new path alone, as staging builds patches with
+/// one path.
+fn renamed_from<'a>(source: &Source, old_path: Option<&'a str>) -> Option<&'a str> {
+    old_path.filter(|_| matches!(source, Source::Commit(_) | Source::Base(_)))
+}
+
+/// Load the diff of one file; a renamed file's (`old_path`, see
+/// [`renamed_from`]) shows as a rename, with only the lines that changed.
+pub fn load(git: &Git, source: &Source, path: &str, old_path: Option<&str>) -> Result<FileDiff> {
+    let old_path = renamed_from(source, old_path);
     let mut args: Vec<String> = ["diff", "--no-color", "--no-ext-diff", "--histogram"]
         .iter()
         .map(|s| s.to_string())
@@ -165,10 +175,14 @@ pub fn load(git: &Git, source: &Source, path: &str) -> Result<FileDiff> {
         }
         Source::Base(id) => args.push(id.to_string()),
     }
+    if old_path.is_some() {
+        args.push("-M".into());
+    }
     args.push("--".into());
     if *source == Source::Untracked {
         args.push("/dev/null".into());
     }
+    args.extend(old_path.map(str::to_owned));
     args.push(path.to_owned());
 
     // `--no-index` exits with 1 when the files differ, which is the point.
@@ -192,7 +206,13 @@ fn parent(git: &Git, id: &Oid) -> Result<Option<Oid>> {
 /// The old version of the file as git stores it (line endings as in the
 /// diff), to fill in the unchanged lines between hunks. `None` when there
 /// is no old version.
-fn old_version(git: &Git, source: &Source, path: &str) -> Result<Option<Vec<u8>>> {
+fn old_version(
+    git: &Git,
+    source: &Source,
+    path: &str,
+    old_path: Option<&str>,
+) -> Result<Option<Vec<u8>>> {
+    let path = renamed_from(source, old_path).unwrap_or(path);
     let rev = match source {
         Source::Unstaged => format!(":0:{path}"),
         Source::Staged => format!("HEAD:{path}"),
@@ -244,25 +264,26 @@ impl Gap {
     }
 }
 
-/// Load the diff of one file with more unchanged lines shown as context,
-/// and the gaps that stay hidden. `reveal` and `keep` pick lines by their
-/// (old, new) numbers, see [`expand`]. Gaps are `None` when unchanged lines
-/// cannot be shown: new, deleted or binary files, no old version to take
-/// them from, or one that does not match the diff (a textconv driver, or
-/// the index changed in between).
+/// Load the diff of one file (see [`load`]) with more unchanged lines
+/// shown as context, and the gaps that stay hidden. `reveal` and `keep`
+/// pick lines by their (old, new) numbers, see [`expand`]. Gaps are `None`
+/// when unchanged lines cannot be shown: new, deleted or binary files, no
+/// old version to take them from, or one that does not match the diff (a
+/// textconv driver, or the index changed in between).
 pub fn load_expanded(
     git: &Git,
     source: &Source,
     path: &str,
+    old_path: Option<&str>,
     reveal: impl Fn(u32, u32) -> bool,
     keep: impl Fn(u32, u32) -> bool,
 ) -> Result<(FileDiff, Option<Vec<Gap>>)> {
-    let mut diff = load(git, source, path)?;
+    let mut diff = load(git, source, path, old_path)?;
     if diff.binary || diff.new_file || diff.deleted_file || diff.hunks.is_empty() {
         return Ok((diff, None));
     }
     // Without the old version the diff still shows, just not expandable.
-    let Ok(Some(old)) = old_version(git, source, path) else {
+    let Ok(Some(old)) = old_version(git, source, path, old_path) else {
         return Ok((diff, None));
     };
     if !matches_old(&diff, &old) {

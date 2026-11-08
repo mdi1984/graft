@@ -231,7 +231,7 @@ fn partial_stage_of_new_script_keeps_mode() {
     d.sh("cd app && printf '#!/bin/sh\\necho a\\necho b\\n' > new.sh && chmod +x new.sh");
     let git = Git::new(d.path("app"), Console::default());
     let diff =
-        graft_core::diff::load(&git, &graft_core::diff::Source::Untracked, "new.sh").unwrap();
+        graft_core::diff::load(&git, &graft_core::diff::Source::Untracked, "new.sh", None).unwrap();
     ops::apply_lines(
         &git,
         &diff,
