@@ -14,7 +14,7 @@ use anyhow::{Result, anyhow, bail};
 use crate::cli::{Git, Progress};
 use crate::jobs::CancelToken;
 use crate::model::{
-    DEFAULT_BRANCHES, Oid, RepoSnapshot, Upstream, Worktree, branch_name, local_ref,
+    Branch, DEFAULT_BRANCHES, Oid, RepoSnapshot, Upstream, Worktree, branch_name, local_ref,
 };
 use crate::paths::{display, folder_name, glob_match, pattern_list};
 use crate::{refs, remote, repo, snapshot, worktree};
@@ -83,47 +83,72 @@ fn protected(name: &str, patterns: &str) -> bool {
     pattern_list(patterns).any(|p| glob_match(p, name))
 }
 
-/// Where each of `branches` started: the commit of the oldest entry in its
-/// reflog. Branches without a reflog (expired, or never written) are left out.
-fn created_at(git: &Git, branches: &[String]) -> Result<HashMap<String, Oid>> {
-    let mut oldest: HashMap<String, (u32, Oid)> = HashMap::new();
+/// How a branch started: the oldest entry of its reflog, when that is the
+/// branch's creation.
+struct Created {
+    /// The commit it was created at.
+    at: Oid,
+    /// What it was created from, as git wrote it: `origin/x`,
+    /// `refs/remotes/origin/x`, `HEAD`, …
+    from: String,
+}
+
+impl Created {
+    /// Checked out from its own remote branch (`x` from `origin/x`, which
+    /// it tracks), rather than started as new work.
+    fn checked_out_from_upstream(&self, branch: &Branch) -> bool {
+        let Upstream::Tracking { name: upstream, .. } = &branch.upstream else {
+            return false;
+        };
+        let from = branch_name(&self.from).unwrap_or(&self.from);
+        from == upstream && upstream.ends_with(&format!("/{}", branch.name))
+    }
+}
+
+/// How each of `branches` started. Left out: branches without a reflog
+/// (expired, or never written), and those whose oldest entries expired
+/// while newer ones stayed (gc), where the oldest left can be any commit.
+fn created(git: &Git, branches: &[String]) -> Result<HashMap<String, Created>> {
     if branches.is_empty() {
         return Ok(HashMap::new());
     }
-    let input: String = branches
-        .iter()
-        .map(|b| {
-            format!(
-                "refs/heads/{b}
-"
-            )
-        })
-        .collect();
+    let input: String = branches.iter().map(|b| local_ref(b) + "\n").collect();
     // On stdin: hundreds of merged branches do not fit on the command line.
     let args = [
         "log",
         "-g",
         "--ignore-missing",
         "--stdin",
-        "--format=%gD %H",
+        "--format=%gD%x00%H%x00%gs",
     ];
     let out = git.run_input(args, input.as_bytes())?.stdout_str();
+    let mut oldest: HashMap<String, (u32, Option<Created>)> = HashMap::new();
     for line in out.lines() {
-        let parsed = line.rsplit_once(' ').and_then(|(selector, oid)| {
-            let (refname, index) = selector.rsplit_once("@{")?;
-            let branch = refname.strip_prefix("refs/heads/")?;
-            let index = index.strip_suffix('}')?.parse().ok()?;
-            Some((branch, index, Oid::from_hex(oid.as_bytes()).ok()?))
-        });
-        let Some((branch, index, oid)) = parsed else {
+        let parsed = line.splitn(3, '\0').collect::<Vec<_>>();
+        let [selector, oid, subject] = parsed[..] else {
             continue;
         };
-        let entry = oldest.entry(branch.to_owned()).or_insert((index, oid));
+        let Some((branch, index)) = selector.rsplit_once("@{").and_then(|(full, index)| {
+            Some((branch_name(full)?, index.strip_suffix('}')?.parse().ok()?))
+        }) else {
+            continue;
+        };
+        let created = subject
+            .strip_prefix("branch: Created from ")
+            .zip(Oid::from_hex(oid.as_bytes()).ok())
+            .map(|(from, at)| Created {
+                at,
+                from: from.to_owned(),
+            });
+        let entry = oldest.entry(branch.to_owned()).or_insert((index, None));
         if index >= entry.0 {
-            *entry = (index, oid);
+            *entry = (index, created);
         }
     }
-    Ok(oldest.into_iter().map(|(b, (_, oid))| (b, oid)).collect())
+    Ok(oldest
+        .into_iter()
+        .filter_map(|(branch, (_, created))| Some((branch, created?)))
+        .collect())
 }
 
 /// Fetch (with prune) and work out what could go. `git` points at the main
@@ -166,7 +191,7 @@ pub fn plan(git: &Git, snap: &RepoSnapshot, patterns: &str) -> Result<Plan> {
             .collect(),
         None => Vec::new(),
     };
-    let created_at = created_at(git, &merged)?;
+    let created = created(git, &merged)?;
     let main_branch = snap.main_branch();
 
     let mut out = Plan {
@@ -221,12 +246,15 @@ pub fn plan(git: &Git, snap: &RepoSnapshot, patterns: &str) -> Result<Plan> {
         };
         // A branch created from the default branch is "merged" before it has
         // commits of its own: a new worktree an agent has not committed in
-        // yet, with its ignored .env and build output. Without a reflog to
-        // tell (expired on old branches), a lone branch is pre-selected (undo
-        // brings it back) but a worktree, whose folder undo can't restore, is
-        // not.
-        let suggested = match (reason, created_at.get(name)) {
-            (Reason::Merged, Some(start)) if *start == branch.target => {
+        // yet, with its ignored .env and build output. One checked out from
+        // its own remote branch is not new work. Without its start in the
+        // reflog (expired on old branches), a lone branch is pre-selected
+        // (undo brings it back) but a worktree, whose folder undo can't
+        // restore, is not.
+        let suggested = match (reason, created.get(name)) {
+            (Reason::Merged, Some(start))
+                if start.at == branch.target && !start.checked_out_from_upstream(branch) =>
+            {
                 out.kept.push(keep("it has no commits of its own yet"));
                 continue;
             }

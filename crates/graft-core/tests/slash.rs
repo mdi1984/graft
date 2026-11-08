@@ -209,6 +209,74 @@ fn branches_without_commits_of_their_own_are_not_merged() {
     assert!(snapshot::load(&git).unwrap().branch("agent/x").is_some());
 }
 
+/// "No commits of its own" needs to know where a branch started: not
+/// after gc dropped the start from its reflog, and not for a branch checked
+/// out from its own remote branch.
+#[test]
+fn only_branches_started_as_new_work_count_as_having_no_commits_yet() {
+    let tmp = tempfile::tempdir().unwrap();
+    let remote = common::init_bare(&tmp.path().join("remote.git"));
+    let main = common::init(&tmp.path().join("app"));
+    sh(
+        &main,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    commit(&main, "a.txt", "a\n");
+    sh(&main, &["push", "-q", "-u", "origin", "main"]);
+    let git = common::git(&main);
+
+    // Merged, but gc dropped the reflog entry of its start: the oldest
+    // left is its commit, which is also its tip.
+    merged_branch(&main, "trimmed");
+    sh(&main, &["reflog", "delete", "refs/heads/trimmed@{1}"]);
+    // Work pushed by someone else, checked out here (Graft's tracking
+    // checkout), then merged into main.
+    sh(&main, &["switch", "-q", "-c", "pr"]);
+    commit(&main, "pr.txt", "pr\n");
+    sh(&main, &["push", "-q", "origin", "pr"]);
+    sh(&main, &["switch", "-q", "main"]);
+    sh(&main, &["branch", "-q", "-D", "pr"]);
+    graft_core::refs::switch_tracking(&git, "pr", "origin/pr").unwrap();
+    sh(&main, &["switch", "-q", "main"]);
+    sh(&main, &["merge", "-q", "--ff-only", "origin/pr"]);
+    // A new agent worktree from the remote's main, tracking it (git's
+    // default for a remote start): still new work.
+    let agent = tmp.path().join("agent");
+    sh(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "agent/y",
+            agent.to_str().unwrap(),
+            "origin/main",
+        ],
+    );
+    sh(&main, &["push", "-q", "origin", "main"]);
+    sh(&main, &["fetch", "-q", "origin"]);
+
+    let snap = snapshot::load(&git).unwrap();
+    let plan = slash::plan(&git, &snap, &default_protected()).unwrap();
+    let find = |name: &str| {
+        plan.candidates
+            .iter()
+            .find(|c| c.branch.as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("{name}: {plan:?}"))
+    };
+    for name in ["trimmed", "pr"] {
+        let c = find(name);
+        assert_eq!((c.reason, c.suggested), (Reason::Merged, true), "{name}");
+    }
+    assert!(
+        plan.kept
+            .iter()
+            .any(|(b, why)| b == "agent/y" && why.contains("no commits of its own")),
+        "{plan:?}"
+    );
+}
+
 /// Ignored build output (node_modules, target…) nested deeper than Windows'
 /// old 260-character limit.
 fn deep_ignored_files(worktree: &Path) {
