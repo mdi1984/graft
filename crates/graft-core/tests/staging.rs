@@ -857,3 +857,38 @@ fn unstaging_and_discarding_lines_after_a_last_line_without_newline() {
     lines_of(&git, Source::Unstaged, LineOp::Discard, &["d"]).unwrap();
     assert_eq!(std::fs::read(dir.join("f")).unwrap(), b"a\nb\nc\n");
 }
+
+/// In a CRLF file git shows the newline b gets as "-b", "+b\r": staging or
+/// discarding lines after b gives or takes "\r\n", never a bare "\n".
+#[test]
+fn lines_after_a_last_line_without_newline_in_a_crlf_file() {
+    let only = |d: &diff::FileDiff, kind: Kind, text: &'static [u8]| {
+        let d = d.clone();
+        move |h: usize, l: usize| {
+            let line = &d.hunks[h].lines[l];
+            line.kind == kind && line.content == text
+        }
+    };
+    let (_tmp, git) = changed_file("a\r\nb", "a\r\nb\r\nc\r\n");
+    let d = diff::load(&git, &Source::Unstaged, "f", None).unwrap();
+    let c = only(&d, Kind::Added, b"c\r");
+    ops::apply_lines(&git, &d, &Source::Unstaged, LineOp::Stage, c).unwrap();
+    assert_eq!(staged_f(&git), "a\r\nb\r\nc\r\n");
+
+    let (_tmp, git) = changed_file("a\r\nb", "a\r\nb\r\nc\r\n");
+    let d = diff::load(&git, &Source::Unstaged, "f", None).unwrap();
+    let b = only(&d, Kind::Added, b"b\r");
+    ops::apply_lines(&git, &d, &Source::Unstaged, LineOp::Stage, b).unwrap();
+    assert_eq!(staged_f(&git), "a\r\nb\r\n");
+
+    // b changed as well: the made-up "+b" gets "\r\n" too.
+    let (_tmp, git) = changed_file("a\r\nb", "a\r\nB\r\nc\r\n");
+    lines_of(&git, Source::Unstaged, LineOp::Stage, &["c"]).unwrap();
+    assert_eq!(staged_f(&git), "a\r\nb\r\nc\r\n");
+
+    let (_tmp, git) = changed_file("a\r\nb", "a\r\nb\r\nc\r\n");
+    let err = lines_of(&git, Source::Unstaged, LineOp::Discard, &["b"]).unwrap_err();
+    assert!(err.to_string().contains("select those too"), "{err:#}");
+    let worktree = std::fs::read(git.cwd().join("f")).unwrap();
+    assert_eq!(worktree, b"a\r\nb\r\nc\r\n");
+}

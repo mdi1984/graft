@@ -630,6 +630,7 @@ pub(crate) fn build_patch(
             .map(|(l, line)| line.is_change() && selected(h, l))
             .collect();
         let made_up = tie_final_newline(hunk, &mut take, direction);
+        let made_up = made_up.as_ref();
         if !take.contains(&true) {
             continue;
         }
@@ -648,8 +649,10 @@ pub(crate) fn build_patch(
             if let Some(m) = marker {
                 lines.push((m, &line.content, line.no_newline));
             }
-            if made_up == Some(l) {
-                lines.push((b'+', &line.content, false));
+            if let Some((at, content)) = made_up
+                && *at == l
+            {
+                lines.push((b'+', content, false));
             }
         }
         // "No newline" belongs only on the last line of its side: anywhere
@@ -690,9 +693,14 @@ pub(crate) fn build_patch(
 /// The old version's last line without a newline ("-b" and "\ No newline")
 /// and the lines added after it go together: they need b to get its newline
 /// (git shows "+b"). Staging any of them stages that newline too; unstaging
-/// or discarding the newline needs all of them. Returns the line after which
-/// to write the "+b" when the diff has none (b changed as well).
-fn tie_final_newline(hunk: &Hunk, take: &mut [bool], direction: Direction) -> Option<usize> {
+/// or discarding the newline needs all of them. In a CRLF file the newline
+/// is "\r\n" (git shows "+b\r"). Returns the line after which to write the
+/// "+b" when the diff has none (b changed as well), and that line.
+fn tie_final_newline(
+    hunk: &Hunk,
+    take: &mut [bool],
+    direction: Direction,
+) -> Option<(usize, Vec<u8>)> {
     let lines = &hunk.lines;
     let last = lines
         .iter()
@@ -700,10 +708,11 @@ fn tie_final_newline(hunk: &Hunk, take: &mut [bool], direction: Direction) -> Op
     let after: Vec<usize> = (last + 1..lines.len())
         .filter(|&l| lines[l].kind == Kind::Added)
         .collect();
-    let with_newline = after
-        .iter()
-        .copied()
-        .find(|&l| lines[l].content == lines[last].content);
+    let old = &lines[last].content;
+    let with_newline = after.iter().copied().find(|&l| {
+        let new = &lines[l].content;
+        new == old || new.strip_suffix(b"\r") == Some(old)
+    });
     let pair = match direction {
         Direction::Forward if !take[last] && after.iter().any(|&l| take[l]) => true,
         Direction::Reverse if take[last] && after.iter().any(|&l| !take[l]) => false,
@@ -715,7 +724,13 @@ fn tie_final_newline(hunk: &Hunk, take: &mut [bool], direction: Direction) -> Op
             take[l] = pair;
             None
         }
-        None => pair.then_some(last),
+        None => pair.then(|| {
+            let mut content = old.clone();
+            if after.iter().any(|&l| lines[l].content.ends_with(b"\r")) {
+                content.push(b'\r');
+            }
+            (last, content)
+        }),
     }
 }
 
