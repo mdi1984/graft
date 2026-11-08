@@ -197,7 +197,9 @@ fn remove_lines(git: &Git, diff: &FileDiff, selected: impl Fn(usize, usize) -> b
     let on_disk =
         std::fs::read(&path).with_context(|| format!("Could not read {}", display(&path)))?;
     let path_arg = format!("--path={}", diff.path);
-    let cleaned = git.run_input(["hash-object", "-w", "--stdin", &path_arg], &on_disk)?;
+    // Only a probe: mixed line endings must not fail it (core.safecrlf).
+    let probe = ["-c", "core.safecrlf=false", "hash-object", "-w", "--stdin"];
+    let cleaned = git.run_input(probe.iter().chain([&path_arg.as_str()]), &on_disk)?;
     let checked_out = |id: &str| git.run(["cat-file", "--filters", &path_arg, id]);
     let converted = checked_out(cleaned.stdout_str().trim())?.stdout == on_disk;
 

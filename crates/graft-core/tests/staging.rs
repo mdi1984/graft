@@ -557,3 +557,24 @@ fn a_moved_file_added_with_intent_is_a_new_file() {
     ops::discard_paths(&git, &["a.txt".to_owned()], &[]).unwrap();
     assert!(dir.join("a.txt").is_file());
 }
+
+/// With core.safecrlf=true, a new file with mixed line endings (which git
+/// refuses to convert) still loses only the discarded lines.
+#[test]
+fn discarding_lines_of_a_new_file_with_mixed_line_endings() {
+    let (_tmp, git) = repo();
+    let dir = git.cwd().to_path_buf();
+    sh(&dir, &["config", "core.safecrlf", "true"]);
+    std::fs::write(dir.join("mixed.txt"), "l1\r\nl2\nl3\r\n").unwrap();
+    let d = diff::load(&git, &Source::Untracked, "mixed.txt").unwrap();
+    ops::apply_lines(
+        &git,
+        &d,
+        &Source::Untracked,
+        LineOp::Discard,
+        pick(&d, &["l2"]),
+    )
+    .unwrap();
+    let kept = std::fs::read_to_string(dir.join("mixed.txt")).unwrap();
+    assert_eq!(kept.lines().collect::<Vec<_>>(), ["l1", "l3"]);
+}
