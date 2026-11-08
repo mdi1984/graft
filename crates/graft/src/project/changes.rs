@@ -599,8 +599,7 @@ impl Project {
                 return;
             }
             Err(e) => {
-                self.notices
-                    .push(format!("Could not read the last commit message: {e:#}"));
+                self.report(e.context("Could not read the last commit message"));
                 return;
             }
         };

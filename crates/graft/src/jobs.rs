@@ -14,7 +14,9 @@ pub trait Owner: 'static {
     fn panicked(&mut self, message: String);
 }
 
-/// What a job returns; it can say the job failed by panicking.
+/// What a job returns; it can say the job failed by panicking. Failures are
+/// `anyhow` errors, so a handler's report can tell a panic (already
+/// announced) from a real failure.
 pub trait JobResult: Send + 'static {
     fn panicked(panic: Panicked) -> Self;
 }
@@ -22,18 +24,6 @@ pub trait JobResult: Send + 'static {
 impl<T: Send + 'static> JobResult for anyhow::Result<T> {
     fn panicked(panic: Panicked) -> Self {
         Err(panic.into())
-    }
-}
-
-impl<T: Send + 'static> JobResult for Result<T, String> {
-    fn panicked(panic: Panicked) -> Self {
-        Err(panic.0)
-    }
-}
-
-impl<T: Send + 'static> JobResult for std::io::Result<T> {
-    fn panicked(panic: Panicked) -> Self {
-        Err(std::io::Error::other(panic.0))
     }
 }
 

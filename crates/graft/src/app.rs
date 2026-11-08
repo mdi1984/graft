@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use anyhow::Context as _;
 use crossbeam_channel::Receiver;
 use egui::{CentralPanel, Frame, Margin, Panel};
 use graft_core::console::Console;
@@ -273,6 +274,14 @@ impl GraftApp {
             // A panic was announced when it happened.
             Err(e) if is_cancelled(&e) || is_panic(&e) => self.start.stop(None),
             Err(e) => self.open_failed(format!("{e:#}")),
+        }
+    }
+
+    /// Say why something failed, as a toast. A cancel is no failure; a
+    /// panic was announced when it happened.
+    fn report(&mut self, error: anyhow::Error) {
+        if !is_cancelled(&error) && !is_panic(&error) {
+            self.toasts.error(format!("{error:#}"));
         }
     }
 
@@ -616,8 +625,9 @@ impl GraftApp {
             }
             StartAction::LoadHome(distro) => {
                 let asked = distro.clone();
-                self.jobs.spawn(
-                    move || graft_core::wsl::Wsl::new(&asked).home(),
+                // Its own thread: the first call may boot the distro.
+                self.jobs.spawn_long(
+                    move |_| graft_core::wsl::Wsl::new(&asked).home(),
                     |app, home| app.start.set_home(distro, home),
                 );
             }
@@ -680,17 +690,21 @@ impl GraftApp {
     /// `manual` when the user asked (About), so failures are shown.
     fn check_update(&mut self, manual: bool) {
         self.update = update::Status::Checking;
-        self.jobs.spawn(update::check, move |app, result| {
-            app.update = match result {
-                Ok(release) if release.is_newer() => update::Status::Available(release),
-                Ok(_) => update::Status::UpToDate,
-                Err(e) if manual => update::Status::Failed(format!("{e:#}")),
-                Err(e) => {
-                    tracing::info!("update check: {e:#}");
-                    update::Status::Idle
-                }
-            };
-        });
+        // Its own thread: it waits on the network.
+        self.jobs.spawn_long(
+            |_| update::check(),
+            move |app, result| {
+                app.update = match result {
+                    Ok(release) if release.is_newer() => update::Status::Available(release),
+                    Ok(_) => update::Status::UpToDate,
+                    Err(e) if manual => update::Status::Failed(format!("{e:#}")),
+                    Err(e) => {
+                        tracing::info!("update check: {e:#}");
+                        update::Status::Idle
+                    }
+                };
+            },
+        );
     }
 
     fn about_ui(&mut self, ctx: &egui::Context) {
@@ -704,11 +718,11 @@ impl GraftApp {
             Some(AboutAction::Open(url)) => {
                 self.jobs.spawn(
                     move || {
-                        open::that_detached(&url).map_err(|e| format!("Could not open {url}: {e}"))
+                        open::that_detached(&url).with_context(|| format!("Could not open {url}"))
                     },
                     |app, opened| {
                         if let Err(e) = opened {
-                            app.toasts.error(e);
+                            app.report(e);
                         }
                     },
                 );
@@ -720,8 +734,10 @@ impl GraftApp {
                 let release = release.clone();
                 self.update = update::Status::Installing(release.clone());
                 self.jobs.spawn_long(
-                    move |_| update::install(&release),
-                    |app, installed| match installed.and_then(|i| update::restart(&i)) {
+                    // Starting the new Graft (or its setup) happens here too,
+                    // off the UI thread.
+                    move |_| update::install(&release).and_then(|i| update::restart(&i)),
+                    |app, restarted| match restarted {
                         // The new Graft runs: close this one.
                         Ok(()) => app.closing = true,
                         Err(e) => app.update = update::Status::Failed(format!("{e:#}")),

@@ -3,12 +3,12 @@
 
 use std::path::{Path, PathBuf};
 
+use graft_core::RepoSnapshot;
 use graft_core::paths::folder_name;
 use graft_core::paths::same_path;
 use graft_core::refs::{RefKind, check_ref_name};
 use graft_core::watch::Watcher;
 use graft_core::worktree::{self, Start};
-use graft_core::{RepoSnapshot, is_panic};
 
 use super::Project;
 use super::ops::{At, quietly, say};
@@ -345,10 +345,9 @@ impl Project {
                 }
                 match result {
                     Ok(watcher) => p.watcher = Some(watcher),
-                    Err(e) if is_panic(&e) => {}
-                    Err(e) => p.notices.push(format!(
+                    Err(e) => p.report(e.context(
                         "Graft cannot watch this repository's files, so changes made outside \
-                         Graft show when you come back to its window: {e:#}"
+                         Graft show when you come back to its window",
                     )),
                 }
             },

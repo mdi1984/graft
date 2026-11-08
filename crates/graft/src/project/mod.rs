@@ -32,10 +32,7 @@ use graft_core::history::{self, Commit, History};
 use graft_core::ops::LineOp;
 use graft_core::stash::{Stash, StashFile};
 use graft_core::watch::Watcher;
-use graft_core::{
-    CancelToken, Git, JobPool, Oid, Operation, RepoSnapshot, Worktree, is_cancelled, is_panic,
-    snapshot,
-};
+use graft_core::{CancelToken, Git, JobPool, Oid, Operation, RepoSnapshot, Worktree, snapshot};
 
 pub use changes::{CommitForm, DiffView, FileKey, Staging};
 pub use conflicts::{ConflictView, merge_dialog};
@@ -640,9 +637,7 @@ impl Project {
         match result {
             Ok(snap) => self.take_snapshot(snap),
             Err(e) if self.snapshot.is_none() => self.error = Some(format!("{e:#}")),
-            // A panic was announced when it happened.
-            Err(e) if is_panic(&e) => {}
-            Err(e) => self.notices.push(format!("{e:#}")),
+            Err(e) => self.report(e),
         }
         if self.refresh_queued {
             self.refresh_queued = false;
@@ -766,8 +761,7 @@ impl Project {
                     self.select_head();
                 }
             }
-            Err(e) if is_cancelled(&e) || is_panic(&e) => {}
-            Err(e) => self.notices.push(format!("Could not load history: {e:#}")),
+            Err(e) => self.report(e.context("Could not load history")),
         }
     }
 
