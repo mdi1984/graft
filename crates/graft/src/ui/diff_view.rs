@@ -451,6 +451,14 @@ pub fn body(
         );
         return;
     }
+    if let Some(old) = diff.moved_unchanged() {
+        empty_state(
+            ui,
+            "Moved",
+            &format!("Moved from {old}, content unchanged."),
+        );
+        return;
+    }
     if diff.hunks.is_empty() {
         let detail = if view.key.source == Source::Unstaged && diff.is_combined() {
             "This file has a merge conflict."

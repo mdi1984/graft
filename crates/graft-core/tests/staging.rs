@@ -758,3 +758,33 @@ fn a_renamed_file_in_a_commit_shows_as_a_rename() {
     assert_eq!(gaps, Some(Vec::new()), "every unchanged line shows");
     assert_eq!(d.hunks.iter().map(|h| h.lines.len()).sum::<usize>(), 6);
 }
+
+/// A file moved without changes, text or binary, has no lines to show: the
+/// diff says where it came from.
+#[test]
+fn a_file_moved_unchanged_says_where_from() {
+    let (_tmp, git) = repo();
+    let dir = git.cwd().to_path_buf();
+    std::fs::write(dir.join("pic.bin"), b"\x00\x01\x02binary\x00").unwrap();
+    sh(&dir, &["add", "pic.bin"]);
+    sh(&dir, &["commit", "-q", "-m", "pic"]);
+    std::fs::create_dir(dir.join("moved")).unwrap();
+    sh(&dir, &["mv", "a.txt", "moved/a.txt"]);
+    sh(&dir, &["mv", "pic.bin", "moved/pic.bin"]);
+    sh(&dir, &["commit", "-q", "-m", "move"]);
+    let id = graft_core::Oid::from_hex(rev(&dir, "HEAD").as_bytes()).unwrap();
+
+    for (old, new) in [("a.txt", "moved/a.txt"), ("pic.bin", "moved/pic.bin")] {
+        let d = diff::load(&git, &Source::Commit(id), new, Some(old)).unwrap();
+        assert!(d.hunks.is_empty() && !d.binary && !d.new_file, "{d:?}");
+        assert_eq!(d.moved_unchanged(), Some(old));
+    }
+    // Moved and edited: the lines that changed show instead.
+    sh(&dir, &["mv", "moved/a.txt", "b.txt"]);
+    std::fs::write(dir.join("b.txt"), "one\ntwo\nTHREE\nfour\nfive\n").unwrap();
+    sh(&dir, &["commit", "-q", "-am", "edit"]);
+    let id = graft_core::Oid::from_hex(rev(&dir, "HEAD").as_bytes()).unwrap();
+    let d = diff::load(&git, &Source::Commit(id), "b.txt", Some("moved/a.txt")).unwrap();
+    assert_eq!(d.renamed_from.as_deref(), Some("moved/a.txt"));
+    assert_eq!(d.moved_unchanged(), None);
+}

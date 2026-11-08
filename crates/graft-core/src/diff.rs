@@ -46,6 +46,8 @@ pub struct FileDiff {
     pub binary: bool,
     pub new_file: bool,
     pub deleted_file: bool,
+    /// The old path of a renamed file.
+    pub renamed_from: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,6 +142,13 @@ impl FileDiff {
         }
     }
 
+    /// The old path of a file that was only moved: renamed with its content
+    /// unchanged (text or binary), so the diff has nothing else to show.
+    pub fn moved_unchanged(&self) -> Option<&str> {
+        let unchanged = self.hunks.is_empty() && !self.binary;
+        self.renamed_from.as_deref().filter(|_| unchanged)
+    }
+
     /// A combined diff (`diff --cc`), the kind shown for a file with
     /// conflicts.
     pub fn is_combined(&self) -> bool {
@@ -190,8 +199,12 @@ pub fn load(git: &Git, source: &Source, path: &str, old_path: Option<&str>) -> R
         o.success() || (*source == Source::Untracked && o.status == 1)
     })?;
     let mut diff = parse(&out.stdout);
-    // `--no-index` names the file by its path as given; keep it tidy.
+    // `--no-index` names the file by its path as given, and git quotes
+    // unusual paths: keep the ones asked for.
     diff.path = path.to_owned();
+    if diff.renamed_from.is_some() {
+        diff.renamed_from = old_path.map(str::to_owned);
+    }
     if *source == Source::Untracked {
         diff.new_file = true;
     }
@@ -458,6 +471,9 @@ pub fn parse(bytes: &[u8]) -> FileDiff {
         }
         if line.starts_with(b"deleted file mode") || line == b"+++ /dev/null" {
             diff.deleted_file = true;
+        }
+        if let Some(path) = line.strip_prefix(b"rename from ") {
+            diff.renamed_from = Some(String::from_utf8_lossy(path).into_owned());
         }
         if let Some(path) = line.strip_prefix(b"+++ b/") {
             diff.path = String::from_utf8_lossy(path).into_owned();
