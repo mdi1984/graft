@@ -12,9 +12,9 @@ use anyhow::{Result, anyhow, bail};
 
 use crate::cli::{Git, Progress};
 use crate::jobs::CancelToken;
-use crate::model::{DEFAULT_BRANCHES, Oid, RepoSnapshot, Upstream};
+use crate::model::{DEFAULT_BRANCHES, Oid, RepoSnapshot, Upstream, Worktree};
 use crate::paths::{display, folder_name, glob_match, pattern_list};
-use crate::{refs, remote, snapshot, worktree};
+use crate::{refs, remote, repo, snapshot, worktree};
 
 /// The branch name patterns Slash never proposes unless the user changes
 /// them, besides the default branch: the usual default branch names and
@@ -160,13 +160,13 @@ pub fn plan(git: &Git, snap: &RepoSnapshot, patterns: &str) -> Result<Plan> {
                     .push(keep("the status of its worktree could not be read"));
                 continue;
             }
-            Some(wt) if wt.is_dirty() => {
-                out.kept.push(keep("its worktree has uncommitted changes"));
-                continue;
-            }
             Some(wt) if wt.in_progress.is_some() => {
                 out.kept
                     .push(keep("its worktree has a merge or rebase in progress"));
+                continue;
+            }
+            Some(wt) if wt.is_dirty() => {
+                out.kept.push(keep("its worktree has uncommitted changes"));
                 continue;
             }
             Some(wt) => Some(wt.path.clone()),
@@ -313,8 +313,9 @@ fn moved(git: &Git, branch: &str, target: Oid) -> bool {
 const MOVED: &str = "it moved since the scan (new commits?), so it was kept.";
 
 /// Delete `branch` only while it is still at `target` (git checks and
-/// deletes in one step) and no worktree has it checked out, then drop its
-/// settings (upstream and the like) as `git branch -D` would.
+/// deletes in one step) and no worktree has it checked out or is rebasing
+/// it, then drop its settings (upstream and the like) as `git branch -D`
+/// would.
 fn delete_branch(git: &Git, branch: &str, target: Oid) -> Result<()> {
     if moved(git, branch, target) {
         bail!(MOVED);
@@ -323,6 +324,15 @@ fn delete_branch(git: &Git, branch: &str, target: Oid) -> Result<()> {
     let checked_out = git.read(["for-each-ref", "--format=%(worktreepath)", &full])?;
     if !checked_out.trim().is_empty() {
         bail!("it is checked out in a worktree, so it was kept.");
+    }
+    // Git sees a worktree detached while it rebases the branch.
+    let worktrees = snapshot::load_worktrees(git, git.cwd())?;
+    let rebased = |wt: &Worktree| repo::in_progress(&wt.path)?.branch;
+    if worktrees
+        .iter()
+        .any(|wt| rebased(wt).as_deref() == Some(branch))
+    {
+        bail!("a worktree is rebasing it, so it was kept.");
     }
     if let Err(e) = git.run(["update-ref", "-d", &full, &target.to_string()]) {
         if moved(git, branch, target) {

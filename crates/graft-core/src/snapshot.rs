@@ -151,7 +151,7 @@ fn parse_upstream(upstream: &str, track: &str) -> Upstream {
     }
 }
 
-fn load_worktrees(git: &Git, root: &Path) -> Result<Vec<Worktree>> {
+pub(crate) fn load_worktrees(git: &Git, root: &Path) -> Result<Vec<Worktree>> {
     let out = git.run(["worktree", "list", "--porcelain", "-z"])?;
     Ok(parse_worktrees(&out.stdout, root, |p| git.native_path(p)))
 }

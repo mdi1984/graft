@@ -30,7 +30,7 @@ fn side_names(wt: &Worktree) -> SideNames {
 
 /// The strip across the top of the Workspace while something is in progress.
 pub fn banner(ui: &mut Ui, project: &Project, wt: &Worktree, actions: &mut Actions) {
-    let Some(InProgress { kind, title }) = &wt.in_progress else {
+    let Some(InProgress { kind, title, .. }) = &wt.in_progress else {
         return;
     };
     let left = wt.status.as_ref().map_or(0, |s| s.conflicted().count());

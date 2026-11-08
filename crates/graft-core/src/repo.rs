@@ -189,19 +189,24 @@ pub fn in_progress(worktree: &Path) -> Option<InProgress> {
             text
         }
     };
+    // "detached HEAD" when no branch is rebased.
+    let branch = (kind == Operation::Rebase)
+        .then(|| first_line(&format!("{marker}/head-name")))
+        .and_then(|head| Some(head.strip_prefix("refs/heads/")?.to_owned()));
     let title = match kind {
-        Operation::Rebase => {
-            let head = first_line(&format!("{marker}/head-name"));
-            match head.trim_start_matches("refs/heads/") {
-                "" => "Rebasing".to_owned(),
-                head => format!("Rebasing {head}"),
-            }
-        }
+        Operation::Rebase => match &branch {
+            Some(branch) => format!("Rebasing {branch}"),
+            None => "Rebasing".to_owned(),
+        },
         Operation::Merge => or(first_line("MERGE_MSG"), "Merging"),
         Operation::CherryPick => format!("Cherry-picking: {}", first_line("MERGE_MSG")),
         Operation::Revert => or(first_line("MERGE_MSG"), "Reverting"),
     };
-    Some(InProgress { kind, title })
+    Some(InProgress {
+        kind,
+        title,
+        branch,
+    })
 }
 
 #[cfg(test)]

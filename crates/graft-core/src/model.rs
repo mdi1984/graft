@@ -63,26 +63,27 @@ impl RepoSnapshot {
         (self.preview.is_some() && self.main_branch() == Some(name)).then_some(PREVIEW_SHOWN)
     }
 
-    /// The branch the main worktree is on. During a preview git sees main
-    /// detached, but it is still on the branch Restore main goes back to.
+    /// The branch the main worktree is on (see [`Worktree::on_branch`]).
+    /// During a preview git sees main detached, but it is still on the
+    /// branch Restore main goes back to.
     pub fn main_branch(&self) -> Option<&str> {
         match &self.preview {
             Some(preview) => match &preview.restore {
                 Restore::Branch(branch) => Some(branch),
                 Restore::Detached(_) => None,
             },
-            None => self.main_worktree()?.branch.as_deref(),
+            None => self.main_worktree()?.on_branch(),
         }
     }
 
     /// Worktree that has `branch` checked out, if any (main's branch as
-    /// [`Self::main_branch`] sees it).
+    /// [`Self::main_branch`] sees it, a rebased one included).
     pub fn worktree_for_branch(&self, branch: &str) -> Option<&Worktree> {
         self.worktrees.iter().find(|wt| {
             let on = if wt.is_main {
                 self.main_branch()
             } else {
-                wt.branch.as_deref()
+                wt.on_branch()
             };
             on == Some(branch)
         })
@@ -163,6 +164,13 @@ impl Worktree {
         }
     }
 
+    /// The branch the worktree is on: the checked-out one, or the one a
+    /// stopped rebase works on.
+    pub fn on_branch(&self) -> Option<&str> {
+        let rebased = || self.in_progress.as_ref()?.branch.as_deref();
+        self.branch.as_deref().or_else(rebased)
+    }
+
     /// Number of changed files (staged, unstaged, untracked, conflicted).
     pub fn dirty(&self) -> usize {
         self.status.as_ref().map_or(0, |s| s.entries.len())
@@ -226,6 +234,9 @@ pub struct InProgress {
     pub kind: Operation,
     /// What is being done, e.g. "Merge branch 'feature/x'".
     pub title: String,
+    /// The branch a rebase works on: git sees the worktree detached until
+    /// the rebase ends on that branch.
+    pub branch: Option<String>,
 }
 
 /// What the main worktree goes back to after a preview.

@@ -328,3 +328,74 @@ fn the_branch_main_returns_to_after_a_preview_is_kept() {
     preview::restore_main(&git).unwrap();
     assert_eq!(sh(&main, &["symbolic-ref", "--short", "HEAD"]), "topic");
 }
+
+/// While a rebase stops, git sees the worktree detached, but the rebase
+/// ends on its branch: Slash keeps that branch, in the main folder and in
+/// a linked worktree, even when the scan's plan is out of date.
+#[test]
+fn a_branch_being_rebased_is_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main = common::init(&tmp.path().join("app"));
+    commit(&main, "a.txt", "a\n");
+    for branch in ["fix", "feat"] {
+        sh(&main, &["branch", branch]);
+        // Its upstream was deleted (a merged PR): Slash would suggest it.
+        sh(&main, &["config", &format!("branch.{branch}.remote"), "."]);
+        let merge = format!("refs/heads/gone/{branch}");
+        sh(
+            &main,
+            &["config", &format!("branch.{branch}.merge"), &merge],
+        );
+    }
+    commit(&main, "a.txt", "main\n");
+    let git = common::git(&main);
+    let feat = tmp.path().join("feat");
+    worktree::add(&git, &feat, &Start::Existing("feat".into())).unwrap();
+    sh(&main, &["switch", "-q", "fix"]);
+    for dir in [&main, &feat] {
+        commit(dir, "a.txt", "mine\n");
+        let rebase = std::process::Command::new("git")
+            .args(["rebase", "main"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(!rebase.status.success(), "the rebase must stop");
+    }
+
+    let snap = snapshot::load(&git).unwrap();
+    assert_eq!(snap.main_branch(), Some("fix"));
+    assert!(!snap.worktree_for_branch("feat").unwrap().is_main);
+    let plan = slash::plan(&git, &snap, &default_protected()).unwrap();
+    for branch in ["fix", "feat"] {
+        let name = Some(branch);
+        assert!(plan.candidates.iter().all(|c| c.branch.as_deref() != name));
+        assert!(plan.kept.iter().any(|(b, _)| b == branch), "{plan:?}");
+    }
+    assert!(
+        plan.kept
+            .iter()
+            .any(|(b, why)| b == "feat" && why.contains("rebase in progress")),
+        "{plan:?}"
+    );
+
+    // Chosen anyway (a plan from before the rebase): still kept.
+    let chosen: Vec<_> = ["fix", "feat"]
+        .map(|branch| slash::Candidate {
+            reason: Reason::Gone,
+            branch: Some(branch.to_owned()),
+            target: Some(snap.branch(branch).unwrap().target),
+            worktree: None,
+            suggested: true,
+        })
+        .into();
+    let outcome = slash::execute(&git, &chosen, &CancelToken::default(), |_| {});
+    assert!(outcome.slashed.is_empty(), "{:?}", outcome.slashed);
+    assert_eq!(outcome.errors.len(), 2, "{:?}", outcome.errors);
+    assert!(
+        outcome.errors.iter().all(|e| e.contains("rebasing it")),
+        "{:?}",
+        outcome.errors
+    );
+    let after = snapshot::load(&git).unwrap();
+    assert!(after.branch("fix").is_some() && after.branch("feat").is_some());
+}
