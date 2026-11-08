@@ -9,7 +9,7 @@ use graft_core::{Git, Oid, Worktree, conflicts, remote, stash};
 
 use super::conflicts::after_conflicts;
 use super::ops::{At, say};
-use super::{Action, Confirm, Project, Tab, WorkspaceView};
+use super::{Action, Confirm, Project, Selection, Tab, WorkspaceView};
 use crate::jobs::shown_error;
 
 /// A dialog that asks for a name or a choice before running a git command.
@@ -126,15 +126,18 @@ pub struct Dialog {
     pub submitting: bool,
     /// Focus the first field once.
     pub focus: bool,
+    /// What was selected when it opened.
+    asked: Selection,
 }
 
 impl Dialog {
-    pub fn new(kind: DialogKind) -> Self {
+    pub fn new(kind: DialogKind, asked: Selection) -> Self {
         Self {
             kind,
             error: None,
             submitting: false,
             focus: true,
+            asked,
         }
     }
 }
@@ -169,7 +172,7 @@ fn switched(
         Ok(None) => p.infos.push(format!("Switched to {branch}")),
         Err(e) if blocked_by_changes(&format!("{e:#}")) => {
             let error = format!("{e:#}");
-            p.confirm = Some(Confirm {
+            p.ask(Confirm {
                 title: format!("Your changes are in the way of {branch}"),
                 body: format!(
                     "Switching would overwrite uncommitted changes in your main folder: \
@@ -191,7 +194,7 @@ fn switched(
 impl Project {
     pub(super) fn open_dialog(&mut self, kind: DialogKind) {
         if !self.is_operating() {
-            self.dialog = Some(Dialog::new(kind));
+            self.dialog = Some(Dialog::new(kind, self.selection()));
         }
     }
 
@@ -260,7 +263,11 @@ impl Project {
         if dialog.submitting {
             return;
         }
-        let kind = dialog.kind.clone();
+        let (kind, asked) = (dialog.kind.clone(), dialog.asked.clone());
+        if !self.still_selected(&asked) {
+            self.dialog = None;
+            return;
+        }
         if let Some(problem) = self.dialog_problem(&kind) {
             if let Some(dialog) = &mut self.dialog {
                 dialog.error = Some(problem);
@@ -526,7 +533,7 @@ impl Project {
             move |p, _, result| match result {
                 Ok(()) => p.infos.push(format!("Deleted branch {name}")),
                 Err(e) if not_merged(&format!("{e:#}")) => {
-                    p.confirm = Some(Confirm {
+                    p.ask(Confirm {
                         title: format!("{name} is not merged"),
                         body: format!(
                             "Its commits are not in your current branch or its upstream. \
@@ -715,10 +722,10 @@ mod tests {
         } = setup(|main| std::fs::write(main.join("a.txt"), "local\n").unwrap());
         std::fs::write(linked.join("b.txt"), "agent's work\n").unwrap();
         project.apply(Action::Checkout("other".to_owned()));
-        wait(&mut project, "no stash offer", |p| p.confirm.is_some());
-        let action = project.confirm.take().unwrap().action;
+        wait(&mut project, "no stash offer", |p| p.confirm().is_some());
+        let action = &project.confirm().unwrap().action;
         assert!(matches!(action, Action::StashAndCheckout { .. }));
-        project.apply(action);
+        project.apply(Action::ConfirmYes);
         wait(&mut project, "main never switched", |p| {
             !p.is_operating() && branch_at(p, &main).as_deref() == Some("other")
         });
@@ -812,7 +819,7 @@ mod tests {
         assert!(project.is_operating());
         project.apply(Action::UndoCommit);
         assert_eq!(project.nav.view, WorkspaceView::History);
-        project.dialog = Some(Dialog::new(DialogKind::stash()));
+        project.dialog = Some(Dialog::new(DialogKind::stash(), project.selection()));
         project.apply(Action::SubmitDialog);
         assert!(!project.dialog.as_ref().unwrap().submitting);
         wait(&mut project, "checkout never ended", |p| !p.is_operating());

@@ -12,7 +12,7 @@ pub fn show(ui: &mut Ui, projects: &mut [Project], index: usize, search: &mut St
     let mut actions = Actions::default();
     let ctx = ui.ctx().clone();
     let project = &mut projects[index];
-    if let Some(confirm) = &project.confirm {
+    if let Some(confirm) = project.confirm() {
         super::confirm::show(&ctx, confirm, &mut actions);
     }
     if let (Some(form), Some(snap)) = (&mut project.new_worktree, &project.snapshot) {

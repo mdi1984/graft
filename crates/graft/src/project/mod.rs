@@ -21,7 +21,7 @@ mod slash;
 mod stashes;
 mod worktrees;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -315,6 +315,15 @@ pub struct Confirm {
     pub action: Action,
 }
 
+/// The selected worktree and its branch when a question or dialog opened:
+/// its OK must not act on another worktree or branch that took their place
+/// meanwhile (the worktree was removed, its branch switched).
+#[derive(Clone, Debug)]
+pub struct Selection {
+    worktree: PathBuf,
+    branch: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RefKind {
     /// The branch (or detached HEAD) of the selected worktree.
@@ -459,8 +468,11 @@ pub struct Project {
     pub commit_form: CommitForm,
     /// A git command that changes things, while it runs.
     op: Option<Running>,
-    /// A destructive action waiting for the user's OK.
-    pub confirm: Option<Confirm>,
+    /// A destructive action waiting for the user's OK, and what was
+    /// selected when it was asked.
+    confirm: Option<(Confirm, Selection)>,
+    /// Questions that came up while another was open, in order.
+    queued_confirms: VecDeque<Confirm>,
 
     /// Errors for the app to show as toasts.
     pub notices: Vec<String>,
@@ -536,6 +548,7 @@ impl Project {
             commit_form: CommitForm::default(),
             op: None,
             confirm: None,
+            queued_confirms: VecDeque::new(),
             notices: Vec::new(),
             infos: Vec::new(),
             clipboard: None,
@@ -898,6 +911,59 @@ impl Project {
         self.nav.view = view;
     }
 
+    /// The question waiting for the user's answer.
+    pub fn confirm(&self) -> Option<&Confirm> {
+        self.confirm.as_ref().map(|(confirm, _)| confirm)
+    }
+
+    /// Ask before doing something. A question never replaces an open one
+    /// (its button could change under the pointer): it waits its turn.
+    pub(super) fn ask(&mut self, confirm: Confirm) {
+        self.queued_confirms.push_back(confirm);
+        self.next_question();
+    }
+
+    fn next_question(&mut self) {
+        if self.confirm.is_none()
+            && let Some(confirm) = self.queued_confirms.pop_front()
+        {
+            self.confirm = Some((confirm, self.selection()));
+        }
+    }
+
+    fn answer(&mut self, yes: bool) {
+        if let Some((confirm, asked)) = self.confirm.take()
+            && yes
+            && self.still_selected(&asked)
+        {
+            self.apply(confirm.action);
+        }
+        self.next_question();
+    }
+
+    pub(super) fn selection(&self) -> Selection {
+        Selection {
+            worktree: self.nav.worktree.clone(),
+            branch: self.worktree().and_then(|wt| wt.branch.clone()),
+        }
+    }
+
+    /// Whether the same worktree and branch are selected as when `asked`;
+    /// if not, says so and nothing should run.
+    pub(super) fn still_selected(&mut self, asked: &Selection) -> bool {
+        let now = self.selection();
+        let same = graft_core::paths::same_path(&now.worktree, &asked.worktree)
+            && now.branch == asked.branch;
+        if !same {
+            self.notices.push(
+                "Nothing was done: the selected worktree or its branch changed while \
+                 you were deciding. Check and try again."
+                    .to_owned(),
+            );
+        }
+        same
+    }
+
     pub fn apply(&mut self, action: Action) {
         match action {
             Action::OpenWorktree(path) => self.open_worktree(path),
@@ -931,13 +997,9 @@ impl Project {
             Action::ToggleAmend => self.toggle_amend(),
             Action::Remote(op) => self.remote(op),
             Action::CancelOperation => self.cancel_op(),
-            Action::Ask(confirm) => self.confirm = Some(*confirm),
-            Action::ConfirmYes => {
-                if let Some(confirm) = self.confirm.take() {
-                    self.apply(confirm.action);
-                }
-            }
-            Action::ConfirmNo => self.confirm = None,
+            Action::Ask(confirm) => self.ask(*confirm),
+            Action::ConfirmYes => self.answer(true),
+            Action::ConfirmNo => self.answer(false),
             Action::OpenPath(path) => self.open_path(&path),
             Action::RevealPath(path) => self.reveal_path(&path),
 
@@ -1186,5 +1248,73 @@ mod tests {
         let history = project.history.as_ref().unwrap();
         assert!(history.index.contains_key(&head), "the new commit");
         assert!(history.index.contains_key(&history::worktree_id()));
+    }
+
+    fn question(title: &str, action: Action) -> Confirm {
+        Confirm {
+            title: title.to_owned(),
+            body: String::new(),
+            confirm_label: "OK".to_owned(),
+            action,
+        }
+    }
+
+    /// The worktree a question was asked for went away while it was open:
+    /// OK does nothing in the main folder that took its place, and says so.
+    /// The same for a dialog when the branch switched.
+    #[test]
+    fn ok_never_acts_on_what_took_the_asked_worktrees_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, mut project) = opened_repo(tmp.path());
+        let linked = tmp.path().join("linked");
+        let linked_arg = linked.to_str().unwrap();
+        git(&root, &["worktree", "add", "-q", "-b", "agent", linked_arg]);
+        std::fs::write(root.join("a.txt"), "main's work\n").unwrap();
+        refreshed(&mut project);
+        let snap = project.snapshot.clone().unwrap();
+        let linked = snap.worktrees.iter().find(|wt| !wt.is_main).unwrap();
+        project.apply(Action::OpenWorktree(linked.path.clone()));
+
+        let discard = Action::Discard {
+            tracked: vec!["a.txt".to_owned()],
+            untracked: Vec::new(),
+        };
+        project.apply(Action::Ask(Box::new(question("Discard?", discard))));
+        git(&root, &["worktree", "remove", "--force", linked_arg]);
+        refreshed(&mut project);
+        assert!(project.worktree().is_some_and(|wt| wt.is_main));
+        project.apply(Action::ConfirmYes);
+        assert!(!project.is_operating());
+        assert_eq!(project.notices.len(), 1, "{:?}", project.notices);
+        assert!(project.confirm().is_none());
+        let a = std::fs::read_to_string(root.join("a.txt")).unwrap();
+        assert_eq!(a, "main's work\n");
+
+        project.notices.clear();
+        project.apply(Action::OpenDialog(DialogKind::stash()));
+        git(&root, &["switch", "-q", "-c", "other"]);
+        refreshed(&mut project);
+        project.apply(Action::SubmitDialog);
+        assert!(!project.is_operating());
+        assert!(project.dialog.is_none());
+        assert_eq!(project.notices.len(), 1, "{:?}", project.notices);
+        let a = std::fs::read_to_string(root.join("a.txt")).unwrap();
+        assert_eq!(a, "main's work\n", "not stashed");
+    }
+
+    /// A question that comes up while another is open (a follow-up of an
+    /// operation) waits for it instead of taking its place.
+    #[test]
+    fn a_question_waits_for_the_open_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_root, mut project) = opened_repo(tmp.path());
+        let clear = question("Clear all comments?", Action::ClearReviewComments);
+        project.apply(Action::Ask(Box::new(clear)));
+        project.ask(question("Force push?", Action::Refresh));
+        assert_eq!(project.confirm().unwrap().title, "Clear all comments?");
+        project.apply(Action::ConfirmNo);
+        assert_eq!(project.confirm().unwrap().title, "Force push?");
+        project.apply(Action::ConfirmNo);
+        assert!(project.confirm().is_none());
     }
 }

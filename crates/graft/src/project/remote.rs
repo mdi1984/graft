@@ -95,7 +95,7 @@ impl Project {
         match result {
             Ok(()) => self.infos.push("Pushed".to_owned()),
             Err(e) if rejected_push(&format!("{e:#}")) => {
-                self.confirm = Some(Confirm {
+                self.ask(Confirm {
                     title: "The remote has commits you don't have".to_owned(),
                     body: "Pull first to combine them with yours. Or force push to replace \
                            the remote branch with yours; Graft uses --force-with-lease, so it \
@@ -241,13 +241,15 @@ mod tests {
         git(&a, &["commit", "-q", "--amend", "-m", "rewritten"]);
         project.apply(Action::Remote(RemoteOp::Push));
         project.apply(Action::OpenWorktree(b.clone()));
-        wait(&mut project, "no force push offer", |p| p.confirm.is_some());
-        let action = project.confirm.take().unwrap().action;
-        let Action::Remote(RemoteOp::ForcePush { worktree }) = &action else {
+        wait(&mut project, "no force push offer", |p| {
+            p.confirm().is_some()
+        });
+        let action = &project.confirm().unwrap().action;
+        let Action::Remote(RemoteOp::ForcePush { worktree }) = action else {
             panic!("{action:?}");
         };
         assert!(same_path(worktree, &a));
-        project.apply(action);
+        project.apply(Action::ConfirmYes);
         wait(&mut project, "the force push never ended", |p| {
             !p.is_operating()
         });
