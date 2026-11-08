@@ -3,7 +3,7 @@
 
 use graft_core::refs::{self, RefKind, ResetMode, check_ref_name};
 use graft_core::refusal::{NOT_MERGED, blocked_by_changes, blocked_by_untracked, files_in_the_way};
-use graft_core::{Git, Oid, conflicts, remote, stash};
+use graft_core::{Git, Oid, Worktree, conflicts, remote, stash};
 
 use super::conflicts::{after_conflicts, merge_messages};
 use super::ops::{At, say};
@@ -75,6 +75,15 @@ impl DialogKind {
             start: start.into(),
             start_label: start_label.into(),
             checkout: true,
+        }
+    }
+
+    /// A new branch at `wt`'s HEAD: its branch, or its commit when detached.
+    pub fn new_branch_at(wt: &Worktree) -> Self {
+        match (&wt.branch, wt.head) {
+            (Some(branch), _) => Self::new_branch(branch, branch),
+            (None, Some(id)) => Self::new_branch(id.to_string(), graft_core::short(&id)),
+            (None, None) => Self::new_branch("HEAD", "HEAD"),
         }
     }
 

@@ -7,6 +7,7 @@ use graft_core::paths::same_path;
 use graft_core::{Branch, RemoteBranch, RepoSnapshot, Upstream, Worktree, paths, remote};
 
 use super::branch_menu::{self, checkout_color, menu_item};
+use super::can;
 use super::icons::Icon;
 use super::widgets::{
     self, Badge, ICON_SIZE, elided, elided_path, paint_badges_right, paint_galley_left, paint_icon,
@@ -44,7 +45,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
             if nav_row(
                 ui,
                 Icon::FileStatus,
-                "File status",
+                WorkspaceView::FileStatus.label(),
                 status_selected,
                 dirty_badge,
             )
@@ -53,7 +54,8 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
                 actions.push(Action::ShowFileStatus);
             }
             let history_selected = in_workspace && nav.view == WorkspaceView::History;
-            if nav_row(ui, Icon::History, "History", history_selected, None).clicked() {
+            let history = WorkspaceView::History.label();
+            if nav_row(ui, Icon::History, history, history_selected, None).clicked() {
                 actions.push(Action::ShowHistory);
             }
             ui.add_space(SECTION_GAP);
@@ -470,7 +472,7 @@ fn branch_menu(
     let is_head = head == Some(name);
     branch_menu::local_items(ui, project, repo, name, false, actions);
     if !is_head {
-        merge_items(ui, project, name, true, actions);
+        merge_items(ui, project, name, actions);
     }
     menu_item(
         ui,
@@ -524,12 +526,14 @@ fn branch_menu(
 
 /// "Merge X into current…" and "Rebase current onto X…", for the selected
 /// worktree's branch.
-fn merge_items(ui: &mut Ui, project: &Project, name: &str, rebase: bool, actions: &mut Actions) {
+fn merge_items(ui: &mut Ui, project: &Project, name: &str, actions: &mut Actions) {
     let Some(wt) = project.worktree() else { return };
     let Some(current) = wt.branch.as_deref() else {
         return;
     };
-    let enabled = !project.is_operating() && wt.in_progress.is_none();
+    let enabled = can::merge(project.snapshot.as_deref(), Some(wt))
+        .unless(project.can_act().err())
+        .ok;
     if let Some(kind) = merge_dialog(project, Some(name)) {
         menu_item(
             ui,
@@ -539,25 +543,23 @@ fn merge_items(ui: &mut Ui, project: &Project, name: &str, rebase: bool, actions
             Action::OpenDialog(kind),
         );
     }
-    if rebase {
-        menu_item(
-            ui,
-            &format!("Rebase {current} onto {name}…"),
-            enabled,
-            actions,
-            Action::Ask(Box::new(Confirm {
-                title: format!("Rebase {current} onto {name}?"),
-                body: format!(
-                    "Replays the commits of {current} on top of {name}, one by one. \
-                     This rewrites them: if {current} was pushed already, you will have \
-                     to force push. If a commit conflicts, the rebase stops so you can \
-                     resolve it."
-                ),
-                confirm_label: "Rebase".to_owned(),
-                action: Action::Rebase(name.to_owned()),
-            })),
-        );
-    }
+    menu_item(
+        ui,
+        &format!("Rebase {current} onto {name}…"),
+        enabled,
+        actions,
+        Action::Ask(Box::new(Confirm {
+            title: format!("Rebase {current} onto {name}?"),
+            body: format!(
+                "Replays the commits of {current} on top of {name}, one by one. \
+                 This rewrites them: if {current} was pushed already, you will have \
+                 to force push. If a commit conflicts, the rebase stops so you can \
+                 resolve it."
+            ),
+            confirm_label: "Rebase".to_owned(),
+            action: Action::Rebase(name.to_owned()),
+        })),
+    );
     ui.separator();
 }
 
@@ -569,18 +571,19 @@ fn remote_branch_menu(
     busy: bool,
     actions: &mut Actions,
 ) {
-    merge_items(ui, project, &branch.name, true, actions);
+    merge_items(ui, project, &branch.name, actions);
     let local = branch.branch_name();
-    match repo.branch(local) {
-        Some(_) if repo.worktree_for_branch(local).is_none() => menu_item(
+    // With a local branch of its name, that is what gets checked out.
+    if !branch_menu::tracking_items(ui, project, repo, branch, false, actions)
+        && repo.worktree_for_branch(local).is_none()
+    {
+        menu_item(
             ui,
             &format!("Check out {local}{}", project.in_main_suffix()),
             !busy,
             actions,
             Action::Checkout(local.to_owned()),
-        ),
-        Some(_) => {}
-        None => branch_menu::tracking_items(ui, project, branch, false, actions),
+        );
     }
     menu_item(
         ui,

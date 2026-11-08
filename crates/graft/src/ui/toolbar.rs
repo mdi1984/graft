@@ -18,8 +18,6 @@ use crate::ui::Actions;
 /// Below this width, buttons with an icon drop their label.
 const COMPACT_WIDTH: f32 = 1120.0;
 
-const FINISH_FIRST: &str = "Finish or abort what is in progress first";
-
 pub fn show(
     ui: &mut Ui,
     projects: &[Project],
@@ -115,17 +113,9 @@ pub fn show(
             .clicked()
             && let Some(wt) = wt
         {
-            let (start, start_label) = match (&wt.branch, wt.head) {
-                (Some(b), _) => (b.clone(), b.clone()),
-                (None, Some(id)) => (id.to_string(), graft_core::short(&id)),
-                (None, None) => ("HEAD".to_owned(), "HEAD".to_owned()),
-            };
-            actions.push(Action::OpenDialog(DialogKind::new_branch(
-                start,
-                start_label,
-            )));
+            actions.push(Action::OpenDialog(DialogKind::new_branch_at(wt)));
         }
-        let can = can_merge(snap, wt).unless(blocked);
+        let can = can::merge(snap, wt).unless(blocked);
         if tool_button(
             ui,
             Some(Icon::Merge),
@@ -229,7 +219,7 @@ fn branch_upstream<'a>(
         return Err(no("Select a worktree first"));
     };
     if wt.in_progress.is_some() {
-        return Err(no(FINISH_FIRST));
+        return Err(no(can::FINISH_FIRST));
     }
     let branch = wt
         .branch
@@ -274,25 +264,5 @@ fn can_push(snap: Option<&RepoSnapshot>, wt: Option<&Worktree>) -> Can {
             "Push {branch} again ({name} was deleted on the remote)"
         )),
         (Ok(_), _) => yes(format!("Publish {branch} and track it")),
-    }
-}
-
-fn can_merge(snap: Option<&RepoSnapshot>, wt: Option<&Worktree>) -> Can {
-    let Some(wt) = wt else {
-        return no("Select a worktree first");
-    };
-    let Some(branch) = wt.branch.as_deref() else {
-        return no("Check out a branch to merge into");
-    };
-    if wt.in_progress.is_some() {
-        return no(FINISH_FIRST);
-    }
-    let other = snap.is_some_and(|s| {
-        s.branches.iter().any(|b| b.name != branch) || !s.remote_branches.is_empty()
-    });
-    if other {
-        yes(format!("Merge another branch into {branch}"))
-    } else {
-        no("There is no other branch to merge")
     }
 }

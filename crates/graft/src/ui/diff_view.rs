@@ -22,7 +22,8 @@ use graft_core::syntax::{Spans, Token};
 use super::file_row::paint_change_letter;
 use super::icons::Icon;
 use super::widgets::{
-    ButtonKind, button, elided_path, empty_state, icon_button, paint_galley_left, waiting,
+    ButtonKind, button, elided_path, empty_state, icon_button, paint_check, paint_galley_left,
+    waiting,
 };
 use crate::keys::Command;
 use crate::project::comments::{LineComment, Pick, Placed, Side};
@@ -1177,24 +1178,7 @@ fn paint_line(
     // Selection box in the gutter.
     if line.is_change() && selectable && first {
         let b = Rect::from_center_size(pos2(rect.left() + GUTTER / 2.0, y), vec2(12.0, 12.0));
-        if selected {
-            painter.rect_filled(b, 3, color::accent());
-            painter.line(
-                vec![
-                    pos2(b.left() + 2.5, y),
-                    pos2(b.left() + 5.0, y + 2.5),
-                    pos2(b.right() - 2.5, y - 2.5),
-                ],
-                Stroke::new(1.6, color::on_accent()),
-            );
-        } else {
-            let border = if ui.rect_contains_pointer(rect) {
-                color::text_weak()
-            } else {
-                color::control_border()
-            };
-            painter.rect_stroke(b, 3, Stroke::new(1.0, border), StrokeKind::Inside);
-        }
+        paint_check(&painter, b, selected, ui.rect_contains_pointer(rect));
     }
 
     let num = |n: Option<u32>, right: f32| {

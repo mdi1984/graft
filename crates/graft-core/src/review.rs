@@ -2,6 +2,7 @@
 //! base branch, including uncommitted and untracked files. That is what a pull
 //! request would show, plus the work that is not committed yet.
 
+use std::collections::HashSet;
 use std::io::Read;
 
 use anyhow::{Context, Result};
@@ -16,6 +17,9 @@ use crate::remote::ORIGIN;
 pub struct ReviewFile {
     pub change: FileChange,
     pub untracked: bool,
+    /// Its worktree version is not committed: changed since HEAD (staged
+    /// or not), or untracked.
+    pub uncommitted: bool,
     /// Hash of the file's current content (empty when deleted). A "Viewed"
     /// mark is tied to it, so it goes away when the file changes again.
     pub content: String,
@@ -72,9 +76,19 @@ pub fn load(git: &Git, base: &str) -> Result<Review> {
     let merge_base = merge_base.trim().to_owned();
     // The rest runs side by side: each git start costs tens of milliseconds
     // on Windows.
-    let (commits, changes, untracked) = std::thread::scope(|s| {
+    let (commits, changes, untracked, uncommitted) = std::thread::scope(|s| {
         let range = format!("{merge_base}..HEAD");
         let commits = s.spawn(move || git.read(["rev-list", "--count", &range]));
+        let uncommitted = s.spawn(|| {
+            git.run([
+                "-c",
+                "core.quotepath=false",
+                "diff",
+                "--name-only",
+                "-z",
+                "HEAD",
+            ])
+        });
         let untracked = s.spawn(|| {
             git.run([
                 "-c",
@@ -90,12 +104,20 @@ pub fn load(git: &Git, base: &str) -> Result<Review> {
             commits.join().expect("rev-list thread"),
             changes,
             untracked.join().expect("ls-files thread"),
+            uncommitted.join().expect("diff thread"),
         )
     });
     let commits = commits?.trim().parse().unwrap_or(0);
+    let uncommitted = uncommitted?;
+    let uncommitted: HashSet<&[u8]> = uncommitted
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .collect();
     let mut files: Vec<ReviewFile> = changes?
         .into_iter()
         .map(|change| ReviewFile {
+            uncommitted: uncommitted.contains(change.path.as_bytes()),
             change,
             untracked: false,
             content: String::new(),
@@ -128,6 +150,7 @@ pub fn load(git: &Git, base: &str) -> Result<Review> {
                 removed: counted.then_some(0),
             },
             untracked: true,
+            uncommitted: true,
             content: String::new(),
         });
     }

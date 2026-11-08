@@ -168,6 +168,32 @@ pub fn section_heading(ui: &Ui, painter: &Painter, x: f32, y: f32, title: &str) 
     paint_galley_left(painter, x, y, galley);
 }
 
+/// A checkbox square: accent-filled with a tick when `checked`, else an
+/// outline that darkens on hover.
+pub fn paint_check(painter: &Painter, rect: Rect, checked: bool, hovered: bool) {
+    if checked {
+        painter.rect_filled(rect, 3, color::accent());
+        // The tick scales with the box: 12 px gets a 2.5 px inset.
+        let inset = rect.width() * 0.21;
+        let y = rect.center().y;
+        painter.line(
+            vec![
+                pos2(rect.left() + inset, y),
+                pos2(rect.left() + 2.0 * inset, y + inset),
+                pos2(rect.right() - inset, y - inset),
+            ],
+            Stroke::new(1.6, color::on_accent()),
+        );
+    } else {
+        let border = if hovered {
+            color::text_weak()
+        } else {
+            color::control_border()
+        };
+        painter.rect_stroke(rect, 3, Stroke::new(1.0, border), StrokeKind::Inside);
+    }
+}
+
 /// Row background: selected, hovered, or nothing.
 pub fn paint_row_bg(painter: &Painter, rect: Rect, response: &Response, selected: bool) {
     let fill = if selected {

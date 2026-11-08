@@ -7,7 +7,7 @@ use graft_core::{Worktree, paths};
 use super::widgets::{
     ButtonKind, button, elided_path, error_label, loading, paint_galley_left, title,
 };
-use super::{conflicts, file_history, file_status, history, review, stashes};
+use super::{can, conflicts, file_history, file_status, history, review, stashes};
 use crate::project::{Action, Project, Tab, WorkspaceView};
 use crate::theme::{self, color};
 use crate::ui::{Actions, AppAction};
@@ -22,19 +22,19 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
     preview_banner(ui, project, actions);
     match project.nav.tab {
         Tab::Workspace => match project.nav.view {
-            WorkspaceView::FileStatus => {
-                header(ui, "File status", worktree);
+            view @ WorkspaceView::FileStatus => {
+                header(ui, view.label(), worktree);
                 if let Some(wt) = worktree {
                     conflicts::banner(ui, project, wt, actions);
                 }
                 file_status::show(ui, project, actions);
             }
-            WorkspaceView::FileHistory => {
-                header(ui, "File history", worktree);
+            view @ WorkspaceView::FileHistory => {
+                header(ui, view.label(), worktree);
                 file_history::show(ui, project, actions);
             }
-            WorkspaceView::History => {
-                header(ui, "History", worktree);
+            view @ WorkspaceView::History => {
+                header(ui, view.label(), worktree);
                 if let Some(wt) = worktree {
                     conflicts::banner(ui, project, wt, actions);
                 }
@@ -92,11 +92,16 @@ fn preview_banner(ui: &mut Ui, project: &Project, actions: &mut Actions) {
                     {
                         actions.push(Action::RestoreMain);
                     }
-                    if button(ui, "Update", ButtonKind::Secondary, !busy && source.is_some())
-                        .on_hover_text(format!("Show the current state of {name} again"))
+                    let (can, update) = match source {
+                        Some(wt) => can::preview(snap, Some(wt)),
+                        None => (can::no("The previewed worktree is gone"), None),
+                    };
+                    if button(ui, "Update", ButtonKind::Secondary, can.ok && !busy)
+                        .on_hover_text(can.hint)
                         .clicked()
+                        && let Some(update) = update
                     {
-                        actions.push(Action::UpdatePreview);
+                        actions.push(update);
                     }
                 });
             });

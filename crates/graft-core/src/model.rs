@@ -50,6 +50,16 @@ impl RepoSnapshot {
             .find(|wt| wt.branch.as_deref() == Some(branch))
     }
 
+    /// What can be merged into the branch `into`: the other local branches,
+    /// then the remote branches.
+    pub fn merge_choices<'a>(&'a self, into: &'a str) -> impl Iterator<Item = &'a str> {
+        self.branches
+            .iter()
+            .map(|b| b.name.as_str())
+            .filter(move |name| *name != into)
+            .chain(self.remote_branches.iter().map(|b| b.name.as_str()))
+    }
+
     /// Local branches that could be the default branch, best first:
     /// origin/HEAD's target, then [`DEFAULT_BRANCHES`].
     pub(crate) fn default_branches(&self) -> impl Iterator<Item = &str> {

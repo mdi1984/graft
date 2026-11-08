@@ -79,6 +79,16 @@ pub enum WorkspaceView {
     FileHistory,
 }
 
+impl WorkspaceView {
+    pub fn label(self) -> &'static str {
+        match self {
+            WorkspaceView::FileStatus => "File status",
+            WorkspaceView::History => "History",
+            WorkspaceView::FileHistory => "File history",
+        }
+    }
+}
+
 /// Where the user is inside a project.
 #[derive(Clone, Debug)]
 pub struct Nav {

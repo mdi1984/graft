@@ -4,10 +4,9 @@
 //! for a coding agent in one go), Open in IDE and Merge.
 
 use egui::{
-    Align, Frame, Key, Layout, Margin, Panel, Rect, RichText, ScrollArea, Sense, Stroke,
-    StrokeKind, TextEdit, Ui, pos2, vec2,
+    Align, Frame, Key, Layout, Margin, Panel, Rect, RichText, ScrollArea, Sense, TextEdit, Ui,
+    pos2, vec2,
 };
-use graft_core::paths::same_path;
 use graft_core::review::{Review, ReviewFile};
 use graft_core::{Change, RepoSnapshot, Worktree};
 
@@ -15,7 +14,8 @@ use super::can;
 use super::diff_view::{self, Marks};
 use super::file_row;
 use super::widgets::{
-    Badge, ButtonKind, ahead, button, empty_state, paint_galley_left, progress_bar, waiting,
+    Badge, ButtonKind, ahead, button, empty_state, paint_check, paint_galley_left, progress_bar,
+    waiting,
 };
 use crate::keys::Command;
 use crate::project::comments::{self, LineComment};
@@ -74,11 +74,6 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
         return;
     }
 
-    let uncommitted: Vec<&str> = wt
-        .status
-        .as_ref()
-        .map(|s| s.entries.iter().map(|e| e.path.as_str()).collect())
-        .unwrap_or_default();
     Panel::left("review-files")
         .resizable(true)
         .default_size(340.0)
@@ -90,7 +85,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
         )
         .show(ui, |ui| {
             comments_bar(ui, project, wt, &review, actions);
-            file_list(ui, project, &review, &uncommitted, actions)
+            file_list(ui, project, &review, actions)
         });
 
     let selected = project.review.as_ref().and_then(|v| v.selected.clone());
@@ -306,35 +301,11 @@ fn merge_button(
     actions: &mut Actions,
 ) {
     let base = review.base.as_str();
-    let target = snap.worktree_for_branch(base);
-    let (enabled, hint) = match (&wt.branch, target) {
-        (None, _) => (false, "Check out a branch to merge it".to_owned()),
-        _ if review.commits == 0 => (
-            false,
-            "No commits to merge yet; uncommitted changes are not merged".to_owned(),
-        ),
-        (Some(_), None) => (
-            false,
-            format!("{base} is not checked out in any worktree; check it out to merge into it"),
-        ),
-        (Some(_), Some(t)) if same_path(&t.path, &wt.path) => {
-            (false, "This worktree is the base itself".to_owned())
-        }
-        (Some(_), Some(t)) if t.in_progress.is_some() => {
-            (false, format!("{base} has a merge or rebase in progress"))
-        }
-        (Some(branch), Some(t)) => (
-            !busy,
-            format!(
-                "Run git merge {branch} in {}",
-                graft_core::paths::folder_name(&t.path)
-            ),
-        ),
-    };
+    let (can, target) = can::merge_reviewed(snap, wt, review);
     let label = format!("Merge into {base}…");
-    if button(ui, &label, ButtonKind::Primary, enabled)
-        .on_hover_text(&hint)
-        .on_disabled_hover_text(&hint)
+    if button(ui, &label, ButtonKind::Primary, can.ok && !busy)
+        .on_hover_text(&can.hint)
+        .on_disabled_hover_text(&can.hint)
         .clicked()
         && let (Some(branch), Some(t)) = (&wt.branch, target)
     {
@@ -363,13 +334,7 @@ fn merge_button(
     }
 }
 
-fn file_list(
-    ui: &mut Ui,
-    project: &Project,
-    review: &Review,
-    uncommitted: &[&str],
-    actions: &mut Actions,
-) {
+fn file_list(ui: &mut Ui, project: &Project, review: &Review, actions: &mut Actions) {
     let selected = project.review.as_ref().and_then(|v| v.selected.as_deref());
     ui.label(
         RichText::new(format!("FILES  {}", review.files.len()))
@@ -394,11 +359,11 @@ fn file_list(
                     ui.scope_id().with(("viewed", path)),
                     Sense::click(),
                 );
-                paint_check(ui, check, viewed, check_response.hovered());
+                paint_check(ui.painter(), check, viewed, check_response.hovered());
 
                 let note = if file.untracked {
                     Some("untracked")
-                } else if uncommitted.contains(&path.as_str()) {
+                } else if file.uncommitted {
                     Some("uncommitted")
                 } else {
                     None
@@ -450,29 +415,6 @@ fn file_list(
                 response.on_hover_text(file_row::tip(path, file.change.orig_path.as_deref()));
             }
         });
-}
-
-fn paint_check(ui: &Ui, rect: Rect, checked: bool, hovered: bool) {
-    let painter = ui.painter();
-    if checked {
-        painter.rect_filled(rect, 3, color::accent());
-        let y = rect.center().y;
-        painter.line(
-            vec![
-                pos2(rect.left() + 3.0, y),
-                pos2(rect.left() + 6.0, y + 3.0),
-                pos2(rect.right() - 3.0, y - 3.0),
-            ],
-            Stroke::new(1.6, color::on_accent()),
-        );
-    } else {
-        let stroke = if hovered {
-            color::text_weak()
-        } else {
-            color::control_border()
-        };
-        painter.rect_stroke(rect, 3, Stroke::new(1.0, stroke), StrokeKind::Inside);
-    }
 }
 
 fn file_header(

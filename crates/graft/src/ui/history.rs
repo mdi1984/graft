@@ -514,15 +514,14 @@ fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Ac
             .iter()
             .filter(|r| r.target == commit.id)
         {
-            // A local branch of that name is offered above, or points
-            // elsewhere; origin/HEAD is no branch to check out.
+            // Two remotes can have a branch of the same name: offer one.
             let local = r.branch_name();
-            if local == "HEAD" || repo.branch(local).is_some() || tracked.contains(&local) {
-                continue;
+            if !tracked.contains(&local)
+                && branch_menu::tracking_items(ui, project, repo, r, true, actions)
+            {
+                tracked.push(local);
+                offered = true;
             }
-            tracked.push(local);
-            branch_menu::tracking_items(ui, project, r, true, actions);
-            offered = true;
         }
         if offered {
             ui.separator();
