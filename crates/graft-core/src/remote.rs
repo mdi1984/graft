@@ -106,6 +106,8 @@ pub fn push(git: &Git, cancel: &CancelToken, on_progress: impl FnMut(Progress)) 
 /// Push the current branch over a diverged upstream, but only if the upstream
 /// is still where we last saw it and its commits were once in our branch:
 /// someone else's commits are never lost, even after a background fetch.
+/// (The second check needs git's log of the upstream, which a fresh clone
+/// lacks; until a fetch or push writes one, only the first applies.)
 pub fn force_push(
     git: &Git,
     cancel: &CancelToken,
@@ -115,16 +117,25 @@ pub fn force_push(
     if upstream(git)? == Upstream::None {
         return push(git, cancel, on_progress);
     }
-    git.run_progress(
-        &[
-            "push",
-            "--progress",
-            "--force-with-lease",
-            "--force-if-includes",
-        ],
-        cancel,
-        on_progress,
-    )
+    let mut args = vec!["push", "--progress", "--force-with-lease"];
+    // It reads the remote-tracking branch's reflog and refuses every push
+    // without one (a fresh clone, core.logAllRefUpdates=false).
+    if push_target_has_reflog(git)? {
+        args.push("--force-if-includes");
+    }
+    git.run_progress(&args, cancel, on_progress)
+}
+
+/// Whether the remote-tracking branch a push of the current branch updates
+/// has a reflog.
+fn push_target_has_reflog(git: &Git) -> Result<bool> {
+    let out = git.run_raw(["rev-parse", "--symbolic-full-name", "@{push}"])?;
+    let target = out.stdout_str().trim().to_owned();
+    if !out.success() || target.is_empty() {
+        return Ok(false);
+    }
+    let exists = git.run_expecting(["reflog", "exists", &target], None, |o| o.status <= 1)?;
+    Ok(exists.success())
 }
 
 /// Delete a branch on its remote.

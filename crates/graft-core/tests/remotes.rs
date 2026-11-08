@@ -3,7 +3,7 @@
 mod common;
 
 use common::sh;
-use graft_core::{remote, snapshot};
+use graft_core::{CancelToken, remote, snapshot};
 
 #[test]
 fn add_edit_and_remove() {
@@ -104,4 +104,23 @@ fn urls_show_as_configured() {
         (backup.url.as_str(), backup.push_only),
         ("E:/backup.git", true)
     );
+}
+
+/// `git clone` writes no reflog for the remote-tracking branches, which
+/// --force-if-includes needs: a rewritten branch of a fresh clone still
+/// force pushes.
+#[test]
+fn force_push_from_a_fresh_clone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let server = common::init_bare(&tmp.path().join("server.git"));
+    let dir = common::init(&tmp.path().join("app"));
+    common::commit(&dir, "a.txt", "a\n", "a");
+    sh(&dir, &["push", "-q", server.to_str().unwrap(), "main:x"]);
+
+    let clone = common::clone(&server, &tmp.path().join("clone"));
+    sh(&clone, &["switch", "-q", "x"]);
+    sh(&clone, &["commit", "-q", "--amend", "-m", "rewritten"]);
+    let git = common::git(&clone);
+    remote::force_push(&git, &CancelToken::default(), |_| {}).unwrap();
+    assert_eq!(common::rev(&server, "x"), common::rev(&clone, "HEAD"));
 }
