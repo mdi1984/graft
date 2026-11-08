@@ -197,15 +197,17 @@ pub enum Action {
     OpenDialog(DialogKind),
     CloseDialog,
     SubmitDialog,
-    /// Switch the selected worktree to a local branch.
+    // The checkouts below always run in the main folder, never in a linked
+    // worktree (see `Project::checkout`).
+    /// Switch main to a local branch.
     Checkout(String),
-    /// Stash the selected worktree's changes, then switch to the branch.
+    /// Stash main's changes, then switch it to the branch.
     StashAndCheckout {
         branch: String,
         /// Also stash untracked files (they were in the way).
         untracked: bool,
     },
-    /// Create `local` tracking `remote` (e.g. origin/x) and switch to it.
+    /// Create `local` tracking `remote` (e.g. origin/x) and switch main to it.
     CheckoutRemote {
         local: String,
         remote: String,
@@ -273,8 +275,6 @@ pub enum Action {
         path: String,
         text: String,
     },
-    /// Merge the reviewed branch into its base, in the worktree that has the
-    /// base checked out.
     /// Merge `branch` into `into` (checked out in `worktree`) if it is
     /// still at the reviewed `head`.
     MergeReviewed {
