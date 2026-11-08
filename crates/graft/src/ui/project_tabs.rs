@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use egui::{
-    Area, Color32, CornerRadius, Frame, Galley, Key, Margin, Modifiers, Order, Rect, Response,
+    Area, Color32, CornerRadius, Frame, Galley, Id, Key, Margin, Modifiers, Order, Rect, Response,
     RichText, ScrollArea, Sense, Stroke, Ui, UiBuilder, pos2, vec2,
 };
 
@@ -39,11 +39,15 @@ const LIST_WIDTH: f32 = 380.0;
 const ROW_HEIGHT: f32 = 40.0;
 const LABEL_PAD: f32 = 10.0;
 const LABEL_MAX_WIDTH: f32 = 180.0;
+/// Between the app icon and the tabs.
+const ICON_GAP: f32 = 9.0;
+/// Between the tabs and "+", and after the last button.
+const BUTTON_GAP: f32 = 3.0;
 
 pub struct TabInfo {
     pub name: String,
-    /// The repository's folder.
-    pub tooltip: String,
+    /// The repository's folder, as shown.
+    pub path: String,
     pub dirty: bool,
     pub busy: bool,
     pub error: bool,
@@ -128,13 +132,18 @@ pub fn show(
             color::on_accent(),
         )
     });
-    let update_width = update_label
-        .as_ref()
-        .map_or(0.0, |g| g.size().x + 20.0 + 8.0);
     let gear = Rect::from_center_size(
         pos2(full.right() - window_frame::BUTTONS_WIDTH - 22.0, mid),
         vec2(BUTTON, BUTTON),
     );
+    // "Update to 1.2.3" left of the settings button.
+    let pill = update_label.as_ref().map(|galley| {
+        let width = galley.size().x + 20.0;
+        Rect::from_min_size(
+            pos2(gear.left() - 8.0 - width, top + (TAB_HEIGHT - 22.0) / 2.0),
+            vec2(width, 22.0),
+        )
+    });
 
     let group_info = |id: GroupId| tab_groups.iter().find(|g| g.id == id);
     let collapsed = |id: GroupId| group_info(id).is_some_and(|g| g.collapsed);
@@ -150,13 +159,15 @@ pub fn show(
             Item::Tab(_) => None,
         })
         .collect();
-    let left = full.left() + 40.0;
+    let left = icon.right() + ICON_GAP;
+    // "+", and "All tabs" when there are tabs.
     let buttons = if tabs.is_empty() {
-        32.0
+        BUTTON_GAP + BUTTON + BUTTON_GAP
     } else {
-        32.0 + BUTTON + 4.0
+        BUTTON_GAP + BUTTON + 4.0 + BUTTON + BUTTON_GAP
     };
-    let room = (gear.left() - 8.0 - update_width - left - buttons).max(MIN_WIDTH);
+    let right = pill.map_or(gear.left(), |p| p.left()) - 8.0;
+    let room = (right - left - buttons).max(MIN_WIDTH);
     let tab_count =
         items.iter().filter(|i| matches!(i, Item::Tab(_))).count() + usize::from(active.is_none());
     let labels_width: f32 = labels.iter().flatten().map(|l| l.width + GAP).sum();
@@ -234,10 +245,10 @@ pub fn show(
         rects.push(rect);
         // Keyed by folder, not position: a drag must stay with its tab
         // when a reorder moves it.
-        let id = tab_ui.scope_id().with(("project-tab", &tab.tooltip));
+        let id = tab_ui.scope_id().with(("project-tab", &tab.path));
         let response = tab_ui
             .interact(rect, id, Sense::click_and_drag())
-            .on_hover_text(&tab.tooltip);
+            .on_hover_text(&tab.path);
         let close_rect = close_rect(rect);
         let close = tab_ui.interact(close_rect, id.with("close"), Sense::click());
         let selected = active == Some(i);
@@ -319,14 +330,20 @@ pub fn show(
                 group: next.group,
             });
         }
-        // Dragging to an end of a scrolling strip scrolls it along.
+        // Dragging to an end of a scrolling strip scrolls it along, also
+        // while the pointer rests there.
         if overflow {
-            if pointer.x < view.left() + ARROW {
-                offset -= 8.0;
+            let nudge = if pointer.x < view.left() + ARROW {
+                -8.0
             } else if pointer.x > view.right() - ARROW {
-                offset += 8.0;
+                8.0
+            } else {
+                0.0
+            };
+            if nudge != 0.0 {
+                offset += nudge;
+                ui.ctx().request_repaint();
             }
-            ui.ctx().request_repaint();
         }
     } else {
         ui.data_mut(|d| d.remove::<f32>(hold_id));
@@ -375,7 +392,10 @@ pub fn show(
     }
     ui.data_mut(|d| d.insert_temp(scroll_id, offset.clamp(0.0, max_offset)));
 
-    let plus = Rect::from_center_size(pos2(view.right() + 16.0, mid), vec2(BUTTON, BUTTON));
+    let plus = Rect::from_min_size(
+        pos2(view.right() + BUTTON_GAP, mid - BUTTON / 2.0),
+        vec2(BUTTON, BUTTON),
+    );
     let response = ui
         .interact(plus, ui.scope_id().with("new-tab"), Sense::click())
         .on_hover_text(keys.tip("Open a repository", Command::NewTab));
@@ -389,7 +409,7 @@ pub fn show(
             vec2(BUTTON, BUTTON),
         );
         let response = ui
-            .interact(rect, ui.scope_id().with("all-tabs"), Sense::click())
+            .interact(rect, all_tabs_id(ui), Sense::click())
             .on_hover_text(keys.tip("All tabs", Command::AllTabs));
         paint_icon_button(ui, rect, &response, Icon::ChevronDown);
         let toggle = response.clicked() || keys.pressed(ui.ctx(), Command::AllTabs);
@@ -398,8 +418,7 @@ pub fn show(
         }
     } else {
         // No tabs, no list: it must not pop up again with the next one.
-        let open_id = ui.scope_id().with("all-tabs").with("list").with("open");
-        ui.data_mut(|d| d.insert_temp(open_id, false));
+        close_all_tabs(ui);
     }
 
     let response = ui
@@ -409,11 +428,7 @@ pub fn show(
     if response.clicked() {
         action = Some(TabAction::OpenSettings);
     }
-    if let Some(galley) = update_label {
-        let pill = Rect::from_min_size(
-            pos2(gear.left() - update_width, top + (TAB_HEIGHT - 22.0) / 2.0),
-            vec2(update_width - 8.0, 22.0),
-        );
+    if let (Some(galley), Some(pill)) = (update_label, pill) {
         let response = ui
             .interact(pill, ui.scope_id().with("update"), Sense::click())
             .on_hover_text("A new version of Graft is ready to install");
@@ -471,6 +486,20 @@ fn arrow(ui: &Ui, view: Rect, right: bool) -> Response {
     response
 }
 
+/// The "All tabs" button; its list keeps its state under this id.
+fn all_tabs_id(ui: &Ui) -> Id {
+    ui.scope_id().with("all-tabs")
+}
+
+/// Where the list under the button `button` keeps whether it is open.
+fn list_open_id(button: Id) -> Id {
+    button.with("list").with("open")
+}
+
+fn close_all_tabs(ui: &Ui) {
+    ui.data_mut(|d| d.insert_temp(list_open_id(all_tabs_id(ui)), false));
+}
+
 /// The "All tabs" list under its button: every open repository, filtered by
 /// name, folder or group as you type. Returns the tab picked.
 fn all_tabs(
@@ -486,7 +515,7 @@ fn all_tabs(
             .and_then(|id| tab_groups.iter().find(|g| g.id == id))
     };
     let id = button.id.with("list");
-    let open_id = id.with("open");
+    let open_id = list_open_id(button.id);
     let filter_id = id.with("filter");
     let selected_id = id.with("selected");
     let mut open: bool = ui.data(|d| d.get_temp(open_id)).unwrap_or(false);
@@ -542,7 +571,7 @@ fn all_tabs(
                         .filter(|&i| {
                             needle.is_empty()
                                 || tabs[i].name.to_lowercase().contains(&needle)
-                                || tabs[i].tooltip.to_lowercase().contains(&needle)
+                                || tabs[i].path.to_lowercase().contains(&needle)
                                 || group_of(&tabs[i])
                                     .is_some_and(|g| g.name.to_lowercase().contains(&needle))
                         })
@@ -658,7 +687,7 @@ fn list_row(
     paint_galley_left(painter, text_x, top_y, name);
     let path = elided_path(
         ui,
-        &tab.tooltip,
+        &tab.path,
         theme::small(),
         color::text_weak(),
         rect.right() - 10.0 - left,
