@@ -151,6 +151,8 @@ fn merge_takes_only_the_reviewed_commits() {
     let tmp = tempfile::tempdir().unwrap();
     let main = &common::init(&tmp.path().join("r"));
     common::commit(main, "a.txt", "a\n", "base");
+    // A tag named like the branch does not hide that main is checked out.
+    sh(main, &["tag", "main"]);
     let agent = tmp.path().join("agent");
     let agent_arg = agent.to_str().unwrap();
     sh(main, &["worktree", "add", "-q", "-b", "feature", agent_arg]);

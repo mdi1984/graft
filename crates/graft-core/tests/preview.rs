@@ -95,6 +95,21 @@ fn main_and_agent(tmp: &Path, gitignore: &str) -> (Git, PathBuf) {
     (git, agent)
 }
 
+/// Restore main goes back to main also when a tag is named main too.
+#[test]
+fn a_tag_named_like_the_branch_does_not_confuse_restore() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (git, agent) = main_and_agent(tmp.path(), "");
+    sh(git.cwd(), &["tag", "main"]);
+    std::fs::write(agent.join("new.txt"), "agent work\n").unwrap();
+
+    let shown = preview::start(&git, &git.at(&agent)).unwrap();
+    assert_eq!(shown.restore, Restore::Branch("main".into()));
+    preview::restore_main(&git).unwrap();
+    assert_eq!(sh(git.cwd(), &["symbolic-ref", "HEAD"]), "refs/heads/main");
+    assert_eq!(sh(git.cwd(), &["status", "--porcelain"]), "");
+}
+
 /// The marker lives in `.git`, where a repository's tooling can write: paths
 /// in it that point outside main are never deleted by Restore main.
 #[test]

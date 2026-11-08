@@ -297,13 +297,13 @@ impl Git {
         Ok(Some(id))
     }
 
-    /// The branch checked out here, or `None` for a detached HEAD.
+    /// The branch checked out here, or `None` for a detached HEAD. From the
+    /// full ref: `--short` says `heads/main` when a tag `main` exists too.
     pub(crate) fn current_branch(&self) -> Result<Option<String>> {
-        let out = self.run_accepting(["symbolic-ref", "-q", "--short", "HEAD"], None, |o| {
-            o.status <= 1
-        })?;
-        let branch = out.stdout_str().trim().to_owned();
-        Ok((out.success() && !branch.is_empty()).then_some(branch))
+        let out = self.run_accepting(["symbolic-ref", "-q", "HEAD"], None, |o| o.status <= 1)?;
+        let full = out.stdout_str();
+        let branch = full.trim().strip_prefix("refs/heads/").unwrap_or_default();
+        Ok((out.success() && !branch.is_empty()).then(|| branch.to_owned()))
     }
 
     /// Run a long git command that reports progress on stderr (clone, fetch,
