@@ -7,6 +7,7 @@ use std::ops::Range;
 
 use graft_core::diff::{self, FileDiff, Gap, Source};
 use graft_core::ops::{self, LineOp};
+use graft_core::paths::same_path;
 use graft_core::{EntryKind, FileList, Git, StatusEntry};
 
 use super::comments::{Pick, Side};
@@ -538,19 +539,24 @@ impl Project {
         let amend = self.commit_form.amend;
         let push = self.commit_form.push_after;
         let summary = self.commit_form.summary.trim().to_owned();
+        // The follow-ups belong to this worktree even if another is
+        // selected by the time the commit ends.
+        let worktree = self.nav.worktree.clone();
         self.run_op(
-            At::Selected,
+            At::Path(worktree.clone()),
             if amend { "Amending" } else { "Committing" },
             move |git| ops::commit(&git, &message, amend).map(|_| ()),
             move |p, result| match result {
                 Ok(()) => {
-                    p.commit_form = CommitForm {
-                        push_after: p.commit_form.push_after,
-                        ..CommitForm::default()
-                    };
+                    if same_path(&p.nav.worktree, &worktree) {
+                        p.commit_form = CommitForm {
+                            push_after: p.commit_form.push_after,
+                            ..CommitForm::default()
+                        };
+                    }
                     p.infos.push(format!("Committed: {summary}"));
                     if push {
-                        p.remote(RemoteOp::Push);
+                        p.remote_in(worktree, RemoteOp::Push);
                     }
                 }
                 Err(e) => p.report(e),
@@ -565,9 +571,15 @@ impl Project {
             form.before_amend = Some((form.summary.clone(), form.body.clone()));
             if form.summary.trim().is_empty() {
                 let git = self.wt_git();
+                let worktree = self.nav.worktree.clone();
                 self.jobs.spawn(
                     move || ops::last_commit_message(&git),
-                    |p, message| p.on_last_message(message),
+                    move |p, message| {
+                        // Another worktree's form has nothing to amend.
+                        if same_path(&p.nav.worktree, &worktree) {
+                            p.on_last_message(message);
+                        }
+                    },
                 );
             }
         } else if let Some((summary, body)) = form.before_amend.take() {

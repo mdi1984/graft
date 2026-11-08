@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use graft_core::Operation;
 use graft_core::conflicts::{self, ConflictFile, Resolution, Segment};
+use graft_core::paths::same_path;
 
 use super::ops::{At, say};
 use super::{DialogKind, Project, Tab, WorkspaceView, readable};
@@ -77,50 +78,62 @@ pub fn merge_dialog(project: &Project, rev: Option<&str>) -> Option<DialogKind> 
     })
 }
 
-/// Where conflicts are resolved when an operation ran outside the selected
-/// worktree.
-pub(super) struct Elsewhere {
+/// The worktree an operation runs in, captured when it starts: its ending
+/// acts there even if another worktree is selected by then.
+pub(super) struct RanIn {
     pub path: PathBuf,
-    /// How the message names it, e.g. its branch.
-    pub name: String,
+    /// How messages name it when it is not the selected one (e.g. its
+    /// branch); `None` when it was selected.
+    pub name: Option<String>,
 }
 
 /// The ending of a merge, rebase, cherry-pick, revert or continue (the job
 /// says whether it stopped with conflicts): say `done`, or say that `doing`
-/// ("Merging x") stopped and show the conflicts in File status, of the
-/// worktree `elsewhere` if it ran there.
+/// ("Merging x") stopped and show the conflicts in File status of the
+/// worktree it ran in.
 pub(super) fn after_conflicts(
     done: String,
     doing: String,
-    elsewhere: Option<Elsewhere>,
+    ran_in: RanIn,
 ) -> impl FnOnce(&mut Project, anyhow::Result<bool>) + Send {
-    let place = match &elsewhere {
-        Some(e) => format!("File status of {}", e.name),
+    let place = match &ran_in.name {
+        Some(name) => format!("File status of {name}"),
         None => "File status".to_owned(),
     };
     let stopped =
         format!("{doing} stopped with conflicts. Resolve them in {place}, then Continue.");
-    move |p, result| match result {
-        Ok(false) => {
-            p.infos.push(done);
-            // Show the new commit (and the worktree is usually clean now).
-            if p.nav.tab == Tab::Workspace {
-                p.nav.view = WorkspaceView::History;
+    move |p, result| {
+        let selected = same_path(&p.nav.worktree, &ran_in.path);
+        match result {
+            Ok(false) => {
+                p.infos.push(done);
+                // Show the new commit (and the worktree is usually clean now).
+                if selected && p.nav.tab == Tab::Workspace {
+                    p.nav.view = WorkspaceView::History;
+                }
             }
-        }
-        Ok(true) => {
-            p.infos.push(stopped);
-            p.nav.tab = Tab::Workspace;
-            if let Some(e) = elsewhere {
-                p.open_worktree(e.path);
+            Ok(true) => {
+                p.infos.push(stopped);
+                p.nav.tab = Tab::Workspace;
+                if !selected {
+                    p.open_worktree(ran_in.path);
+                }
+                p.nav.view = WorkspaceView::FileStatus;
             }
-            p.nav.view = WorkspaceView::FileStatus;
+            Err(e) => p.report(e),
         }
-        Err(e) => p.report(e),
     }
 }
 
 impl Project {
+    /// The selected worktree, as the place an operation starts in.
+    pub(super) fn here(&self) -> RanIn {
+        RanIn {
+            path: self.nav.worktree.clone(),
+            name: None,
+        }
+    }
+
     /// Whether `path` has conflicts in the selected worktree.
     pub fn is_conflicted(&self, path: &str) -> bool {
         self.worktree()
@@ -173,15 +186,15 @@ impl Project {
     pub(super) fn merge_reviewed(&mut self, worktree: PathBuf, branch: String, into: String) {
         let done = format!("Merged {branch} into {into}");
         let doing = format!("Merging {branch} into {into}");
-        let elsewhere = Elsewhere {
+        let ran_in = RanIn {
             path: worktree.clone(),
-            name: into,
+            name: Some(into),
         };
         self.run_op(
             At::Path(worktree),
             "Merging",
             move |git| conflicts::merge(&git, &branch, false),
-            after_conflicts(done, doing, Some(elsewhere)),
+            after_conflicts(done, doing, ran_in),
         );
     }
 
@@ -192,7 +205,7 @@ impl Project {
             At::Selected,
             "Rebasing",
             move |git| conflicts::rebase(&git, &onto),
-            after_conflicts(done, doing, None),
+            after_conflicts(done, doing, self.here()),
         );
     }
 
@@ -271,7 +284,7 @@ impl Project {
             At::Selected,
             &format!("Continuing {noun}"),
             move |git| conflicts::continue_op(&git, kind),
-            after_conflicts(done, doing, None),
+            after_conflicts(done, doing, self.here()),
         );
     }
 

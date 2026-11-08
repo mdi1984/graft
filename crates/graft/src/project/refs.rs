@@ -356,7 +356,7 @@ impl Project {
                     At::Selected,
                     "Merging",
                     move |git| graft_core::conflicts::merge(&git, &rev, no_ff),
-                    from_dialog(after_conflicts(done, doing, None)),
+                    from_dialog(after_conflicts(done, doing, self.here())),
                 )
             }
             DialogKind::Remote {
@@ -564,7 +564,7 @@ impl Project {
             At::Selected,
             "Cherry-picking",
             move |git| conflicts::cherry_pick(&git, &id.to_string()),
-            after_conflicts(done, doing, None),
+            after_conflicts(done, doing, self.here()),
         );
     }
 
@@ -576,7 +576,7 @@ impl Project {
             At::Selected,
             "Reverting",
             move |git| conflicts::revert(&git, &id.to_string()),
-            after_conflicts(done, doing, None),
+            after_conflicts(done, doing, self.here()),
         );
     }
 
