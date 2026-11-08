@@ -68,8 +68,8 @@ fn main() -> eframe::Result {
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Graft")
-            .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([960.0, 560.0])
+            .with_inner_size(app::WINDOW_SIZE)
+            .with_min_inner_size(app::MIN_WINDOW_SIZE)
             // Graft draws its own title bar (see ui::window_frame).
             .with_decorations(false)
             .with_icon(window_icon()),

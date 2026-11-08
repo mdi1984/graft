@@ -37,6 +37,9 @@ const STORAGE_KEY: &str = "graft";
 const MAX_RECENT: usize = 12;
 /// How soon a second close of the window quits although an operation runs.
 const CLOSE_AGAIN: Duration = Duration::from_secs(5);
+/// The window's size on a first start, and the smallest it can be made.
+pub const WINDOW_SIZE: egui::Vec2 = egui::vec2(1440.0, 900.0);
+pub const MIN_WINDOW_SIZE: egui::Vec2 = egui::vec2(960.0, 560.0);
 
 /// What Graft remembers between runs.
 #[derive(Serialize, Deserialize, Default)]
@@ -117,6 +120,8 @@ pub struct GraftApp {
     about_open: bool,
     /// An update is installed and the new Graft started: close this one.
     closing: bool,
+    /// The window's size was checked on start (see [`Self::fix_tiny_window`]).
+    window_checked: bool,
     /// When closing the window was last refused, as an operation ran.
     close_refused: Option<Instant>,
     /// Folders from a second start of Graft (empty: just come to the front).
@@ -199,6 +204,7 @@ impl GraftApp {
             update: update::Status::Idle,
             about_open: false,
             closing: false,
+            window_checked: false,
             close_refused: None,
             forwarded,
         };
@@ -233,6 +239,33 @@ impl GraftApp {
             }
         }
         self.console_view.sync(&self.console);
+    }
+
+    /// eframe restores the window as it was saved, and it saves a minimized
+    /// window's geometry too (160x28 at -32000): the next start would open
+    /// a sliver. A window smaller than the minimum gets the first-start size,
+    /// centered. True while that is pending, so nothing is drawn squeezed.
+    fn fix_tiny_window(&mut self, ctx: &egui::Context) -> bool {
+        if self.window_checked {
+            return false;
+        }
+        let (inner, monitor) = ctx.input(|i| (i.viewport().inner_rect, i.viewport().monitor_size));
+        let Some(inner) = inner else {
+            ctx.request_repaint();
+            return true;
+        };
+        self.window_checked = true;
+        if inner.width() >= MIN_WINDOW_SIZE.x && inner.height() >= MIN_WINDOW_SIZE.y {
+            return false;
+        }
+        let size = monitor.map_or(WINDOW_SIZE, |m| WINDOW_SIZE.min(m));
+        let corner = monitor.map_or(egui::Pos2::ZERO, |m| {
+            ((m - size) / 2.0).max(egui::Vec2::ZERO).to_pos2()
+        });
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(corner));
+        ctx.request_repaint();
+        true
     }
 
     /// Another start of Graft: come to the front and open its folders.
@@ -1030,6 +1063,9 @@ impl GraftApp {
 impl eframe::App for GraftApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        if self.fix_tiny_window(&ctx) {
+            return;
+        }
         if theme::sync(&ctx) {
             crate::native::set_border(color::border());
         }
