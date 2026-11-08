@@ -15,11 +15,12 @@ use egui::{
     Align, Align2, Color32, Frame, Galley, Key, Margin, Painter, Panel, Pos2, Rect, RichText,
     ScrollArea, Sense, Stroke, StrokeKind, Ui, pos2, vec2,
 };
-use graft_core::diff::{FileDiff, Gap, Hunk, Kind, Line, Source};
+use graft_core::diff::{FileDiff, Gap, Hunk, Kind, Line, Source, TAB};
 use graft_core::ops::LineOp;
 use graft_core::syntax::{Spans, Token};
 
 use super::file_row::paint_change_letter;
+use super::file_status;
 use super::icons::Icon;
 use super::widgets::{
     ButtonKind, button, elided_path, empty_state, icon_button, paint_check, paint_galley_left,
@@ -42,6 +43,43 @@ const STEP: u32 = 20;
 /// Lines longer than this (minified code) are cut on screen: laying out and
 /// drawing a 300k-character line takes longer than a frame.
 const MAX_SHOWN_CHARS: usize = 2_000;
+/// Room for the "  … N more characters" a cut line ends in.
+const CUT_NOTE_CHARS: usize = 30;
+
+/// Where a line's text starts in its row: after the line numbers, and in
+/// the unified view after the selection box and the +/− too.
+fn text_x(split: bool) -> f32 {
+    if split {
+        NUM + 8.0
+    } else {
+        GUTTER + 2.0 * NUM + 16.0
+    }
+}
+
+/// How wide a line's text may get before it wraps, in a row `row_width` wide.
+fn wrap_width(row_width: f32, split: bool) -> f32 {
+    (row_width - text_x(split) - 8.0).max(80.0)
+}
+
+/// What a diff can change in the worktree; a commit's or a review's diff
+/// changes nothing (it is read-only).
+#[derive(Clone, Copy)]
+enum Staging {
+    /// Staged changes: unstage them.
+    Staged,
+    /// Unstaged or untracked changes: stage or discard them.
+    Unstaged,
+}
+
+impl Staging {
+    fn of(source: &Source) -> Option<Self> {
+        match source {
+            Source::Staged => Some(Staging::Staged),
+            Source::Unstaged | Source::Untracked => Some(Staging::Unstaged),
+            Source::Commit(_) | Source::Base(_) => None,
+        }
+    }
+}
 
 /// The text to draw for a line, and how many of its bytes that keeps.
 fn shown(mut text: String) -> (String, usize) {
@@ -153,9 +191,9 @@ fn line_rows(
         return 1;
     };
     let line = &diff.hunks[at.0].lines[at.1];
-    // Tabs show as four spaces; anything shorter than the row fits for sure.
+    // Tabs show as TAB; anything shorter than the row fits for sure.
     let tabs = line.content.iter().filter(|&&b| b == b'\t').count();
-    if (line.content.len() + 3 * tabs) as f32 * char_width <= width {
+    if (line.content.len() + (TAB.len() - 1) * tabs) as f32 * char_width <= width {
         return 1;
     }
     let (text, _) = shown(line.text());
@@ -551,7 +589,7 @@ fn side_by_side(
     let width = ui.available_width() - ui.spacing().scroll.allocated_width();
     let blocks = blocks(ui, marks, width);
     // Each half has its line numbers, then the text up to the middle line.
-    let wrap_width = wrap.then_some((width / 2.0 - 1.0 - NUM - 16.0).max(80.0));
+    let wrap_width = wrap.then_some(wrap_width(width / 2.0 - 1.0, true));
     let char_width = char_width(ui);
     let painter = ui.painter().clone();
     let layout = layout(diff, view.gaps.as_deref(), !view.read_only);
@@ -634,7 +672,7 @@ fn half(
             color::text_faint(),
         );
     }
-    let code = paint_code(&painter, rect, NUM + 8.0, view, line, (h, l), part, wrap);
+    let code = paint_code(&painter, rect, text_x(true), view, line, (h, l), part, wrap);
     let too_wide = wrap.is_none() && code.end.x > rect.right();
     if too_wide && ui.rect_contains_pointer(rect) {
         egui::Tooltip::always_open(
@@ -768,21 +806,21 @@ fn header(ui: &mut Ui, view: &DiffView, busy: bool, settings: &Settings, actions
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let paths = vec![path.clone()];
-                    match view.key.source {
-                        Source::Staged => {
+                    match Staging::of(&view.key.source) {
+                        Some(Staging::Staged) => {
                             if button(ui, "Unstage file", ButtonKind::Secondary, !busy).clicked() {
                                 actions.push(Action::UnstageFiles(paths));
                             }
                         }
-                        Source::Unstaged | Source::Untracked => {
+                        Some(Staging::Unstaged) => {
                             if button(ui, "Stage file", ButtonKind::Secondary, !busy).clicked() {
                                 actions.push(Action::StageFiles(paths));
                             }
                             if button(ui, "Discard…", ButtonKind::Secondary, !busy).clicked() {
-                                actions.push(discard_file(&view.key.source, path));
+                                actions.push(file_status::discard_file(&view.key.source, path));
                             }
                         }
-                        Source::Commit(_) | Source::Base(_) => {
+                        None => {
                             if icon_button(ui, Icon::Close, 26.0)
                                 .on_hover_text("Close the diff (Esc)")
                                 .clicked()
@@ -819,30 +857,6 @@ pub fn whole_file_button(ui: &mut Ui, view: &DiffView, settings: &Settings, acti
     }
 }
 
-/// Ask before discarding a whole file.
-pub fn discard_file(source: &Source, path: String) -> Action {
-    let untracked = *source == Source::Untracked;
-    let body = if untracked {
-        format!("{path} is not tracked by git. It will be moved to the Recycle Bin.")
-    } else {
-        format!("All unstaged changes to {path} will be lost. Staged changes stay.")
-    };
-    let (tracked, untracked_paths) = if untracked {
-        (Vec::new(), vec![path])
-    } else {
-        (vec![path], Vec::new())
-    };
-    Action::Ask(Box::new(Confirm {
-        title: "Discard changes?".to_owned(),
-        body,
-        confirm_label: "Discard".to_owned(),
-        action: Action::Discard {
-            tracked,
-            untracked: untracked_paths,
-        },
-    }))
-}
-
 fn selection_bar(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Actions) {
     Panel::bottom("diff-selection")
         .frame(
@@ -864,13 +878,13 @@ fn selection_bar(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Actions
                         .size(theme::SMALL_SIZE),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    match view.key.source {
-                        Source::Staged => {
+                    match Staging::of(&view.key.source) {
+                        Some(Staging::Staged) => {
                             if button(ui, "Unstage lines", ButtonKind::Primary, !busy).clicked() {
                                 actions.push(Action::LinesOp(LineOp::Unstage));
                             }
                         }
-                        Source::Unstaged | Source::Untracked => {
+                        Some(Staging::Unstaged) => {
                             if button(ui, "Stage lines", ButtonKind::Primary, !busy).clicked() {
                                 actions.push(Action::LinesOp(LineOp::Stage));
                             }
@@ -888,7 +902,8 @@ fn selection_bar(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Actions
                                 })));
                             }
                         }
-                        Source::Commit(_) | Source::Base(_) => {}
+                        // Read-only diffs select no lines.
+                        None => {}
                     }
                     if button(ui, "Clear", ButtonKind::Secondary, true).clicked() {
                         actions.push(Action::ClearLines);
@@ -909,8 +924,8 @@ fn lines(
 ) {
     let width = ui.available_width() - ui.spacing().scroll.allocated_width();
     let blocks = blocks(ui, marks, width);
-    let text_x = GUTTER + 2.0 * NUM + 16.0;
-    let wrap_width = wrap.then_some((width - text_x - 8.0).max(80.0));
+    let text_x = text_x(false);
+    let wrap_width = wrap.then_some(wrap_width(width, false));
     let char_width = char_width(ui);
     let painter = ui.painter().clone();
     let layout = layout(diff, view.gaps.as_deref(), !view.read_only);
@@ -924,8 +939,7 @@ fn lines(
             .hunks
             .iter()
             .flat_map(|h| &h.lines)
-            // Cut lines end in "… N more characters".
-            .map(|l| l.content.len().min(MAX_SHOWN_CHARS + 30))
+            .map(|l| l.content.len().min(MAX_SHOWN_CHARS + CUT_NOTE_CHARS))
             .max()
             .unwrap_or(0);
         (text_x + longest as f32 * char_width + 40.0).max(width)
@@ -999,9 +1013,9 @@ fn hunk_row(
 ) {
     paint_hunk_header(ui, rect, &diff.hunks[h], GUTTER);
 
-    if view.read_only {
+    let Some(staging) = Staging::of(&view.key.source) else {
         return;
-    }
+    };
     // Buttons stick to the visible right edge, not the scrolled content.
     let right = ui.clip_rect().right().min(rect.right()) - 8.0;
     let mut x = right;
@@ -1017,9 +1031,9 @@ fn hunk_row(
             actions.push(action);
         }
     };
-    match view.key.source {
-        Source::Staged => small("Unstage hunk", Action::HunkOp(h, LineOp::Unstage), false),
-        Source::Unstaged | Source::Untracked => {
+    match staging {
+        Staging::Staged => small("Unstage hunk", Action::HunkOp(h, LineOp::Unstage), false),
+        Staging::Unstaged => {
             small("Stage hunk", Action::HunkOp(h, LineOp::Stage), false);
             small(
                 "Discard hunk",
@@ -1035,7 +1049,6 @@ fn hunk_row(
                 true,
             );
         }
-        Source::Commit(_) | Source::Base(_) => {}
     }
 }
 
