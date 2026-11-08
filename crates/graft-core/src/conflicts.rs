@@ -1,53 +1,16 @@
-//! Merges and conflicts: start a merge, rebase, cherry-pick or revert, detect
-//! one in progress, read a conflicted file's three sides from the index,
-//! resolve it, and continue or abort.
+//! Merges and conflicts: start a merge, rebase, cherry-pick or revert, read
+//! a conflicted file's three sides from the index, resolve it, and continue
+//! or abort. What is in progress is `repo::in_progress`.
 //!
 //! A resolution is written as a blob straight into the index and then checked
 //! out, so git applies the worktree's line endings (core.autocrlf) itself.
-
-use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
 use crate::changes::is_binary;
 use crate::cli::{Git, Output};
-use crate::model::{InProgress, OPERATION_MARKERS, Operation};
+use crate::model::Operation;
 use crate::refusal::stopped_with_conflicts;
-use crate::repo::git_dir;
-
-/// What is in progress in this worktree, judged by git's marker files.
-pub fn in_progress(worktree: &Path) -> Option<InProgress> {
-    let dir = git_dir(worktree)?;
-    let first_line = |name: &str| {
-        std::fs::read_to_string(dir.join(name))
-            .ok()
-            .and_then(|t| t.lines().next().map(str::to_owned))
-            .unwrap_or_default()
-    };
-    let (marker, kind) = OPERATION_MARKERS
-        .into_iter()
-        .find(|(marker, _)| dir.join(marker).exists())?;
-    let or = |text: String, empty: &str| {
-        if text.is_empty() {
-            empty.to_owned()
-        } else {
-            text
-        }
-    };
-    let title = match kind {
-        Operation::Rebase => {
-            let head = first_line(&format!("{marker}/head-name"));
-            match head.trim_start_matches("refs/heads/") {
-                "" => "Rebasing".to_owned(),
-                head => format!("Rebasing {head}"),
-            }
-        }
-        Operation::Merge => or(first_line("MERGE_MSG"), "Merging"),
-        Operation::CherryPick => format!("Cherry-picking: {}", first_line("MERGE_MSG")),
-        Operation::Revert => or(first_line("MERGE_MSG"), "Reverting"),
-    };
-    Some(InProgress { kind, title })
-}
 
 /// What one side of a conflict is called.
 #[derive(Clone, Debug, PartialEq, Eq)]

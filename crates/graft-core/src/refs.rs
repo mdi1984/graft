@@ -64,8 +64,8 @@ pub fn check_branch_name(git: &Git, name: &str) -> Result<()> {
     check_name(git, RefKind::Branch, name)
 }
 
-/// [`check_ref_name`], then git's own rules for a branch or tag name.
-fn check_name(git: &Git, kind: RefKind, name: &str) -> Result<()> {
+/// [`check_ref_name`], then git's own rules for the name.
+pub(crate) fn check_name(git: &Git, kind: RefKind, name: &str) -> Result<()> {
     if let Err(why) = check_ref_name(kind, name) {
         bail!(why);
     }

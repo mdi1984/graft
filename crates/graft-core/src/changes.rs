@@ -30,13 +30,12 @@ pub struct FileChange {
 /// The files changed from `from` to `to` (commits or trees); `to: None`
 /// means the worktree, uncommitted changes included (untracked files not).
 pub fn between(git: &Git, from: &str, to: Option<&str>) -> Result<Vec<FileChange>> {
-    let mut common = vec!["-c", "core.quotepath=false"];
-    match to {
-        Some(_) => common.extend(["diff-tree", "-r", "-z", "-M", "--no-commit-id"]),
-        None => common.extend(["diff", "-z", "-M"]),
-    }
+    let common: &[&str] = match to {
+        Some(_) => &["diff-tree", "-r", "-z", "-M", "--no-commit-id"],
+        None => &["diff", "-z", "-M"],
+    };
     let args = |kind: &'static str| {
-        let mut args = common.clone();
+        let mut args = common.to_vec();
         args.push(kind);
         args.push(from);
         args.extend(to);

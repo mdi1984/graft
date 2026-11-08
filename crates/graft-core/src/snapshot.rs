@@ -5,10 +5,11 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::cli::Git;
-use crate::model::{Branch, Oid, Remote, RemoteBranch, RepoSnapshot, Tag, Upstream, Worktree};
+use crate::model::{
+    Branch, ORIGIN, Oid, Remote, RemoteBranch, RepoSnapshot, Tag, Upstream, Worktree,
+};
 use crate::paths::{folder_name, same_path};
-use crate::remote::ORIGIN;
-use crate::{conflicts, stash, status};
+use crate::{repo, stash, status};
 
 /// Read the whole snapshot. `git` must point at the main worktree. The git
 /// calls run side by side: each one costs tens of milliseconds just to start
@@ -24,9 +25,8 @@ pub fn load(git: &Git) -> Result<RepoSnapshot> {
             .iter()
             .map(|wt| {
                 let at = git.at(&wt.path);
-                (!wt.prunable).then(|| {
-                    s.spawn(move || (status::load(&at).ok(), conflicts::in_progress(at.cwd())))
-                })
+                (!wt.prunable)
+                    .then(|| s.spawn(move || (status::load(&at).ok(), repo::in_progress(at.cwd()))))
             })
             .collect();
         for (wt, job) in worktrees.iter_mut().zip(statuses) {

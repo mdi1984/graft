@@ -13,12 +13,9 @@ pub struct Identity {
     pub local: bool,
 }
 
-/// `git config` exits with 1 when a key is not set.
+/// A config value; empty when not set.
 fn get(git: &Git, args: &[&str]) -> Result<String> {
-    let mut all = vec!["config"];
-    all.extend_from_slice(args);
-    let out = git.run_accepting(&all, None, |o| o.status <= 1)?;
-    Ok(out.stdout_str().trim().to_owned())
+    Ok(git.config(args)?.unwrap_or_default())
 }
 
 /// `git config --unset` exits with 5 when the key is not set.

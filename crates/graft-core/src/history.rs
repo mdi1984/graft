@@ -24,10 +24,21 @@ pub struct Commit {
     pub summary: String,
 }
 
+/// The id of the pseudo commit that stands for a worktree's uncommitted
+/// changes in a [`History`] (the all-zero id, which no commit has).
+pub fn worktree_id() -> Oid {
+    null_oid()
+}
+
+/// Whether `id` is [`worktree_id`].
+pub fn is_worktree_id(id: &Oid) -> bool {
+    id.is_null()
+}
+
 impl Commit {
     /// The pseudo commit standing for uncommitted changes.
     pub fn is_worktree(&self) -> bool {
-        self.id.is_null()
+        is_worktree_id(&self.id)
     }
 }
 
@@ -93,7 +104,7 @@ impl History {
         let mut list = commits.to_vec();
         if let Some(parent) = worktree_parent {
             list.push(Commit {
-                id: null_oid(),
+                id: worktree_id(),
                 parents: SmallVec::from_slice(&[parent]),
                 author: String::new(),
                 email: String::new(),
@@ -190,7 +201,7 @@ pub const LANE_COLORS: u8 = 8;
 
 /// Assign every commit a lane. Lanes keep their column for their whole life,
 /// freed columns are reused, and each new lane gets the next color.
-pub fn layout(commits: &[Commit]) -> (Vec<GraphRow>, usize) {
+fn layout(commits: &[Commit]) -> (Vec<GraphRow>, usize) {
     // Each lane: the commit it is waiting for and its color.
     let mut lanes: Vec<Option<(Oid, u8)>> = Vec::new();
     let mut next_color = 0u8;

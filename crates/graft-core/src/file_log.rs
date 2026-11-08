@@ -24,8 +24,6 @@ pub struct FileCommit {
 pub fn log(git: &Git, path: &str, limit: usize) -> Result<Vec<FileCommit>> {
     let limit = format!("-n{limit}");
     let out = git.read([
-        "-c",
-        "core.quotepath=false",
         "log",
         "--follow",
         "--no-color",

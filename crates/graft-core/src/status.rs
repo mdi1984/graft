@@ -9,8 +9,6 @@ use crate::model::{Change, EntryKind, StatusEntry, WorktreeStatus};
 /// Read the status of the worktree `git` points at.
 pub fn load(git: &Git) -> Result<WorktreeStatus> {
     let out = git.run([
-        "-c",
-        "core.quotepath=false",
         "status",
         "--porcelain=v2",
         "--branch",
@@ -20,7 +18,7 @@ pub fn load(git: &Git) -> Result<WorktreeStatus> {
     Ok(parse(&out.stdout))
 }
 
-pub fn parse(bytes: &[u8]) -> WorktreeStatus {
+fn parse(bytes: &[u8]) -> WorktreeStatus {
     let mut status = WorktreeStatus::default();
     let mut fields = bytes.split(|&b| b == 0).filter(|f| !f.is_empty());
     while let Some(record) = fields.next() {

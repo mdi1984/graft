@@ -204,13 +204,13 @@ fn worktrees_clone_and_conflicts() {
          && cd ../app.worktrees/feature && printf 'feature\\n' > readme.md \
          && git commit -qam feature && (git merge -q main >/dev/null 2>&1 || true)",
     );
-    assert!(conflicts::in_progress(&feature).is_some());
+    assert!(repo::in_progress(&feature).is_some());
     let wt = Git::new(&feature, console.clone());
     let file = conflicts::load(&wt, "readme.md").unwrap();
     conflicts::take_side(&wt, &file, true).unwrap();
     let stopped_again = conflicts::continue_op(&wt, graft_core::Operation::Merge).unwrap();
     assert!(!stopped_again);
-    assert!(conflicts::in_progress(&feature).is_none());
+    assert!(repo::in_progress(&feature).is_none());
 
     // Clone into a WSL folder.
     let dest = d.path("copy");

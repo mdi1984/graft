@@ -104,10 +104,6 @@ impl Git {
         &self.cwd
     }
 
-    pub fn console(&self) -> &Console {
-        &self.console
-    }
-
     /// `path` as git sees it: a Linux path for a repository inside WSL.
     /// Fails for a path git there cannot reach (another distro, a network
     /// share): Linux git would take it as a relative file name.
@@ -228,6 +224,14 @@ impl Git {
             bail!("{}", failure_message(&out));
         }
         Ok(out)
+    }
+
+    /// A config value: `git config <args>`, e.g. `["--local", "user.name"]`.
+    /// `None` when it is not set (git exits with 1).
+    pub(crate) fn config(&self, args: &[&str]) -> Result<Option<String>> {
+        let all = std::iter::once("config").chain(args.iter().copied());
+        let out = self.run_accepting(all, None, |o| o.status <= 1)?;
+        Ok((out.status == 0).then(|| out.stdout_str().trim().to_owned()))
     }
 
     /// Run git and fail with git's own message on a non-zero exit code.
@@ -395,6 +399,7 @@ impl Git {
             None => {
                 let mut cmd = Command::new(program);
                 cmd.current_dir(&self.cwd);
+                no_window(&mut cmd);
                 cmd
             }
         };
@@ -422,7 +427,6 @@ impl Git {
             cmd.env("GIT_INDEX_FILE", self.path_arg(index)?);
         }
         share_env(&mut cmd);
-        no_window(&mut cmd);
         Ok(cmd)
     }
 }
@@ -486,11 +490,14 @@ fn inherited_config(count: usize) -> Vec<String> {
 /// Settings every git command Graft runs gets, added after any the user
 /// passes in the environment (`GIT_CONFIG_COUNT`), without touching their
 /// config files.
-const CONFIG: [(&str, &str); 1] = [
+const CONFIG: [(&str, &str); 2] = [
     // Paths past Windows' old 260-character limit (deep node_modules or
     // target folders), e.g. when removing a worktree. Off by default in Git
     // for Windows.
     ("core.longpaths", "true"),
+    // Paths in git's output as they are (UTF-8), not with non-ASCII bytes
+    // escaped as octal: Graft shows and passes them back as they come.
+    ("core.quotepath", "false"),
 ];
 
 fn extra_config(start: usize) -> Vec<(String, String)> {
@@ -579,6 +586,8 @@ mod tests {
         let git = Git::new(std::env::temp_dir(), Console::default());
         let cmd = git.command("git").unwrap();
         assert_eq!(config_value(cmd, "core.longpaths"), "true");
+        let cmd = git.command("git").unwrap();
+        assert_eq!(config_value(cmd, "core.quotepath"), "false");
     }
 
     /// Settings the user passes in the environment (`GIT_CONFIG_COUNT`)

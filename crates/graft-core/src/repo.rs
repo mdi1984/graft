@@ -1,5 +1,5 @@
 //! Finding, creating and cloning repositories, and finding a worktree's git
-//! dir.
+//! dir and what is in progress there.
 
 use std::path::{Path, PathBuf};
 
@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use crate::cli::{Git, Progress, failure_message};
 use crate::console::Console;
 use crate::jobs::CancelToken;
+use crate::model::{InProgress, OPERATION_MARKERS, Operation};
 use crate::paths::display;
 use crate::refusal;
 
@@ -167,6 +168,40 @@ pub(crate) fn git_dir(worktree: &Path) -> Option<PathBuf> {
     } else {
         worktree.join(path)
     })
+}
+
+/// What is in progress in this worktree, judged by git's marker files.
+pub fn in_progress(worktree: &Path) -> Option<InProgress> {
+    let dir = git_dir(worktree)?;
+    let first_line = |name: &str| {
+        std::fs::read_to_string(dir.join(name))
+            .ok()
+            .and_then(|t| t.lines().next().map(str::to_owned))
+            .unwrap_or_default()
+    };
+    let (marker, kind) = OPERATION_MARKERS
+        .into_iter()
+        .find(|(marker, _)| dir.join(marker).exists())?;
+    let or = |text: String, empty: &str| {
+        if text.is_empty() {
+            empty.to_owned()
+        } else {
+            text
+        }
+    };
+    let title = match kind {
+        Operation::Rebase => {
+            let head = first_line(&format!("{marker}/head-name"));
+            match head.trim_start_matches("refs/heads/") {
+                "" => "Rebasing".to_owned(),
+                head => format!("Rebasing {head}"),
+            }
+        }
+        Operation::Merge => or(first_line("MERGE_MSG"), "Merging"),
+        Operation::CherryPick => format!("Cherry-picking: {}", first_line("MERGE_MSG")),
+        Operation::Revert => or(first_line("MERGE_MSG"), "Reverting"),
+    };
+    Some(InProgress { kind, title })
 }
 
 #[cfg(test)]

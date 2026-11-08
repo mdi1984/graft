@@ -11,6 +11,9 @@ use crate::paths::same_path;
 /// not name one that exists locally.
 pub(crate) const DEFAULT_BRANCHES: [&str; 4] = ["main", "master", "trunk", "develop"];
 
+/// The remote `git clone` sets up: the one to use when there is a choice.
+pub const ORIGIN: &str = "origin";
+
 /// Everything the sidebar, toolbar and tabs need to know about one repository.
 #[derive(Clone, Debug, Default)]
 pub struct RepoSnapshot {
@@ -442,7 +445,7 @@ pub fn short(oid: &Oid) -> String {
     s
 }
 
-/// The all-zero id. In the history it stands for "uncommitted changes".
+/// The all-zero id: no object has it.
 pub fn null_oid() -> Oid {
     Oid::null(gix::hash::Kind::Sha1)
 }

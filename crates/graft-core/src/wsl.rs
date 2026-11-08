@@ -123,20 +123,21 @@ impl Wsl {
 
     /// The home folder of the distro's default user (starts the distro).
     pub fn home(&self) -> Option<String> {
-        let out = no_window(
-            self.command(Path::new("/"), "sh")
-                .args(["-c", "echo $HOME"]),
-        )
-        .output()
-        .ok()?;
+        let out = self
+            .command(Path::new("/"), "sh")
+            .args(["-c", "echo $HOME"])
+            .output()
+            .ok()?;
         let home = String::from_utf8_lossy(&out.stdout).trim().to_owned();
         (out.status.success() && home.starts_with('/')).then_some(home)
     }
 
-    /// `program` run inside the distro in the Linux folder for `cwd`.
-    /// Environment variables reach it only when named in `WSLENV`.
+    /// `program` run inside the distro in the Linux folder for `cwd`,
+    /// without a console window. Environment variables reach it only when
+    /// named in `WSLENV`.
     pub(crate) fn command(&self, cwd: &Path, program: &str) -> Command {
         let mut cmd = Command::new("wsl.exe");
+        no_window(&mut cmd);
         cmd.args(["-d", &self.distro]);
         if let Some(dir) = self.to_linux(cwd) {
             cmd.args(["--cd", &dir]);

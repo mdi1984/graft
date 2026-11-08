@@ -100,7 +100,7 @@ impl DialogKind {
     pub fn add_remote(first: bool) -> Self {
         Self::Remote {
             original: None,
-            name: if first { remote::ORIGIN } else { "" }.to_owned(),
+            name: if first { graft_core::ORIGIN } else { "" }.to_owned(),
             url: String::new(),
             fetch: true,
         }

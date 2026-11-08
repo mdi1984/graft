@@ -150,8 +150,6 @@ impl FileDiff {
 /// Load the diff of one file.
 pub fn load(git: &Git, source: &Source, path: &str) -> Result<FileDiff> {
     let mut args: Vec<String> = [
-        "-c",
-        "core.quotepath=false",
         "diff",
         "--no-color",
         "--no-ext-diff",

@@ -37,6 +37,7 @@ pub mod wsl;
 pub use cli::{Git, Output, Progress};
 pub use jobs::{CancelToken, JobPool, Panicked, Waker, catch, is_cancelled, is_panic};
 pub use model::{
-    Branch, Change, EntryKind, FileList, InProgress, Oid, Operation, Preview, Remote, RemoteBranch,
-    RepoSnapshot, Restore, StatusEntry, Tag, Upstream, Worktree, WorktreeStatus, null_oid, short,
+    Branch, Change, EntryKind, FileList, InProgress, ORIGIN, Oid, Operation, Preview, Remote,
+    RemoteBranch, RepoSnapshot, Restore, StatusEntry, Tag, Upstream, Worktree, WorktreeStatus,
+    null_oid, short,
 };

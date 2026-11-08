@@ -34,7 +34,7 @@ use graft_core::stash::{Stash, StashFile};
 use graft_core::watch::Watcher;
 use graft_core::{
     CancelToken, Git, JobPool, Oid, Operation, RepoSnapshot, Worktree, is_cancelled, is_panic,
-    null_oid, snapshot,
+    snapshot,
 };
 
 pub use changes::{CommitForm, DiffView, FileKey, Staging};
@@ -106,7 +106,8 @@ pub enum Action {
     ShowFileStatus,
     ShowHistory,
     SetTab(Tab),
-    /// Select a commit (the null id selects "Uncommitted changes"); with
+    /// Select a commit ([`history::worktree_id`] selects "Uncommitted
+    /// changes"); with
     /// `scroll`, the history list scrolls to it.
     Select {
         id: Oid,
@@ -774,7 +775,7 @@ impl Project {
     fn select_head(&mut self) {
         let Some(history) = &self.history else { return };
         let target = match self.worktree() {
-            Some(wt) if wt.is_dirty() => Some(null_oid()),
+            Some(wt) if wt.is_dirty() => Some(history::worktree_id()),
             Some(wt) => wt.head,
             None => None,
         }
@@ -791,14 +792,15 @@ impl Project {
     }
 
     pub(super) fn select(&mut self, id: Oid) {
-        if self.selected == Some(id) && (self.details.is_some() || id.is_null()) {
+        let worktree = history::is_worktree_id(&id);
+        if self.selected == Some(id) && (self.details.is_some() || worktree) {
             return;
         }
         self.selected = Some(id);
         self.details = None;
         self.read_only_diff = None;
         self.details_error = None;
-        if id.is_null() {
+        if worktree {
             return;
         }
         let git = self.git.clone();

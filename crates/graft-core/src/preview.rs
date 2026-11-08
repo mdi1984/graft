@@ -10,10 +10,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 
 use crate::cli::Git;
-use crate::conflicts;
 use crate::model::{Oid, Preview, RepoSnapshot, Restore, Worktree};
 use crate::paths::{display, same_path};
-use crate::repo::git_dir;
+use crate::repo::{git_dir, in_progress};
 
 const MARKER: &str = "graft-preview";
 
@@ -247,7 +246,7 @@ pub fn start(main: &Git, source: &Git) -> Result<Preview> {
         None,
         source.cwd(),
         main.cwd(),
-        conflicts::in_progress(main.cwd()).is_some(),
+        in_progress(main.cwd()).is_some(),
         dirty,
     )?;
     let restore = match main.current_branch()? {

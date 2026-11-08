@@ -121,11 +121,8 @@ pub fn apply_lines(
 
 /// Whether git turns CRLF into LF when adding files (core.autocrlf).
 fn strips_cr(git: &Git) -> Result<bool> {
-    // Exit code 1: not set.
-    let out = git.run_accepting(["config", "--get", "core.autocrlf"], None, |o| {
-        o.status <= 1
-    })?;
-    let value = out.stdout_str().trim().to_lowercase();
+    let value = git.config(&["--get", "core.autocrlf"])?;
+    let value = value.unwrap_or_default().to_lowercase();
     Ok(value == "true" || value == "input")
 }
 

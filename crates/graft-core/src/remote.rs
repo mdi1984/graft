@@ -5,7 +5,8 @@ use anyhow::{Result, bail};
 
 use crate::cli::{Git, Progress};
 use crate::jobs::CancelToken;
-use crate::model::Upstream;
+use crate::model::{ORIGIN, Upstream};
+use crate::refs::{self, RefKind};
 
 /// Fetch every remote. With `prune`, remote branches deleted there go too,
 /// so local branches tracking them show as gone.
@@ -32,9 +33,6 @@ pub enum PushPlan {
     /// upstream was deleted on the remote).
     Publish { remote: String },
 }
-
-/// The remote `git clone` sets up: the one to use when there is a choice.
-pub const ORIGIN: &str = "origin";
 
 /// The remote to push to when nothing else says which: [`ORIGIN`], or the
 /// only remote. `None` when there is none or several others.
@@ -183,6 +181,7 @@ pub fn save_remote(
     url: &str,
     fetch: bool,
 ) -> Result<()> {
+    refs::check_name(git, RefKind::Remote, name)?;
     match original {
         None => {
             git.run(["remote", "add", name, url])?;

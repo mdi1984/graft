@@ -8,7 +8,7 @@ use egui::{
 };
 use graft_core::details::CommitDetails;
 use graft_core::diff::Source;
-use graft_core::history::{Commit, GraphRow, History, LineKind};
+use graft_core::history::{self, Commit, GraphRow, History, LineKind};
 use graft_core::refs::ResetMode;
 use graft_core::short;
 
@@ -614,7 +614,7 @@ fn details_pane(ui: &mut Ui, project: &Project, actions: &mut Actions) {
         empty_state(ui, "No commit selected", "Pick a commit on the left.");
         return;
     };
-    if id.is_null() {
+    if history::is_worktree_id(&id) {
         uncommitted(ui, project, actions);
         return;
     }

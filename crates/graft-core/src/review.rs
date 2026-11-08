@@ -9,9 +9,7 @@ use anyhow::{Context, Result};
 
 use crate::changes::{FileChange, between, is_binary};
 use crate::cli::Git;
-use crate::model::Change;
-use crate::model::{Oid, RepoSnapshot};
-use crate::remote::ORIGIN;
+use crate::model::{Change, ORIGIN, Oid, RepoSnapshot};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReviewFile {
@@ -79,26 +77,8 @@ pub fn load(git: &Git, base: &str) -> Result<Review> {
     let (commits, changes, untracked, uncommitted) = std::thread::scope(|s| {
         let range = format!("{merge_base}..HEAD");
         let commits = s.spawn(move || git.read(["rev-list", "--count", &range]));
-        let uncommitted = s.spawn(|| {
-            git.run([
-                "-c",
-                "core.quotepath=false",
-                "diff",
-                "--name-only",
-                "-z",
-                "HEAD",
-            ])
-        });
-        let untracked = s.spawn(|| {
-            git.run([
-                "-c",
-                "core.quotepath=false",
-                "ls-files",
-                "--others",
-                "--exclude-standard",
-                "-z",
-            ])
-        });
+        let uncommitted = s.spawn(|| git.run(["diff", "--name-only", "-z", "HEAD"]));
+        let untracked = s.spawn(|| git.run(["ls-files", "--others", "--exclude-standard", "-z"]));
         let changes = between(git, &merge_base, None);
         (
             commits.join().expect("rev-list thread"),
