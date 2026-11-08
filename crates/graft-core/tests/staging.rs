@@ -471,6 +471,25 @@ fn discarding_a_file_added_with_intent_keeps_its_content() {
     );
 }
 
+/// Discarding lines of a new LF file under core.autocrlf=true writes LF
+/// back, not CRLF: the file keeps the line endings it has on disk.
+#[test]
+fn discarding_lines_of_a_new_lf_file_keeps_lf() {
+    let (_tmp, git) = repo();
+    let dir = git.cwd().to_path_buf();
+    std::fs::write(dir.join("lf.txt"), "l1\nl2\nl3\n").unwrap();
+    let d = diff::load(&git, &Source::Untracked, "lf.txt").unwrap();
+    ops::apply_lines(
+        &git,
+        &d,
+        &Source::Untracked,
+        LineOp::Discard,
+        pick(&d, &["l2"]),
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(dir.join("lf.txt")).unwrap(), b"l1\nl3\n");
+}
+
 /// Lines starting with '#' are part of the message, not comments.
 #[test]
 fn commit_keeps_lines_starting_with_a_hash() {

@@ -168,8 +168,10 @@ fn replace_entry_content(git: &Git, path: &str, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Rewrite an untracked file without the selected lines, converted back to
-/// its form on disk as checkout would (line endings, encoding, filters).
+/// Rewrite an untracked file without the selected lines, in the form the
+/// file is in on disk: converted as checkout would (line endings, encoding,
+/// filters) if the file is in that form, else as git's form. An LF file
+/// under core.autocrlf=true stays LF.
 fn remove_lines(git: &Git, diff: &FileDiff, selected: impl Fn(usize, usize) -> bool) -> Result<()> {
     let path = git.cwd().join(&diff.path);
     if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
@@ -178,15 +180,20 @@ fn remove_lines(git: &Git, diff: &FileDiff, selected: impl Fn(usize, usize) -> b
             display(&path)
         );
     }
-    let id = write_blob(git, &kept_lines(diff, Kept::Unselected, selected))?;
-    let on_disk = git.run([
-        "cat-file",
-        "--filters",
-        &format!("--path={}", diff.path),
-        &id,
-    ])?;
-    std::fs::write(&path, on_disk.stdout)
-        .with_context(|| format!("Could not write {}", display(&path)))
+    let on_disk =
+        std::fs::read(&path).with_context(|| format!("Could not read {}", display(&path)))?;
+    let path_arg = format!("--path={}", diff.path);
+    let cleaned = git.run_input(["hash-object", "-w", "--stdin", &path_arg], &on_disk)?;
+    let checked_out = |id: &str| git.run(["cat-file", "--filters", &path_arg, id]);
+    let converted = checked_out(cleaned.stdout_str().trim())?.stdout == on_disk;
+
+    let kept = kept_lines(diff, Kept::Unselected, selected);
+    let content = if converted {
+        checked_out(&write_blob(git, &kept)?)?.stdout
+    } else {
+        kept
+    };
+    std::fs::write(&path, content).with_context(|| format!("Could not write {}", display(&path)))
 }
 
 /// `git apply` a patch to the index (`cached`) or the working tree.
