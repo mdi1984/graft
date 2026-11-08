@@ -337,6 +337,18 @@ fn behind_dialog(ctx: &egui::Context) -> bool {
     ctx.memory(|m| m.top_modal_layer()).is_some()
 }
 
+/// Whether plain keys (arrows, Escape, ...) may act on the screen: no dialog
+/// is open and no widget, such as a text field, has the keyboard.
+pub fn free(ctx: &egui::Context) -> bool {
+    !behind_dialog(ctx) && !ctx.egui_wants_keyboard_input()
+}
+
+/// Was `key` pressed (or held) this frame while keys are [`free`]? For the
+/// fixed keys that move around a list or close something.
+pub fn plain_key(ctx: &egui::Context, key: Key) -> bool {
+    free(ctx) && ctx.input(|i| i.key_pressed(key))
+}
+
 /// The tab whose Go to tab shortcut was pressed, among the first `count`.
 pub fn go_to_tab(ctx: &egui::Context, count: usize) -> Option<usize> {
     if behind_dialog(ctx) {
@@ -675,6 +687,10 @@ mod tests {
         for (i, spec) in COMMANDS.iter().enumerate() {
             assert_eq!(spec.command as usize, i, "{}", spec.id);
         }
+    }
+
+    #[test]
+    fn aliases_are_taken() {
         assert_eq!(
             Keymap::default().conflict(Command::Search, ctrl(Key::PageUp).unwrap()),
             Some("Previous tab")
@@ -730,27 +746,47 @@ mod tests {
 
     #[test]
     fn held_keys_repeat_only_moving_around() {
-        let press = |key, repeat| Event::Key {
+        let repeating: Vec<Command> = Command::ALL.into_iter().filter(|c| c.repeats()).collect();
+        assert_eq!(
+            repeating,
+            [
+                Command::NextTab,
+                Command::PreviousTab,
+                Command::NextFile,
+                Command::PreviousFile
+            ]
+        );
+
+        let held = |key| Event::Key {
             key,
             physical_key: None,
             pressed: true,
-            repeat,
+            repeat: true,
             modifiers: Modifiers::NONE,
         };
         let mut input = InputState::default();
-        input.events = vec![press(Key::Space, true), press(Key::ArrowDown, true)];
-        assert!(!consume_exact(
-            &mut input,
-            plain(Key::Space).unwrap(),
-            false
-        ));
-        assert!(consume_exact(
-            &mut input,
-            plain(Key::ArrowDown).unwrap(),
-            true
-        ));
-        input.events = vec![press(Key::Space, false)];
-        assert!(consume_exact(&mut input, plain(Key::Space).unwrap(), false));
+        input.events = vec![held(Key::Space), held(Key::ArrowDown)];
+        let consumed = |input: &mut InputState, command: Command| {
+            consume_exact(
+                input,
+                command.default_shortcut().unwrap(),
+                command.repeats(),
+            )
+        };
+        assert!(!consumed(&mut input, Command::StageFile));
+        assert!(consumed(&mut input, Command::NextFile));
+        input.events = vec![Event::Key {
+            key: Key::Space,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }];
+        assert!(consumed(&mut input, Command::StageFile), "a fresh press");
+    }
+
+    #[test]
+    fn function_keys_are_recognised() {
         assert!(is_function_key(Key::F5) && is_function_key(Key::F12));
         assert!(!is_function_key(Key::F) && !is_function_key(Key::Space));
     }

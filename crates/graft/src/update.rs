@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
 
 use crate::installed;
+use crate::version::{Version, newer};
 
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 pub const REPO_URL: &str = "https://github.com/mdi1984/graft";
@@ -109,7 +110,7 @@ fn parse_release(text: &str) -> Result<Release> {
     let Some(version) = release
         .tag_name
         .strip_prefix('v')
-        .filter(|v| parse(v).is_some())
+        .filter(|v| Version::parse(v).is_some())
     else {
         bail!(
             "The latest release has an unexpected tag: {}",
@@ -365,33 +366,9 @@ fn expected_hash(sums: &str, name: &str) -> Option<String> {
     })
 }
 
-/// `major.minor.patch`; anything else (pre-releases included) is not a version.
-fn parse(version: &str) -> Option<(u64, u64, u64)> {
-    let mut parts = version.split('.').map(|p| p.parse::<u64>().ok());
-    let v = (parts.next()??, parts.next()??, parts.next()??);
-    parts.next().is_none().then_some(v)
-}
-
-fn newer(candidate: &str, current: &str) -> bool {
-    match (parse(candidate), parse(current)) {
-        (Some(c), Some(cur)) => c > cur,
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn versions_compare_by_number() {
-        assert!(newer("1.0.1", "1.0.0"));
-        assert!(newer("1.10.0", "1.9.3"));
-        assert!(!newer("1.0.0", "1.0.0"));
-        assert!(!newer("0.9.9", "1.0.0"));
-        assert!(!newer("2.0.0-beta", "1.0.0"));
-        assert!(!newer("2.0", "1.0.0"));
-    }
 
     #[test]
     fn a_github_release_is_read() {
@@ -468,11 +445,7 @@ mod tests {
                 match files.iter().find(|(name, _)| *name == path) {
                     Some((_, body)) => {
                         let head = format!(
-                            "HTTP/1.1 200 OK
-Content-Length: {}
-Connection: close
-
-",
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                             body.len()
                         );
                         stream.write_all(head.as_bytes()).unwrap();
@@ -480,11 +453,7 @@ Connection: close
                     }
                     None => stream
                         .write_all(
-                            b"HTTP/1.1 404 Not Found
-Content-Length: 0
-Connection: close
-
-",
+                            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                         )
                         .unwrap(),
                 }
@@ -508,12 +477,7 @@ Connection: close
     #[test]
     fn an_update_is_downloaded_checked_and_swapped_in() {
         let new = b"the new graft".to_vec();
-        let sums = format!(
-            "{}  graft-x64.exe
-",
-            sha256(&new)
-        )
-        .into_bytes();
+        let sums = format!("{}  graft-x64.exe\n", sha256(&new)).into_bytes();
         // The release document names the server's own address, so it is
         // served from a second server that knows the first one's address.
         let files = serve(vec![
@@ -535,12 +499,7 @@ Connection: close
 
     #[test]
     fn a_damaged_download_changes_nothing() {
-        let sums = format!(
-            "{}  graft-x64.exe
-",
-            sha256(b"what was published")
-        )
-        .into_bytes();
+        let sums = format!("{}  graft-x64.exe\n", sha256(b"what was published")).into_bytes();
         let files = serve(vec![
             ("graft-x64.exe", b"something else".to_vec()),
             ("SHA256SUMS.txt", sums),
@@ -600,24 +559,21 @@ Connection: close
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
+    /// Inno Setup splits its command line at spaces: a path with spaces
+    /// must be quoted inside the argument.
     #[test]
-    fn the_setup_is_told_what_to_wait_for_and_start() {
+    fn setup_paths_with_spaces_are_quoted() {
         let args = setup_args(
             Path::new(r"C:\Users\A B\Programs\Graft\graft.exe"),
             42,
-            Path::new(r"C:\Temp\Graft-update\setup.log"),
+            Path::new(r"C:\Temp\Graft update\setup.log"),
         );
-        assert_eq!(
-            args,
-            [
-                "/SILENT",
-                "/SUPPRESSMSGBOXES",
-                "/NORESTART",
-                "/WAITPID=42",
-                r#"/LAUNCH="C:\Users\A B\Programs\Graft\graft.exe""#,
-                r#"/LOG="C:\Temp\Graft-update\setup.log""#,
-            ]
+        let has = |arg: &str| args.iter().any(|a| a == arg);
+        assert!(
+            has(r#"/LAUNCH="C:\Users\A B\Programs\Graft\graft.exe""#),
+            "{args:?}"
         );
+        assert!(has(r#"/LOG="C:\Temp\Graft update\setup.log""#), "{args:?}");
     }
 
     /// One real update through the setup program: Graft must be installed

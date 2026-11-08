@@ -75,7 +75,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
         )
         .show(ui, |ui| details(ui, project, snap, stash, actions));
 
-    match &project.commit_diff {
+    match &project.read_only_diff {
         Some(view) => diff_view::show_view(
             ui,
             view,
@@ -265,7 +265,7 @@ fn details(
         }
         Some(Ok(files)) => files,
     };
-    let open = project.commit_diff.as_ref().map(|v| &v.key);
+    let open = project.read_only_diff.as_ref().map(|v| &v.key);
     ScrollArea::vertical()
         .id_salt("stash-files")
         .auto_shrink([false, false])

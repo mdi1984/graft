@@ -122,8 +122,9 @@ pub mod color {
         syn_type: 0xf5d76e / 0x953800,
     }
 
-    const LANES: usize = graft_core::history::LANE_COLORS as usize;
-    const DARK_LANES: [Color32; LANES] = [
+    /// Accents that tell things apart: commit graph lanes and tab groups.
+    const ACCENTS: usize = graft_core::history::LANE_COLORS as usize;
+    const DARK_ACCENTS: [Color32; ACCENTS] = [
         hex(0x8fd19e),
         hex(0x8cc2ff),
         hex(0xf2b77a),
@@ -133,7 +134,7 @@ pub mod color {
         hex(0xf5d76e),
         hex(0xf39ac7),
     ];
-    const LIGHT_LANES: [Color32; LANES] = [
+    const LIGHT_ACCENTS: [Color32; ACCENTS] = [
         hex(0x1a7f37),
         hex(0x0b62c9),
         hex(0xbc5400),
@@ -143,47 +144,26 @@ pub mod color {
         hex(0x8a6200),
         hex(0xbf3989),
     ];
+
+    fn distinct(index: usize) -> Color32 {
+        let accents = if is_light() {
+            &LIGHT_ACCENTS
+        } else {
+            &DARK_ACCENTS
+        };
+        accents[index % ACCENTS]
+    }
 
     /// The color of commit graph lane `index`, assigned round-robin.
     pub fn lane(index: usize) -> Color32 {
-        let lanes = if is_light() {
-            &LIGHT_LANES
-        } else {
-            &DARK_LANES
-        };
-        lanes[index % lanes.len()]
+        distinct(index)
     }
 
     /// Tab group colors; a group stores an index into them.
-    pub const GROUP_COUNT: usize = 8;
-    const DARK_GROUPS: [Color32; GROUP_COUNT] = [
-        hex(0x8fd19e),
-        hex(0x8cc2ff),
-        hex(0xf2b77a),
-        hex(0xd6a3ff),
-        hex(0xff9a8f),
-        hex(0x7fd8d0),
-        hex(0xf5d76e),
-        hex(0xf39ac7),
-    ];
-    const LIGHT_GROUPS: [Color32; GROUP_COUNT] = [
-        hex(0x1a7f37),
-        hex(0x0b62c9),
-        hex(0xbc5400),
-        hex(0x8250df),
-        hex(0xc8232f),
-        hex(0x167a80),
-        hex(0x8a6200),
-        hex(0xbf3989),
-    ];
+    pub const GROUP_COUNT: usize = ACCENTS;
 
     pub fn group(index: usize) -> Color32 {
-        let groups = if is_light() {
-            &LIGHT_GROUPS
-        } else {
-            &DARK_GROUPS
-        };
-        groups[index % GROUP_COUNT]
+        distinct(index)
     }
 
     /// Between the sidebar and the app background: headers, hidden lines.

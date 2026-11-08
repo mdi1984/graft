@@ -3,8 +3,7 @@
 //! change (blame).
 
 use egui::{
-    Align, Frame, Key, Layout, Margin, Modifiers, Panel, Rect, RichText, ScrollArea, Sense, Ui,
-    pos2, vec2,
+    Align, Frame, Key, Layout, Margin, Panel, Rect, RichText, ScrollArea, Sense, Ui, pos2, vec2,
 };
 use graft_core::diff::{TAB, display_text};
 use graft_core::file_log::Blame;
@@ -13,6 +12,7 @@ use super::diff_view;
 use super::widgets::{
     ButtonKind, button, elided, empty_state, paint_galley_left, paint_row_bg, waiting,
 };
+use crate::keys;
 use crate::project::{Action, FileHistoryMode, FileHistoryView, Project};
 use crate::text::plural;
 use crate::theme::{self, color};
@@ -57,7 +57,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
     let busy = project.is_operating();
     let wrap = project.settings().wrap_lines;
     match view.mode {
-        FileHistoryMode::Changes => match &project.commit_diff {
+        FileHistoryMode::Changes => match &project.read_only_diff {
             Some(diff) => diff_view::body(ui, diff, busy, false, wrap, None, actions),
             None => {
                 waiting(ui);
@@ -118,16 +118,9 @@ fn commit_list(
     commits: &[graft_core::file_log::FileCommit],
     actions: &mut Actions,
 ) {
-    // Arrow keys move through the list unless something else has the keyboard.
-    if !ui.ctx().egui_wants_keyboard_input()
-        && let Some(selected) = view.selected
-    {
-        let (up, down) = ui.input_mut(|i| {
-            (
-                i.consume_key(Modifiers::NONE, Key::ArrowUp),
-                i.consume_key(Modifiers::NONE, Key::ArrowDown),
-            )
-        });
+    if let Some(selected) = view.selected {
+        let up = keys::plain_key(ui.ctx(), Key::ArrowUp);
+        let down = keys::plain_key(ui.ctx(), Key::ArrowDown);
         if up && selected > 0 {
             actions.push(Action::SelectFileCommit(selected - 1));
         } else if down && selected + 1 < commits.len() {

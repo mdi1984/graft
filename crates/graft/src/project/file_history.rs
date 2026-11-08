@@ -41,7 +41,7 @@ impl Project {
             view => view,
         };
         self.show_view(WorkspaceView::FileHistory);
-        self.commit_diff = None;
+        self.read_only_diff = None;
         self.file_history = Some(FileHistoryView {
             path: path.clone(),
             commits: None,
@@ -53,7 +53,7 @@ impl Project {
         });
         let git = self.wt_git();
         let asked = path.clone();
-        self.spawn(
+        self.jobs.spawn(
             move || file_log::log(&git, &asked, LIMIT),
             move |p, result| p.on_file_log(path, readable(result)),
         );
@@ -110,7 +110,7 @@ impl Project {
         view.blame = None;
         view.ticket = ticket;
         let git = self.git.clone();
-        self.spawn(
+        self.jobs.spawn(
             move || file_log::blame(&git, commit.id, &commit.path),
             move |p, result: anyhow::Result<Blame>| {
                 if let Some(view) = p.file_history.as_mut().filter(|v| v.ticket == ticket) {
@@ -124,7 +124,7 @@ impl Project {
         if let Some(view) = self.file_history.take() {
             self.nav.view = view.back;
         }
-        self.commit_diff = None;
+        self.read_only_diff = None;
     }
 
     pub(super) fn set_file_history_mode(&mut self, mode: FileHistoryMode) {

@@ -24,7 +24,7 @@ use super::icons::Icon;
 use super::widgets::{
     ButtonKind, button, elided_path, empty_state, icon_button, paint_galley_left, waiting,
 };
-use crate::keys::Command;
+use crate::keys::{self, Command};
 use crate::project::comments::{LineComment, Pick, Placed, Side};
 use crate::project::{Action, Confirm, DiffView, Project};
 use crate::settings::Settings;
@@ -385,7 +385,7 @@ pub fn show_view(
     settings: &Settings,
     actions: &mut Actions,
 ) {
-    if matches!(view.key.source, Source::Commit(_)) && ui.input(|i| i.key_pressed(Key::Escape)) {
+    if matches!(view.key.source, Source::Commit(_)) && keys::plain_key(ui.ctx(), Key::Escape) {
         actions.push(Action::CloseCommitFile);
     }
     header(ui, view, busy, settings, actions);
@@ -432,7 +432,7 @@ pub fn body(
         empty_state(ui, "No line changes", detail);
         return;
     }
-    if ui.input(|i| i.key_pressed(Key::Escape)) && !view.selection.is_empty() {
+    if !view.selection.is_empty() && keys::plain_key(ui.ctx(), Key::Escape) {
         actions.push(Action::ClearLines);
     }
     diff_scroll_style(ui);

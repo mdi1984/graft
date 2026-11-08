@@ -72,7 +72,8 @@ impl Project {
         }
         let git = self.git_at(at);
         self.op = Some(Running::new(format!("{label}…")));
-        self.spawn(move || job(git), |p, result| p.end_op(result, done));
+        self.jobs
+            .spawn(move || job(git), |p, result| p.end_op(result, done));
         true
     }
 
@@ -90,9 +91,9 @@ impl Project {
         }
         let git = self.git_at(at);
         let (running, cancel) = Running::cancellable(format!("{label}…"));
-        let report = running.reporter(self.pool.waker());
+        let report = running.reporter(self.jobs.waker());
         self.op = Some(running);
-        self.spawn_long(
+        self.jobs.spawn_long(
             move |_| job(git, &cancel, &report),
             |p, result| p.end_op(result, done),
         );

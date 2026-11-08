@@ -73,19 +73,24 @@ pub struct StartPage {
     saved_clone_parent: PathBuf,
 }
 
-/// A recently opened repository; `exists` is checked when the list changes,
-/// not every frame.
+/// A recently opened repository. `exists` is checked in the background
+/// (see [`Recent::is_there`]) when the list is shown, not every frame.
 pub struct Recent {
     pub path: PathBuf,
     pub exists: bool,
 }
 
 impl Recent {
+    /// Assumed to exist until it was checked.
     pub fn new(path: PathBuf) -> Self {
+        Self { path, exists: true }
+    }
+
+    /// Whether the folder at `path` is still there. Reads the disk.
+    pub fn is_there(path: &Path) -> bool {
         // Looking into WSL would start a stopped distro, and this runs when
         // Graft starts: assume it is there; opening says if it is not.
-        let exists = graft_core::wsl::Wsl::of(&path).is_some() || path.is_dir();
-        Self { path, exists }
+        graft_core::wsl::Wsl::of(path).is_some() || path.is_dir()
     }
 }
 
@@ -975,7 +980,7 @@ mod tests {
     #[test]
     fn recent_wsl_entries_are_not_looked_up() {
         // A stopped distro must not start just to draw the start page.
-        assert!(Recent::new(PathBuf::from(r"\\wsl.localhost\Gone\home\x")).exists);
-        assert!(!Recent::new(PathBuf::from(r"C:\graft-no-such-folder-x")).exists);
+        assert!(Recent::is_there(Path::new(r"\\wsl.localhost\Gone\home\x")));
+        assert!(!Recent::is_there(Path::new(r"C:\graft-no-such-folder-x")));
     }
 }

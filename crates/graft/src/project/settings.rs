@@ -37,7 +37,7 @@ impl Project {
         }
         self.auto_fetching = true;
         let git = self.git.clone();
-        self.spawn_long(
+        self.jobs.spawn_long(
             move |_| remote::fetch(&git, false, &CancelToken::default(), |_| {}),
             |p, result| {
                 p.auto_fetching = false;
@@ -54,7 +54,7 @@ impl Project {
     pub(super) fn load_identity(&mut self) {
         self.identity = None;
         let git = self.git.clone();
-        self.spawn(
+        self.jobs.spawn(
             move || identity::load(&git),
             |p, result| p.identity = Some(readable(result)),
         );

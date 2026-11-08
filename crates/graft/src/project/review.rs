@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use super::changes::{SideLines, Slot};
 use super::comments::{self, LineComment, Pick, Side};
 use super::{FileKey, Project, readable};
+use crate::text::plural;
 
 /// What Graft remembers about reviewing one worktree.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -67,7 +68,6 @@ impl ReviewState {
 pub struct ReviewView {
     pub worktree: PathBuf,
     pub data: Option<Result<Arc<Review>, String>>,
-    pub loading: bool,
     /// Path of the file whose diff is open.
     pub selected: Option<String>,
     /// Show diffs side by side (else unified).
@@ -110,7 +110,7 @@ impl Project {
             .map(|(_, state)| state)
     }
 
-    pub fn review_state_mut(&mut self) -> &mut ReviewState {
+    fn review_state_mut(&mut self) -> &mut ReviewState {
         let reviews = &mut self.memory.reviews;
         let key = reviews
             .keys()
@@ -137,7 +137,6 @@ impl Project {
             self.review = Some(ReviewView {
                 worktree,
                 data: None,
-                loading: false,
                 selected: None,
                 split,
                 pick: None,
@@ -146,12 +145,10 @@ impl Project {
                 focus_draft: false,
                 ticket: 0,
             });
-            self.commit_diff = None;
+            self.read_only_diff = None;
         }
         let ticket = self.ticket();
-        let view = self.review.as_mut().expect("just set");
-        view.loading = true;
-        view.ticket = ticket;
+        self.review.as_mut().expect("just set").ticket = ticket;
 
         let current = self.worktree().and_then(|wt| wt.branch.as_deref());
         let base = self
@@ -159,7 +156,7 @@ impl Project {
             .and_then(|s| s.base.clone())
             .or_else(|| review::default_base(self.snapshot.as_ref()?, current));
         let git = self.wt_git();
-        self.spawn(
+        self.jobs.spawn(
             move || {
                 let base = base.ok_or_else(|| {
                     anyhow::anyhow!(
@@ -177,11 +174,10 @@ impl Project {
         let Some(view) = self.review.as_mut().filter(|v| v.ticket == ticket) else {
             return;
         };
-        view.loading = false;
         let old = view.selected.as_ref().and_then(|p| view.file(p)).cloned();
         view.data = Some(result.map(Arc::new));
         let Some(files) = view.review().map(|r| r.files.clone()) else {
-            self.commit_diff = None;
+            self.read_only_diff = None;
             return;
         };
         // Keep the open file; else open the first one not viewed yet.
@@ -206,7 +202,7 @@ impl Project {
                 if let Some(view) = &mut self.review {
                     view.selected = None;
                 }
-                self.commit_diff = None;
+                self.read_only_diff = None;
             }
         }
     }
@@ -229,14 +225,14 @@ impl Project {
         }
         view.selected = Some(path.clone());
         let key = FileKey { source, path };
-        let same = self.commit_diff.as_ref().is_some_and(|d| d.key == key);
+        let same = self.read_only_diff.as_ref().is_some_and(|d| d.key == key);
         if same && reload {
             // Keeps the lines shown and the unchanged lines opened up.
             self.load_view(Slot::ReadOnly);
             return;
         }
         if !same {
-            self.commit_diff = None;
+            self.read_only_diff = None;
         }
         self.select_commit_file(key);
     }
@@ -265,7 +261,7 @@ impl Project {
         let Some(pick) = self.review.as_ref().and_then(|v| v.pick) else {
             return;
         };
-        let Some(view) = &mut self.commit_diff else {
+        let Some(view) = &mut self.read_only_diff else {
             return;
         };
         let (lo, hi) = (
@@ -370,7 +366,7 @@ impl Project {
             let (Some(pick), Some(path), Some(diff)) = (
                 view.pick,
                 view.selected.clone(),
-                self.commit_diff.as_ref().and_then(|d| d.diff.as_ref()),
+                self.read_only_diff.as_ref().and_then(|d| d.diff.as_ref()),
             ) else {
                 return;
             };
@@ -425,6 +421,35 @@ impl Project {
             view.editing = None;
             view.draft.clear();
         }
+    }
+
+    pub(super) fn set_file_note(&mut self, path: String, text: String) {
+        let notes = &mut self.review_state_mut().notes;
+        if text.is_empty() {
+            notes.remove(&path);
+        } else {
+            notes.insert(path, text);
+        }
+    }
+
+    pub(super) fn copy_review_comments(&mut self) {
+        let (Some(wt), Some(review), Some(state)) = (
+            self.worktree(),
+            self.review.as_ref().and_then(ReviewView::review),
+            self.review_state(),
+        ) else {
+            return;
+        };
+        let count = state.comment_count();
+        if count == 0 {
+            return;
+        }
+        let title = format!("{} against {}", wt.label(), review.base);
+        self.clipboard = Some(comments::export(&title, &state.notes, &state.comments));
+        self.infos.push(format!(
+            "Copied {} for your agent",
+            plural(count, "comment")
+        ));
     }
 
     pub(super) fn clear_review_comments(&mut self) {

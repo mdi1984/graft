@@ -5,7 +5,7 @@ use graft_core::refs::{self, RefKind, ResetMode, check_ref_name};
 use graft_core::refusal::{NOT_MERGED, blocked_by_changes, blocked_by_untracked, files_in_the_way};
 use graft_core::{Git, Oid, conflicts, remote, stash};
 
-use super::conflicts::{after_conflicts, merge_messages};
+use super::conflicts::after_conflicts;
 use super::ops::{At, say};
 use super::{Action, Confirm, Project, Tab, WorkspaceView};
 
@@ -339,12 +339,15 @@ impl Project {
             DialogKind::Merge {
                 into, rev, no_ff, ..
             } => {
-                let (done, stopped) = merge_messages(&rev, &into);
+                let (done, doing) = (
+                    format!("Merged {rev} into {into}"),
+                    format!("Merging {rev}"),
+                );
                 self.run_op(
                     At::Selected,
                     "Merging",
                     move |git| graft_core::conflicts::merge(&git, &rev, no_ff),
-                    from_dialog(after_conflicts(done, stopped, None)),
+                    from_dialog(after_conflicts(done, doing, None)),
                 )
             }
             DialogKind::Remote {
@@ -386,6 +389,40 @@ impl Project {
                     from_dialog(say(done)),
                 )
             }
+        }
+    }
+
+    /// The main folder. Checkouts always happen there, never in a linked
+    /// worktree: a worktree keeps its branch.
+    pub fn main_worktree(&self) -> Option<&graft_core::Worktree> {
+        self.snapshot.as_ref()?.main_worktree()
+    }
+
+    /// Why the main folder can't switch now, for a readable notice.
+    fn checkout_blocked(&self) -> Option<&'static str> {
+        let snap = self.snapshot.as_ref()?;
+        if snap.preview.is_some() {
+            Some("The main folder shows a preview. Restore main first, then check out.")
+        } else if self
+            .main_worktree()
+            .is_some_and(|wt| wt.in_progress.is_some())
+        {
+            Some(
+                "A merge, rebase, cherry-pick or revert is still going on in the main folder. \
+                 Finish or abort it first, then check out.",
+            )
+        } else {
+            None
+        }
+    }
+
+    /// " in the main folder" while a linked worktree is selected, so a menu
+    /// says where a checkout lands; empty while the main folder is selected.
+    pub fn in_main_suffix(&self) -> &'static str {
+        if self.worktree().is_some_and(|wt| !wt.is_main) {
+            " in the main folder"
+        } else {
+            ""
         }
     }
 
@@ -513,28 +550,24 @@ impl Project {
     pub(super) fn cherry_pick(&mut self, id: Oid) {
         let short = graft_core::short(&id);
         let done = format!("Cherry-picked {short}");
-        let stopped = format!(
-            "Cherry-picking {short} stopped with conflicts. Resolve them in File status, then Continue."
-        );
+        let doing = format!("Cherry-picking {short}");
         self.run_op(
             At::Selected,
             "Cherry-picking",
             move |git| conflicts::cherry_pick(&git, &id.to_string()),
-            after_conflicts(done, stopped, None),
+            after_conflicts(done, doing, None),
         );
     }
 
     pub(super) fn revert(&mut self, id: Oid) {
         let short = graft_core::short(&id);
         let done = format!("Reverted {short}");
-        let stopped = format!(
-            "Reverting {short} stopped with conflicts. Resolve them in File status, then Continue."
-        );
+        let doing = format!("Reverting {short}");
         self.run_op(
             At::Selected,
             "Reverting",
             move |git| conflicts::revert(&git, &id.to_string()),
-            after_conflicts(done, stopped, None),
+            after_conflicts(done, doing, None),
         );
     }
 
@@ -555,45 +588,9 @@ impl Project {
 mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command as Cmd;
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
-
-    use graft_core::JobPool;
-    use graft_core::console::Console;
 
     use super::*;
-    use crate::project::RepoMemory;
-    use crate::settings::Settings;
-
-    fn git(dir: &Path, args: &[&str]) {
-        let status = Cmd::new("git")
-            .args([
-                "-c",
-                "user.name=t",
-                "-c",
-                "user.email=t@t",
-                "-c",
-                "commit.gpgsign=false",
-            ])
-            .args(args)
-            .current_dir(dir)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?}");
-    }
-
-    /// Poll until `done` holds for the project.
-    fn wait(project: &mut Project, what: &str, done: impl Fn(&Project) -> bool) {
-        let start = Instant::now();
-        loop {
-            project.poll();
-            if done(project) {
-                return;
-            }
-            assert!(start.elapsed() < Duration::from_secs(20), "{what}");
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
+    use crate::testing::{git, open, wait};
 
     fn branch_at(project: &Project, path: &Path) -> Option<String> {
         project.snapshot.as_ref()?.worktree_at(path)?.branch.clone()
@@ -626,18 +623,7 @@ mod tests {
         git(&main, &["worktree", "add", "-q", "-b", "agent", linked_arg]);
         prepare(&main);
 
-        let pool = JobPool::new(2, Arc::new(|| {}));
-        let mut project = Project::new(
-            main.clone(),
-            main.clone(),
-            Settings::default(),
-            RepoMemory::default(),
-            Console::default(),
-            pool,
-        );
-        wait(&mut project, "snapshot never came", |p| {
-            p.snapshot.is_some()
-        });
+        let mut project = open(&main);
         // Git's spelling of the folders (the temp folder may be a short name).
         let snap = project.snapshot.clone().unwrap();
         let main = snap.main_worktree().unwrap().path.clone();
@@ -790,12 +776,7 @@ mod tests {
             main,
             linked,
         } = setup(|_| {});
-        std::fs::write(
-            linked.join("b.txt"),
-            "agent's work
-",
-        )
-        .unwrap();
+        std::fs::write(linked.join("b.txt"), "agent's work\n").unwrap();
         project.refresh();
         wait(&mut project, "no diff for the new file", |p| {
             p.diff_view.as_ref().is_some_and(|v| v.key.path == "b.txt")

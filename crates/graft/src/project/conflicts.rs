@@ -81,24 +81,29 @@ pub fn merge_dialog(project: &Project, rev: Option<&str>) -> Option<DialogKind> 
     })
 }
 
-/// What to say when merging `rev` into `into` worked, or stopped.
-pub(super) fn merge_messages(rev: &str, into: &str) -> (String, String) {
-    (
-        format!("Merged {rev} into {into}"),
-        format!(
-            "Merging {rev} stopped with conflicts. Resolve them in File status, then Continue."
-        ),
-    )
+/// Where conflicts are resolved when an operation ran outside the selected
+/// worktree.
+pub(super) struct Elsewhere {
+    pub path: PathBuf,
+    /// How the message names it, e.g. its branch.
+    pub name: String,
 }
 
 /// The ending of a merge, rebase, cherry-pick, revert or continue (the job
-/// says whether it stopped with conflicts): say `done`, or show the
-/// conflicts in File status, of the worktree `elsewhere` if it ran there.
+/// says whether it stopped with conflicts): say `done`, or say that `doing`
+/// ("Merging x") stopped and show the conflicts in File status, of the
+/// worktree `elsewhere` if it ran there.
 pub(super) fn after_conflicts(
     done: String,
-    stopped: String,
-    elsewhere: Option<PathBuf>,
+    doing: String,
+    elsewhere: Option<Elsewhere>,
 ) -> impl FnOnce(&mut Project, anyhow::Result<bool>) + Send {
+    let place = match &elsewhere {
+        Some(e) => format!("File status of {}", e.name),
+        None => "File status".to_owned(),
+    };
+    let stopped =
+        format!("{doing} stopped with conflicts. Resolve them in {place}, then Continue.");
     move |p, result| match result {
         Ok(false) => {
             p.infos.push(done);
@@ -110,8 +115,8 @@ pub(super) fn after_conflicts(
         Ok(true) => {
             p.infos.push(stopped);
             p.nav.tab = Tab::Workspace;
-            if let Some(path) = elsewhere {
-                p.open_worktree(path);
+            if let Some(e) = elsewhere {
+                p.open_worktree(e.path);
             }
             p.nav.view = WorkspaceView::FileStatus;
         }
@@ -120,7 +125,7 @@ pub(super) fn after_conflicts(
 }
 
 impl Project {
-    /// Paths with conflicts in the selected worktree.
+    /// Whether `path` has conflicts in the selected worktree.
     pub fn is_conflicted(&self, path: &str) -> bool {
         self.worktree()
             .and_then(|wt| wt.status.as_ref())
@@ -152,7 +157,7 @@ impl Project {
             ticket,
         });
         let git = self.wt_git();
-        self.spawn(
+        self.jobs.spawn(
             move || conflicts::load(&git, &path),
             move |p, result| {
                 let Some(view) = p.conflict.as_mut().filter(|v| v.ticket == ticket) else {
@@ -171,28 +176,27 @@ impl Project {
     /// out; conflicts are resolved there.
     pub(super) fn merge_reviewed(&mut self, worktree: PathBuf, branch: String, into: String) {
         let done = format!("Merged {branch} into {into}");
-        let stopped = format!(
-            "Merging {branch} into {into} stopped with conflicts. Resolve them in \
-             File status of {into}, then Continue."
-        );
+        let doing = format!("Merging {branch} into {into}");
+        let elsewhere = Elsewhere {
+            path: worktree.clone(),
+            name: into,
+        };
         self.run_op(
-            At::Path(worktree.clone()),
+            At::Path(worktree),
             "Merging",
             move |git| conflicts::merge(&git, &branch, false),
-            after_conflicts(done, stopped, Some(worktree)),
+            after_conflicts(done, doing, Some(elsewhere)),
         );
     }
 
     pub(super) fn rebase(&mut self, onto: String) {
         let done = format!("Rebased onto {onto}");
-        let stopped = format!(
-            "Rebasing onto {onto} stopped with conflicts. Resolve them in File status, then Continue."
-        );
+        let doing = format!("Rebasing onto {onto}");
         self.run_op(
             At::Selected,
             "Rebasing",
             move |git| conflicts::rebase(&git, &onto),
-            after_conflicts(done, stopped, None),
+            after_conflicts(done, doing, None),
         );
     }
 
@@ -265,12 +269,13 @@ impl Project {
 
     pub(super) fn continue_op(&mut self, kind: Operation) {
         let done = format!("{} finished", kind.noun());
-        let stopped = "The next commit has conflicts too. Resolve them, then Continue.".to_owned();
+        let noun = kind.noun().to_lowercase();
+        let doing = format!("Continuing the {noun}");
         self.run_op(
             At::Selected,
-            &format!("Continuing {}", kind.noun().to_lowercase()),
+            &format!("Continuing {noun}"),
             move |git| conflicts::continue_op(&git, kind),
-            after_conflicts(done, stopped, None),
+            after_conflicts(done, doing, None),
         );
     }
 

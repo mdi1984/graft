@@ -19,6 +19,7 @@ use super::widgets::{
     paint_galley_left,
 };
 use super::{branch_menu, diff_view};
+use crate::keys;
 use crate::project::{Action, DialogKind, FileKey, Project, RefKind, RefLabel};
 use crate::text::plural;
 use crate::theme::{self, color};
@@ -62,7 +63,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
         );
         return;
     }
-    if let Some(view) = &project.commit_diff {
+    if let Some(view) = &project.read_only_diff {
         let height = ui.available_height();
         Panel::bottom("history-diff")
             .exact_size((height * 0.55).max(160.0))
@@ -136,13 +137,18 @@ fn commit_list(ui: &mut Ui, project: &Project, history: &History, actions: &mut 
     let selected = project
         .selected
         .and_then(|id| history.index.get(&id).copied());
-    keyboard_nav(ui, history, selected, project, actions);
+    keyboard_nav(ui, history, selected, actions);
 
     let list_id = Id::unique(("history-list", &project.root));
     let mut scroll = ScrollArea::vertical()
         .id_salt(list_id)
         .auto_shrink([false, false]);
-    if project.scroll_to_selected.take()
+    // The project bumps its scroll request; the list remembers the last one
+    // it followed.
+    let seen_id = list_id.with("scroll-request");
+    let seen = ui.data(|d| d.get_temp::<u64>(seen_id)).unwrap_or(0);
+    ui.data_mut(|d| d.insert_temp(seen_id, project.scroll_request));
+    if seen != project.scroll_request
         && let Some(i) = selected
     {
         let (offset, height) = ui
@@ -180,7 +186,10 @@ fn commit_list(ui: &mut Ui, project: &Project, history: &History, actions: &mut 
                 worktree_dirty,
             );
             if response.clicked() {
-                actions.push(Action::Select(commit.id));
+                actions.push(Action::Select {
+                    id: commit.id,
+                    scroll: false,
+                });
             }
             if response.double_clicked() && commit.is_worktree() {
                 actions.push(Action::ShowFileStatus);
@@ -215,26 +224,16 @@ fn scroll_target(i: usize, offset: f32, height: f32) -> Option<f32> {
     }
 }
 
-fn keyboard_nav(
-    ui: &Ui,
-    history: &History,
-    selected: Option<usize>,
-    project: &Project,
-    actions: &mut Actions,
-) {
-    if ui.memory(|m| m.focused().is_some()) {
-        return;
-    }
-    let (up, down, page_up, page_down, home, end) = ui.input(|i| {
-        (
-            i.key_pressed(Key::ArrowUp),
-            i.key_pressed(Key::ArrowDown),
-            i.key_pressed(Key::PageUp),
-            i.key_pressed(Key::PageDown),
-            i.key_pressed(Key::Home),
-            i.key_pressed(Key::End),
-        )
-    });
+fn keyboard_nav(ui: &Ui, history: &History, selected: Option<usize>, actions: &mut Actions) {
+    let key = |key| keys::plain_key(ui.ctx(), key);
+    let (up, down, page_up, page_down, home, end) = (
+        key(Key::ArrowUp),
+        key(Key::ArrowDown),
+        key(Key::PageUp),
+        key(Key::PageDown),
+        key(Key::Home),
+        key(Key::End),
+    );
     let last = history.commits.len().saturating_sub(1);
     let current = selected.unwrap_or(0);
     let page = 20;
@@ -254,8 +253,10 @@ fn keyboard_nav(
         return;
     };
     if Some(next) != selected {
-        actions.push(Action::Select(history.commits[next].id));
-        project.scroll_to_selected.set(true);
+        actions.push(Action::Select {
+            id: history.commits[next].id,
+            scroll: true,
+        });
     }
 }
 
@@ -760,7 +761,7 @@ fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &m
                 .size(theme::SMALL_SIZE),
         );
     }
-    let open = project.commit_diff.as_ref().map(|v| &v.key);
+    let open = project.read_only_diff.as_ref().map(|v| &v.key);
     for file in &d.files {
         let key = FileKey {
             source: Source::Commit(d.id),

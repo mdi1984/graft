@@ -10,6 +10,7 @@ mod changes;
 pub mod comments;
 mod conflicts;
 mod file_history;
+mod launch;
 mod ops;
 mod preview;
 mod refs;
@@ -20,13 +21,11 @@ mod slash;
 mod stashes;
 mod worktrees;
 
-use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crossbeam_channel::{Receiver, Sender};
 use graft_core::console::Console;
 use graft_core::details::{self, CommitDetails};
 use graft_core::history::{self, Commit, History};
@@ -34,8 +33,8 @@ use graft_core::ops::LineOp;
 use graft_core::stash::{Stash, StashFile};
 use graft_core::watch::Watcher;
 use graft_core::{
-    CancelToken, Git, JobPool, Oid, Operation, Panicked, RepoSnapshot, Waker, Worktree,
-    is_cancelled, null_oid, snapshot,
+    CancelToken, Git, JobPool, Oid, Operation, RepoSnapshot, Worktree, is_cancelled, null_oid,
+    snapshot,
 };
 
 pub use changes::{CommitForm, DiffView, FileKey};
@@ -47,6 +46,7 @@ pub use review::{ReviewState, ReviewView};
 pub use slash::{SlashView, SlashedBranch};
 pub use worktrees::{BranchMode, NewWorktreeForm, checkout_choices};
 
+use crate::jobs::Jobs;
 use crate::running::Running;
 use crate::settings::Settings;
 
@@ -96,8 +96,12 @@ pub enum Action {
     ShowFileStatus,
     ShowHistory,
     SetTab(Tab),
-    /// Select a commit (the null id selects "Uncommitted changes").
-    Select(Oid),
+    /// Select a commit (the null id selects "Uncommitted changes"); with
+    /// `scroll`, the history list scrolls to it.
+    Select {
+        id: Oid,
+        scroll: bool,
+    },
     /// Show a commit in History, scrolled into view.
     Reveal(Oid),
     Refresh,
@@ -250,6 +254,13 @@ pub enum Action {
     DeleteComment(u64),
     /// Remove every line comment and file note of this review.
     ClearReviewComments,
+    /// Copy every comment of this review as Markdown for a coding agent.
+    CopyReviewComments,
+    /// Set the note on the whole file at `path`; empty text removes it.
+    SetFileNote {
+        path: String,
+        text: String,
+    },
     /// Merge the reviewed branch into its base, in the worktree that has the
     /// base checked out.
     MergeReviewed {
@@ -343,8 +354,11 @@ pub struct RepoMemory {
 }
 
 impl RepoMemory {
-    /// Without the reviews that remember nothing.
+    /// Without blank file notes and the reviews that remember nothing.
     pub fn pruned(mut self) -> Self {
+        for state in self.reviews.values_mut() {
+            state.notes.retain(|_, note| !note.trim().is_empty());
+        }
         self.reviews.retain(|_, state| !state.is_empty());
         self
     }
@@ -361,15 +375,10 @@ enum Pending {
     Revealed,
 }
 
-/// A finished job's result, applied to the project on the UI thread.
-struct Done(Box<dyn FnOnce(&mut Project) + Send>);
-
-impl From<Panicked> for Done {
-    fn from(panic: Panicked) -> Self {
-        Done(Box::new(move |project| {
-            project.op = None;
-            project.notices.push(panic.0);
-        }))
+impl crate::jobs::Owner for Project {
+    fn panicked(&mut self, message: String) {
+        self.op = None;
+        self.notices.push(message);
     }
 }
 
@@ -382,9 +391,7 @@ pub struct Project {
     pub root: PathBuf,
     pub name: String,
     git: Git,
-    pool: JobPool,
-    tx: Sender<Done>,
-    rx: Receiver<Done>,
+    jobs: Jobs<Project>,
 
     pub nav: Nav,
     /// Shared, so screens can hold it without copying it every frame.
@@ -413,12 +420,13 @@ pub struct Project {
     pub selected: Option<Oid>,
     pub details: Option<CommitDetails>,
     pub details_error: Option<String>,
-    /// Set when the history list should scroll the selection into view.
-    pub scroll_to_selected: Cell<bool>,
+    /// Bumped when the history list should scroll the selection into view.
+    pub scroll_request: u64,
 
     pub diff_view: Option<DiffView>,
-    /// A file of the selected commit or stash, read-only.
-    pub commit_diff: Option<DiffView>,
+    /// A file diff that only shows: of the selected commit or stash, of the
+    /// Review tab, or of a commit in File history.
+    pub read_only_diff: Option<DiffView>,
     /// `None` until the Stashes tab was opened.
     pub stashes: Option<Result<Vec<Stash>, String>>,
     pub selected_stash: Option<Oid>,
@@ -447,6 +455,8 @@ pub struct Project {
     pub notices: Vec<String>,
     /// Confirmations for the app to show as toasts.
     pub infos: Vec<String>,
+    /// Text for the app to put on the clipboard.
+    pub clipboard: Option<String>,
 
     pub new_worktree: Option<NewWorktreeForm>,
     pub dialog: Option<Dialog>,
@@ -467,14 +477,11 @@ impl Project {
         console: Console,
         pool: JobPool,
     ) -> Self {
-        let (tx, rx) = crossbeam_channel::unbounded();
         let mut project = Self {
             git: Git::new(&root, console),
             name: graft_core::paths::folder_name(&root),
             root,
-            pool,
-            tx,
-            rx,
+            jobs: Jobs::new(pool),
             nav: Nav {
                 tab: Tab::Workspace,
                 view: WorkspaceView::History,
@@ -498,9 +505,9 @@ impl Project {
             selected: None,
             details: None,
             details_error: None,
-            scroll_to_selected: Cell::new(false),
+            scroll_request: 0,
             diff_view: None,
-            commit_diff: None,
+            read_only_diff: None,
             stashes: None,
             selected_stash: None,
             stash_files: None,
@@ -518,6 +525,7 @@ impl Project {
             confirm: None,
             notices: Vec::new(),
             infos: Vec::new(),
+            clipboard: None,
             new_worktree: None,
             dialog: None,
             pending_open: None,
@@ -528,31 +536,6 @@ impl Project {
         project
     }
 
-    /// Run `job` on the pool; `done` gets its result on the UI thread.
-    fn spawn<T: Send + 'static>(
-        &self,
-        job: impl FnOnce() -> T + Send + 'static,
-        done: impl FnOnce(&mut Project, T) + Send + 'static,
-    ) {
-        self.pool.spawn(&self.tx, move || {
-            let result = job();
-            Done(Box::new(move |project| done(project, result)))
-        });
-    }
-
-    /// Like [`Self::spawn`], on a thread of its own: for jobs that wait on
-    /// the network or the user, so they cannot hold up the pool.
-    fn spawn_long<T: Send + 'static>(
-        &self,
-        job: impl FnOnce(Waker) -> T + Send + 'static,
-        done: impl FnOnce(&mut Project, T) + Send + 'static,
-    ) {
-        self.pool.spawn_long(&self.tx, move |waker| {
-            let result = job(waker);
-            Done(Box::new(move |project| done(project, result)))
-        });
-    }
-
     fn ticket(&mut self) -> u64 {
         self.tickets += 1;
         self.tickets
@@ -561,7 +544,7 @@ impl Project {
     /// Apply results of finished jobs. Call once per frame.
     pub fn poll(&mut self) {
         self.maybe_auto_fetch();
-        while let Ok(Done(apply)) = self.rx.try_recv() {
+        while let Some(apply) = self.jobs.next_done() {
             apply(self);
         }
     }
@@ -593,7 +576,7 @@ impl Project {
         }
         self.loading = true;
         let git = self.git.clone();
-        self.spawn(
+        self.jobs.spawn(
             move || snapshot::load(&git),
             |p, result| p.on_snapshot(readable(result)),
         );
@@ -734,7 +717,7 @@ impl Project {
         let root = self.root.clone();
         let tips = self.tips.clone();
         let cancel = self.history_cancel.clone();
-        self.spawn(
+        self.jobs.spawn(
             move || -> anyhow::Result<_> {
                 let commits = match cached {
                     Some(c) => c,
@@ -785,23 +768,27 @@ impl Project {
         .or_else(|| history.commits.first().map(|c| c.id));
         if let Some(id) = target {
             self.select(id);
-            self.scroll_to_selected.set(true);
+            self.scroll_to_selected();
         }
     }
 
-    pub fn select(&mut self, id: Oid) {
+    fn scroll_to_selected(&mut self) {
+        self.scroll_request += 1;
+    }
+
+    pub(super) fn select(&mut self, id: Oid) {
         if self.selected == Some(id) && (self.details.is_some() || id.is_null()) {
             return;
         }
         self.selected = Some(id);
         self.details = None;
-        self.commit_diff = None;
+        self.read_only_diff = None;
         self.details_error = None;
         if id.is_null() {
             return;
         }
         let git = self.git.clone();
-        self.spawn(
+        self.jobs.spawn(
             move || details::load(&git, id),
             move |p, result| {
                 if p.selected == Some(id) {
@@ -818,7 +805,7 @@ impl Project {
         self.pending = self.loading.then_some(Pending::Revealed);
         self.show_view(WorkspaceView::History);
         self.select(id);
-        self.scroll_to_selected.set(true);
+        self.scroll_to_selected();
     }
 
     /// File status for a worktree with changes, else History.
@@ -862,7 +849,7 @@ impl Project {
 
     fn set_tab(&mut self, tab: Tab) {
         self.nav.tab = tab;
-        self.commit_diff = None;
+        self.read_only_diff = None;
         match tab {
             Tab::Workspace => {}
             Tab::Stashes => self.load_stashes(),
@@ -880,20 +867,18 @@ impl Project {
         self.nav.view = view;
     }
 
-    fn open_folder(&mut self, dir: &Path) {
-        if let Err(e) = crate::launch::open_folder(dir) {
-            self.notices
-                .push(format!("Could not open {}: {e}", dir.display()));
-        }
-    }
-
     pub fn apply(&mut self, action: Action) {
         match action {
             Action::OpenWorktree(path) => self.open_worktree(path),
             Action::ShowFileStatus => self.show_view(WorkspaceView::FileStatus),
             Action::ShowHistory => self.show_view(WorkspaceView::History),
             Action::SetTab(tab) => self.set_tab(tab),
-            Action::Select(id) => self.select(id),
+            Action::Select { id, scroll } => {
+                self.select(id);
+                if scroll {
+                    self.scroll_to_selected();
+                }
+            }
             Action::Reveal(id) => self.reveal(id),
             Action::Refresh => self.refresh(),
 
@@ -909,9 +894,7 @@ impl Project {
             Action::Discard { tracked, untracked } => self.discard(tracked, untracked),
             Action::Commit => self.commit(),
             Action::ToggleAmend => self.toggle_amend(),
-            Action::Remote(op) => {
-                self.remote(op);
-            }
+            Action::Remote(op) => self.remote(op),
             Action::CancelOperation => self.cancel_op(),
             Action::Ask(confirm) => self.confirm = Some(*confirm),
             Action::ConfirmYes => {
@@ -930,11 +913,11 @@ impl Project {
             Action::RemoveWorktree { path, force } => self.remove_worktree(path, force),
             Action::LockWorktree { path, locked } => self.lock_worktree(path, locked),
             Action::PruneWorktrees => self.prune_worktrees(),
-            Action::OpenTerminal(dir) => crate::launch::open_terminal(&dir),
-            Action::OpenFolder(dir) => self.open_folder(&dir),
+            Action::OpenTerminal(dir) => self.open_terminal(dir),
+            Action::OpenFolder(dir) => self.open_folder(dir),
 
             Action::SelectCommitFile(key) => self.select_commit_file(key),
-            Action::CloseCommitFile => self.commit_diff = None,
+            Action::CloseCommitFile => self.read_only_diff = None,
 
             Action::SelectStash(id) => self.select_stash(id),
             Action::ApplyStash { id, worktree, pop } => self.apply_stash(id, worktree, pop),
@@ -977,14 +960,14 @@ impl Project {
             Action::EditComment(id) => self.edit_comment(id),
             Action::DeleteComment(id) => self.delete_comment(id),
             Action::ClearReviewComments => self.clear_review_comments(),
+            Action::CopyReviewComments => self.copy_review_comments(),
+            Action::SetFileNote { path, text } => self.set_file_note(path, text),
             Action::MergeReviewed {
                 worktree,
                 branch,
                 into,
             } => self.merge_reviewed(worktree, branch, into),
-            Action::OpenInIde(path) => {
-                crate::launch::open_in_ide(&path, &self.settings.ide_command)
-            }
+            Action::OpenInIde(path) => self.open_in_ide(path),
 
             Action::OpenSlash => self.open_slash(),
             Action::CloseSlash => self.close_slash(),

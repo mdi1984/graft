@@ -39,46 +39,39 @@ impl RemoteOp {
     }
 }
 
+/// How a remote operation ends: what it says, or offers.
+type Ending = Box<dyn FnOnce(&mut Project, anyhow::Result<()>) + Send>;
+
 impl Project {
-    /// Talk to the remote from the selected worktree. False while another
-    /// operation runs.
-    pub(super) fn remote(&mut self, op: RemoteOp) -> bool {
+    /// Talk to the remote from the selected worktree (nothing happens while
+    /// another operation runs).
+    pub(super) fn remote(&mut self, op: RemoteOp) {
         let label = op.label();
-        let job = {
-            let op = op.clone();
-            move |git: Git, cancel: &CancelToken, report: &dyn Fn(Progress)| match op {
-                RemoteOp::Fetch => remote::fetch(&git, false, cancel, report),
-                RemoteOp::Pull => remote::pull(&git, cancel, report),
-                RemoteOp::Push => remote::push(&git, cancel, report),
-                RemoteOp::ForcePush => remote::force_push(&git, cancel, report),
-                RemoteOp::PushTag { remote, tag } => {
-                    remote::push_tag(&git, &remote, &tag, cancel, report)
-                }
-                RemoteOp::DeleteRemoteBranch { remote, branch } => {
-                    remote::delete_remote_branch(&git, &remote, &branch, cancel, report)
-                }
+        let done: Ending = match &op {
+            RemoteOp::Fetch => Box::new(quietly),
+            RemoteOp::Pull => Box::new(say("Pulled".to_owned())),
+            RemoteOp::Push => Box::new(Self::pushed),
+            RemoteOp::ForcePush => Box::new(say("Force pushed".to_owned())),
+            RemoteOp::PushTag { remote, tag } => {
+                Box::new(say(format!("Pushed tag {tag} to {remote}")))
+            }
+            RemoteOp::DeleteRemoteBranch { remote, branch } => {
+                Box::new(say(format!("Deleted {remote}/{branch}")))
             }
         };
-        match op {
-            RemoteOp::Fetch => self.run_long(At::Selected, &label, job, quietly),
-            RemoteOp::Pull => self.run_long(At::Selected, &label, job, say("Pulled".to_owned())),
-            RemoteOp::Push => self.run_long(At::Selected, &label, job, Self::pushed),
-            RemoteOp::ForcePush => {
-                self.run_long(At::Selected, &label, job, say("Force pushed".to_owned()))
+        let job = move |git: Git, cancel: &CancelToken, report: &dyn Fn(Progress)| match op {
+            RemoteOp::Fetch => remote::fetch(&git, false, cancel, report),
+            RemoteOp::Pull => remote::pull(&git, cancel, report),
+            RemoteOp::Push => remote::push(&git, cancel, report),
+            RemoteOp::ForcePush => remote::force_push(&git, cancel, report),
+            RemoteOp::PushTag { remote, tag } => {
+                remote::push_tag(&git, &remote, &tag, cancel, report)
             }
-            RemoteOp::PushTag { remote, tag } => self.run_long(
-                At::Selected,
-                &label,
-                job,
-                say(format!("Pushed tag {tag} to {remote}")),
-            ),
-            RemoteOp::DeleteRemoteBranch { remote, branch } => self.run_long(
-                At::Selected,
-                &label,
-                job,
-                say(format!("Deleted {remote}/{branch}")),
-            ),
-        }
+            RemoteOp::DeleteRemoteBranch { remote, branch } => {
+                remote::delete_remote_branch(&git, &remote, &branch, cancel, report)
+            }
+        };
+        self.run_long(At::Selected, &label, job, done);
     }
 
     /// A plain push ended; if the remote rejected it, offer to force push.

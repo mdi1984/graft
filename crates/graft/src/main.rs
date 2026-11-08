@@ -5,6 +5,7 @@ mod app;
 mod fonts;
 mod groups;
 mod installed;
+mod jobs;
 mod keys;
 mod launch;
 mod native;
@@ -12,11 +13,14 @@ mod project;
 mod running;
 mod settings;
 mod single;
+#[cfg(test)]
+mod testing;
 mod text;
 mod theme;
 mod time;
 mod ui;
 mod update;
+mod version;
 
 use std::sync::{Arc, OnceLock};
 

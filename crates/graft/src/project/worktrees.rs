@@ -10,8 +10,8 @@ use graft_core::refs::{RefKind, check_ref_name};
 use graft_core::watch::Watcher;
 use graft_core::worktree::{self, Start};
 
+use super::Project;
 use super::ops::{At, quietly, say};
-use super::{Done, Project};
 use crate::text::plural;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -235,36 +235,38 @@ impl Project {
         let Some(form) = &self.new_worktree else {
             return;
         };
-        let current = PathBuf::from(form.path.trim());
-        let start = current
+        let typed = PathBuf::from(form.path.trim())
             .parent()
-            .filter(|p| p.is_dir())
-            .map(Path::to_path_buf)
-            .or_else(|| self.root.parent().map(Path::to_path_buf));
-        self.spawn_long(
+            .map(Path::to_path_buf);
+        let fallback = self.root.parent().map(Path::to_path_buf);
+        self.jobs.spawn_long(
             move |_| {
+                let start = typed.filter(|p| p.is_dir()).or(fallback);
                 let mut dialog = rfd::FileDialog::new().set_title("Where should the worktree go?");
                 if let Some(dir) = start {
                     dialog = dialog.set_directory(dir);
                 }
-                dialog.pick_folder()
+                let folder = dialog.pick_folder()?;
+                let empty = folder
+                    .read_dir()
+                    .map(|mut d| d.next().is_none())
+                    .unwrap_or(false);
+                Some((folder, empty))
             },
-            |p, folder| p.on_picked_folder(folder),
+            |p, picked| {
+                if let Some((folder, empty)) = picked {
+                    p.on_picked_folder(folder, empty);
+                }
+            },
         );
     }
 
     /// A folder came back from the picker: the worktree goes in a new folder
-    /// named after the branch inside it, unless it is empty.
-    fn on_picked_folder(&mut self, folder: Option<PathBuf>) {
-        let (Some(form), Some(snap), Some(folder)) =
-            (&mut self.new_worktree, &self.snapshot, folder)
-        else {
+    /// named after the branch inside it, unless it is `empty`.
+    fn on_picked_folder(&mut self, folder: PathBuf, empty: bool) {
+        let (Some(form), Some(snap)) = (&mut self.new_worktree, &self.snapshot) else {
             return;
         };
-        let empty = folder
-            .read_dir()
-            .map(|mut d| d.next().is_none())
-            .unwrap_or(false);
         let branch = form.branch(snap);
         let path = if empty || branch.is_empty() {
             folder
@@ -323,15 +325,13 @@ impl Project {
         }
         self.watched = roots.clone();
         self.watcher = None;
-        let tx = self.tx.clone();
-        let waker = self.pool.waker();
+        let post = self.jobs.poster();
         let changed = move || {
-            let _ = tx.send(Done(Box::new(|p| {
+            post(Box::new(|p: &mut Project| {
                 if !p.is_operating() {
                     p.refresh();
                 }
-            })));
-            waker();
+            }))
         };
         match Watcher::new(roots, changed) {
             Ok(watcher) => self.watcher = Some(watcher),

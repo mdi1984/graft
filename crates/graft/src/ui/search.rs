@@ -482,31 +482,9 @@ fn row(ui: &mut Ui, hit: &Hit, selected: bool) -> egui::Response {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
-    use std::process::Command as Cmd;
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
-
-    use graft_core::JobPool;
-    use graft_core::console::Console;
 
     use super::*;
-
-    fn git(dir: &Path, args: &[&str]) {
-        let status = Cmd::new("git")
-            .args([
-                "-c",
-                "user.name=t",
-                "-c",
-                "user.email=t@t",
-                "-c",
-                "commit.gpgsign=false",
-            ])
-            .args(args)
-            .current_dir(dir)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?}");
-    }
+    use crate::testing::{git, open};
 
     /// A repo with one commit and an extra branch `branch`.
     fn repo(dir: &Path, branch: &str) {
@@ -517,34 +495,12 @@ mod tests {
         git(dir, &["branch", branch]);
     }
 
-    fn open(root: &Path, pool: &JobPool) -> Project {
-        let mut project = Project::new(
-            root.to_path_buf(),
-            root.to_path_buf(),
-            Default::default(),
-            Default::default(),
-            Console::default(),
-            pool.clone(),
-        );
-        let start = Instant::now();
-        while project.snapshot.is_none() {
-            assert!(
-                start.elapsed() < Duration::from_secs(20),
-                "snapshot never came"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-            project.poll();
-        }
-        project
-    }
-
     #[test]
     fn finds_branches_in_other_projects() {
         let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         repo(a.path(), "feature-here");
         repo(b.path(), "feature-there");
-        let pool = JobPool::new(2, Arc::new(|| {}));
-        let projects = [open(a.path(), &pool), open(b.path(), &pool)];
+        let projects = [open(a.path()), open(b.path())];
 
         // Searching from the second tab: its own hit comes first.
         let found: Vec<Hit> = hits(&projects, 1, "feature")
@@ -571,12 +527,7 @@ mod tests {
         repo(a.path(), "topic");
         repo(b.path(), "topic");
         repo(c.path(), "topic");
-        let pool = JobPool::new(2, Arc::new(|| {}));
-        let projects = [
-            open(a.path(), &pool),
-            open(b.path(), &pool),
-            open(c.path(), &pool),
-        ];
+        let projects = [open(a.path()), open(b.path()), open(c.path())];
         let (na, nc) = (projects[0].name.as_str(), projects[2].name.as_str());
 
         // "main" matches each project's main worktree and main branch.
@@ -608,8 +559,7 @@ mod tests {
         let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         repo(a.path(), "only-in-a");
         repo(b.path(), "topic");
-        let pool = JobPool::new(2, Arc::new(|| {}));
-        let projects = [open(a.path(), &pool), open(b.path(), &pool)];
+        let projects = [open(a.path()), open(b.path())];
 
         let results = hits(&projects, 0, "only-in-a");
         assert!(!results.is_empty());
@@ -622,8 +572,7 @@ mod tests {
         let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         repo(a.path(), "topic");
         repo(b.path(), "only-in-b");
-        let pool = JobPool::new(2, Arc::new(|| {}));
-        let projects = [open(a.path(), &pool), open(b.path(), &pool)];
+        let projects = [open(a.path()), open(b.path())];
 
         // The popup puts "No matches" under the active project on top.
         let results = hits(&projects, 0, "only-in-b");
@@ -643,8 +592,7 @@ mod tests {
             std::fs::create_dir_all(root).unwrap();
             repo(root, "topic");
         }
-        let pool = JobPool::new(2, Arc::new(|| {}));
-        let projects: Vec<Project> = roots.iter().map(|r| open(r, &pool)).collect();
+        let projects: Vec<Project> = roots.iter().map(|r| open(r)).collect();
 
         let results = hits(&projects, 0, "topic");
         assert_eq!(headers(&results), ["here", "app", "app"]);

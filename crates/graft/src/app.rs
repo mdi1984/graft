@@ -5,15 +5,16 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::Receiver;
 use egui::{CentralPanel, Frame, Margin, Panel};
 use graft_core::console::Console;
 use graft_core::paths::same_path;
 use graft_core::repo::{self, Location};
-use graft_core::{JobPool, Panicked, Waker, is_cancelled};
+use graft_core::{JobPool, Waker, is_cancelled};
 use serde::{Deserialize, Serialize};
 
 use crate::groups::{self, GroupId, TabGroup};
+use crate::jobs::Jobs;
 use crate::keys::{self, Command};
 use crate::project::{Action, Project, RepoMemory, ReviewState, SlashedBranch};
 use crate::running::Running;
@@ -43,7 +44,8 @@ struct Persisted {
     groups: Vec<TabGroup>,
     clone_parent: Option<PathBuf>,
     console_open: bool,
-    /// Review marks and notes per repository root, then per worktree.
+    /// Review state (viewed marks, notes, comments, base branch) per
+    /// repository root, then per worktree.
     reviews: HashMap<PathBuf, HashMap<PathBuf, ReviewState>>,
     /// "Recently slashed" per repository root.
     slashed: HashMap<PathBuf, Vec<SlashedBranch>>,
@@ -77,12 +79,9 @@ impl Persisted {
     }
 }
 
-/// A finished job's result, applied to the app on the UI thread.
-struct Done(Box<dyn FnOnce(&mut GraftApp) + Send>);
-
-impl From<Panicked> for Done {
-    fn from(panic: Panicked) -> Self {
-        Done(Box::new(move |app| app.open_failed(panic.0)))
+impl crate::jobs::Owner for GraftApp {
+    fn panicked(&mut self, message: String) {
+        self.open_failed(message);
     }
 }
 
@@ -101,9 +100,7 @@ pub struct GraftApp {
     console: Console,
     console_view: ConsoleView,
     console_open: bool,
-    pool: JobPool,
-    tx: Sender<Done>,
-    rx: Receiver<Done>,
+    jobs: Jobs<GraftApp>,
     toasts: Toasts,
     search: String,
     window_title: String,
@@ -136,7 +133,6 @@ impl GraftApp {
             .clamp(2, 8);
         let pool = JobPool::new(threads, waker);
         let console = Console::default();
-        let (tx, rx) = crossbeam_channel::unbounded();
 
         let mut persisted: Persisted = cc
             .storage
@@ -186,9 +182,7 @@ impl GraftApp {
             console,
             console_view: ConsoleView::default(),
             console_open: persisted.console_open,
-            pool,
-            tx,
-            rx,
+            jobs: Jobs::new(pool),
             toasts: Toasts::default(),
             search: String::new(),
             window_title: String::new(),
@@ -202,6 +196,7 @@ impl GraftApp {
             forwarded,
         };
         app.arrange();
+        app.check_recent();
         match last_update {
             Some(Ok(done)) => app.toasts.info(done),
             Some(Err(failed)) => app.toasts.error(failed),
@@ -217,33 +212,8 @@ impl GraftApp {
         app
     }
 
-    /// Run `job` on the pool; `done` gets its result on the UI thread.
-    fn spawn<T: Send + 'static>(
-        &self,
-        job: impl FnOnce() -> T + Send + 'static,
-        done: impl FnOnce(&mut GraftApp, T) + Send + 'static,
-    ) {
-        self.pool.spawn(&self.tx, move || {
-            let result = job();
-            Done(Box::new(move |app| done(app, result)))
-        });
-    }
-
-    /// Like [`Self::spawn`], on a thread of its own: for jobs that wait on
-    /// the network or the user.
-    fn spawn_long<T: Send + 'static>(
-        &self,
-        job: impl FnOnce(Waker) -> T + Send + 'static,
-        done: impl FnOnce(&mut GraftApp, T) + Send + 'static,
-    ) {
-        self.pool.spawn_long(&self.tx, move |waker| {
-            let result = job(waker);
-            Done(Box::new(move |app| done(app, result)))
-        });
-    }
-
     fn poll(&mut self) {
-        while let Ok(Done(apply)) = self.rx.try_recv() {
+        while let Some(apply) = self.jobs.next_done() {
             apply(self);
         }
         for project in &mut self.projects {
@@ -272,7 +242,28 @@ impl GraftApp {
     /// Find the repository at `path` in the background, then open it.
     fn open_folder(&mut self, path: PathBuf) {
         let console = self.console.clone();
-        self.spawn(move || repo::locate(&path, &console), Self::opened);
+        self.jobs
+            .spawn(move || repo::locate(&path, &console), Self::opened);
+    }
+
+    /// A dropped folder opens; a dropped file opens its folder.
+    fn open_dropped(&mut self, path: PathBuf) {
+        let console = self.console.clone();
+        self.jobs.spawn(
+            move || {
+                let folder = if path.is_dir() {
+                    path
+                } else {
+                    path.parent()?.to_path_buf()
+                };
+                Some(repo::locate(&folder, &console))
+            },
+            |app, located| {
+                if let Some(result) = located {
+                    app.opened(result);
+                }
+            },
+        );
     }
 
     /// A repository was found, cloned or created, or that failed.
@@ -320,7 +311,7 @@ impl GraftApp {
             self.settings.clone(),
             memory,
             self.console.clone(),
-            self.pool.clone(),
+            self.jobs.pool().clone(),
         );
         self.projects.push(project);
         self.activate(Some(self.projects.len() - 1));
@@ -430,7 +421,7 @@ impl GraftApp {
         let name = form.name.trim().to_owned();
         match form.target {
             GroupTarget::New(root) => {
-                let (id, _) = groups::next_id_and_color(&self.groups, color::GROUP_COUNT);
+                let id = groups::next_id(&self.groups);
                 self.groups.push(TabGroup {
                     id,
                     name,
@@ -489,10 +480,31 @@ impl GraftApp {
             self.projects[i].refresh();
         } else {
             // Recent repositories may have moved since the list was built.
-            for r in &mut self.recent {
-                *r = Recent::new(std::mem::take(&mut r.path));
-            }
+            self.check_recent();
         }
+    }
+
+    /// See in the background which recent repositories are still there.
+    fn check_recent(&self) {
+        let paths: Vec<PathBuf> = self.recent.iter().map(|r| r.path.clone()).collect();
+        self.jobs.spawn(
+            move || {
+                paths
+                    .into_iter()
+                    .map(|path| {
+                        let there = Recent::is_there(&path);
+                        (path, there)
+                    })
+                    .collect::<Vec<_>>()
+            },
+            |app, checked| {
+                for (path, there) in checked {
+                    for r in app.recent.iter_mut().filter(|r| r.path == path) {
+                        r.exists = there;
+                    }
+                }
+            },
+        );
     }
 
     fn close_project(&mut self, index: usize) {
@@ -553,11 +565,10 @@ impl GraftApp {
             TabAction::ToggleGroup(id) => self.toggle_group(id),
             TabAction::NewGroup(i) => {
                 if let Some(p) = self.projects.get(i) {
-                    let (_, color) = groups::next_id_and_color(&self.groups, color::GROUP_COUNT);
                     self.group_form = Some(GroupForm::new(
                         GroupTarget::New(p.root.clone()),
                         String::new(),
-                        color,
+                        groups::free_color(&self.groups),
                     ));
                 }
             }
@@ -595,13 +606,13 @@ impl GraftApp {
                 self.pick("Open a git repository", start, Self::open_folder);
             }
             StartAction::LoadDistros => {
-                self.spawn(graft_core::wsl::distros, |app, distros| {
+                self.jobs.spawn(graft_core::wsl::distros, |app, distros| {
                     app.start.set_distros(distros)
                 });
             }
             StartAction::LoadHome(distro) => {
                 let asked = distro.clone();
-                self.spawn(
+                self.jobs.spawn(
                     move || graft_core::wsl::Wsl::new(&asked).home(),
                     |app, home| app.start.set_home(distro, home),
                 );
@@ -621,10 +632,10 @@ impl GraftApp {
             StartAction::Clone { url, dest } => {
                 let label = format!("Cloning {}", graft_core::console::redact(&url));
                 let (running, cancel) = Running::cancellable(label);
-                let report = running.reporter(self.pool.waker());
+                let report = running.reporter(self.jobs.waker());
                 self.start.begin(running);
                 let console = self.console.clone();
-                self.spawn_long(
+                self.jobs.spawn_long(
                     move |_| repo::clone(&url, &dest, &console, &cancel, report),
                     Self::opened,
                 );
@@ -633,7 +644,8 @@ impl GraftApp {
                 let label = format!("Creating {}", self.start.show_path(&path));
                 self.start.begin(Running::new(label));
                 let console = self.console.clone();
-                self.spawn(move || repo::init(&path, &console), Self::opened);
+                self.jobs
+                    .spawn(move || repo::init(&path, &console), Self::opened);
             }
             StartAction::Cancel => self.start.cancel(),
             StartAction::OpenRecent(path) => self.open_folder(path),
@@ -651,7 +663,7 @@ impl GraftApp {
         start: Option<PathBuf>,
         picked: impl FnOnce(&mut GraftApp, PathBuf) + Send + 'static,
     ) {
-        self.spawn_long(
+        self.jobs.spawn_long(
             move |_| {
                 let mut dialog = rfd::FileDialog::new().set_title(title);
                 if let Some(dir) = start.filter(|d| d.is_dir()) {
@@ -670,7 +682,7 @@ impl GraftApp {
     /// `manual` when the user asked (About), so failures are shown.
     fn check_update(&mut self, manual: bool) {
         self.update = update::Status::Checking;
-        self.spawn(update::check, move |app, result| {
+        self.jobs.spawn(update::check, move |app, result| {
             app.update = match result {
                 Ok(release) if release.is_newer() => update::Status::Available(release),
                 Ok(_) => update::Status::UpToDate,
@@ -692,9 +704,16 @@ impl GraftApp {
             Some(AboutAction::Close) => self.about_open = false,
             Some(AboutAction::Check) => self.check_update(true),
             Some(AboutAction::Open(url)) => {
-                if let Err(e) = open::that_detached(&url) {
-                    self.toasts.error(format!("Could not open {url}: {e}"));
-                }
+                self.jobs.spawn(
+                    move || {
+                        open::that_detached(&url).map_err(|e| format!("Could not open {url}: {e}"))
+                    },
+                    |app, opened| {
+                        if let Err(e) = opened {
+                            app.toasts.error(e);
+                        }
+                    },
+                );
             }
             Some(AboutAction::Install) => {
                 let update::Status::Available(release) = &self.update else {
@@ -702,7 +721,7 @@ impl GraftApp {
                 };
                 let release = release.clone();
                 self.update = update::Status::Installing(release.clone());
-                self.spawn_long(
+                self.jobs.spawn_long(
                     move |_| update::install(&release),
                     |app, installed| match installed.and_then(|i| update::restart(&i)) {
                         // The new Graft runs: close this one.
@@ -842,15 +861,7 @@ impl GraftApp {
                 .collect()
         });
         for path in dropped {
-            let folder = if path.is_dir() {
-                path
-            } else {
-                match path.parent() {
-                    Some(p) => p.to_path_buf(),
-                    None => continue,
-                }
-            };
-            self.open_folder(folder);
+            self.open_dropped(path);
         }
         let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
         if hovering {
@@ -906,6 +917,9 @@ impl GraftApp {
             ui::project::show(ui, &mut self.projects, index, &mut self.search);
         for action in project {
             self.projects[index].apply(action);
+        }
+        if let Some(text) = self.projects[index].clipboard.take() {
+            ui.ctx().copy_text(text);
         }
         for action in app {
             match action {

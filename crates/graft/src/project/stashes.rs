@@ -12,7 +12,7 @@ use super::{Project, readable};
 impl Project {
     pub(super) fn load_stashes(&mut self) {
         let git = self.git.clone();
-        self.spawn(
+        self.jobs.spawn(
             move || stash::list(&git),
             |p, result| p.on_stashes(readable(result)),
         );
@@ -26,7 +26,7 @@ impl Project {
             if !still_there {
                 self.selected_stash = None;
                 self.stash_files = None;
-                self.commit_diff = None;
+                self.read_only_diff = None;
                 if let Some(first) = list.first() {
                     self.select_stash(first.id);
                 }
@@ -41,9 +41,9 @@ impl Project {
         }
         self.selected_stash = Some(id);
         self.stash_files = None;
-        self.commit_diff = None;
+        self.read_only_diff = None;
         let git = self.git.clone();
-        self.spawn(
+        self.jobs.spawn(
             move || stash::files(&git, id),
             move |p, result| {
                 if p.selected_stash == Some(id) {

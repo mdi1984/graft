@@ -1,5 +1,7 @@
 //! The screens. They read the app's state and say what the user did as
-//! [`Actions`]; they never change state themselves.
+//! [`Actions`]; they change no state themselves, except the text typed into
+//! a form's fields (commit message, comment draft, dialog inputs) and
+//! taking a "focus this field" request.
 
 pub mod about;
 mod branch_menu;

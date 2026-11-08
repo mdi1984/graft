@@ -17,7 +17,7 @@ use super::file_row;
 use super::widgets::{
     Badge, ButtonKind, ahead, button, empty_state, paint_galley_left, progress_bar, waiting,
 };
-use crate::keys::Command;
+use crate::keys::{self, Command};
 use crate::project::comments::{self, LineComment};
 use crate::project::{Action, Confirm, Project};
 use crate::text::plural;
@@ -89,7 +89,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
                 .inner_margin(Margin::symmetric(8, 8)),
         )
         .show(ui, |ui| {
-            comments_bar(ui, project, wt, &review, actions);
+            comments_bar(ui, project, wt, actions);
             file_list(ui, project, &review, &uncommitted, actions)
         });
 
@@ -101,7 +101,10 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
     let file = file.clone();
     file_header(ui, project, wt, &file, actions);
     let path = file.change.path.as_str();
-    let diff = project.commit_diff.as_ref().and_then(|d| d.diff.as_ref());
+    let diff = project
+        .read_only_diff
+        .as_ref()
+        .and_then(|d| d.diff.as_ref());
     let (placed, outdated) = match (diff, project.review_state()) {
         (Some(diff), Some(state)) => {
             let (placed, outdated) =
@@ -127,7 +130,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
             .filter_map(|&(at, id)| Some((at, state_comments.iter().find(|c| c.id == id)?)))
             .collect(),
     };
-    match &project.commit_diff {
+    match &project.read_only_diff {
         Some(diff) => diff_view::body(
             ui,
             diff,
@@ -537,7 +540,7 @@ fn file_header(
                     if both_sides && button(ui, toggle, ButtonKind::Secondary, true).clicked() {
                         actions.push(Action::ToggleReviewSplit);
                     }
-                    if let Some(view) = &project.commit_diff {
+                    if let Some(view) = &project.read_only_diff {
                         diff_view::whole_file_button(ui, view, project.settings(), actions);
                     }
                 });
@@ -554,18 +557,11 @@ fn file_header(
 }
 
 /// "5 comments  [Copy for agent] [Clear…]" above the file list.
-fn comments_bar(
-    ui: &mut Ui,
-    project: &mut Project,
-    wt: &Worktree,
-    review: &Review,
-    actions: &mut Actions,
-) {
+fn comments_bar(ui: &mut Ui, project: &Project, wt: &Worktree, actions: &mut Actions) {
     let Some(state) = project.review_state() else {
         return;
     };
     let count = state.comment_count();
-    let mut copied = false;
     Panel::bottom("review-comments-bar")
         .frame(Frame::new().inner_margin(Margin {
             left: 0,
@@ -607,20 +603,11 @@ fn comments_bar(
                         )
                         .clicked()
                     {
-                        let title = format!("{} against {}", wt.label(), review.base);
-                        let text = comments::export(&title, &state.notes, &state.comments);
-                        ui.ctx().copy_text(text);
-                        copied = true;
+                        actions.push(Action::CopyReviewComments);
                     }
                 });
             });
         });
-    if copied {
-        project.infos.push(format!(
-            "Copied {} for your agent",
-            plural(count, "comment")
-        ));
-    }
 }
 
 /// Below the diff: the box for a comment on the picked lines (or the one
@@ -633,7 +620,10 @@ fn comment_panel(
     actions: &mut Actions,
 ) {
     let Some(view) = &project.review else { return };
-    let diff = project.commit_diff.as_ref().and_then(|d| d.diff.as_ref());
+    let diff = project
+        .read_only_diff
+        .as_ref()
+        .and_then(|d| d.diff.as_ref());
     let target = match (view.editing, view.pick, diff) {
         (Some(id), _, _) => project
             .review_state()
@@ -648,11 +638,7 @@ fn comment_panel(
         _ => None,
     };
     // Esc drops the pick; a typed comment is kept for the next pick.
-    if target.is_some()
-        && !ui.ctx().egui_wants_keyboard_input()
-        && ui.input(|i| i.key_pressed(Key::Escape))
-        && view.draft.trim().is_empty()
-    {
+    if target.is_some() && view.draft.trim().is_empty() && keys::plain_key(ui.ctx(), Key::Escape) {
         actions.push(Action::CancelComment);
     }
     match target {
@@ -741,7 +727,7 @@ fn comment_editor(ui: &mut Ui, project: &mut Project, title: &str, actions: &mut
 /// since (never committed or pushed).
 fn file_note(
     ui: &mut Ui,
-    project: &mut Project,
+    project: &Project,
     path: &str,
     outdated: &[LineComment],
     actions: &mut Actions,
@@ -807,24 +793,22 @@ fn file_note(
                 );
             });
             if open {
-                let note = project
-                    .review_state_mut()
-                    .notes
-                    .entry(path.to_owned())
-                    .or_default();
-                ui.add(
-                    TextEdit::multiline(note)
-                        .hint_text("What to fix, ask or remember about this file…")
-                        .desired_rows(3)
-                        .desired_width(f32::INFINITY),
-                );
+                let mut note = project
+                    .review_state()
+                    .and_then(|s| s.notes.get(path))
+                    .cloned()
+                    .unwrap_or_default();
+                let edit = TextEdit::multiline(&mut note)
+                    .hint_text("What to fix, ask or remember about this file…")
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY);
+                if ui.add(edit).changed() {
+                    actions.push(Action::SetFileNote {
+                        path: path.to_owned(),
+                        text: note,
+                    });
+                }
             }
         });
     ui.data_mut(|d| d.insert_temp(id, open));
-    // Drop empty notes so they do not pile up.
-    if let Some(n) = project.review_state().and_then(|s| s.notes.get(path))
-        && n.is_empty()
-    {
-        project.review_state_mut().notes.remove(path);
-    }
 }

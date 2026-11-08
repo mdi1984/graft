@@ -1,5 +1,6 @@
-//! Windows touches for Graft's own window frame: the icon in every size from
-//! the exe's icon resource, rounded corners, and a border matching the theme.
+//! Windows touches for Graft's own window frame (the icon in every size from
+//! the exe's icon resource, rounded corners, a border matching the theme),
+//! and small Win32 helpers.
 
 use egui::Color32;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -102,12 +103,17 @@ mod win {
     }
 }
 
+/// `text` as a NUL-terminated UTF-16 string, for Win32 calls.
+#[cfg(windows)]
+pub fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(Some(0)).collect()
+}
+
 /// A message box for an error that happens before Graft has a window.
 pub fn show_error(title: &str, text: &str) {
     #[cfg(windows)]
     {
         use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
-        let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
         let (title, text) = (wide(title), wide(text));
         // SAFETY: both strings are NUL-terminated and outlive the call.
         unsafe {

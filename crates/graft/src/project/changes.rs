@@ -139,7 +139,6 @@ pub struct DiffView {
     pub diff: Option<FileDiff>,
     pub highlights: Highlights,
     pub error: Option<String>,
-    pub loading: bool,
     /// Selected changed lines as (hunk, line).
     pub selection: BTreeSet<(usize, usize)>,
     pub anchor: Option<(usize, usize)>,
@@ -160,7 +159,6 @@ impl DiffView {
             diff: None,
             highlights: Highlights::default(),
             error: None,
-            loading: true,
             selection: BTreeSet::new(),
             anchor: None,
             read_only: slot == Slot::ReadOnly,
@@ -237,51 +235,17 @@ impl CommitForm {
 }
 
 impl Project {
-    /// The main folder. Checkouts always happen there, never in a linked
-    /// worktree: a worktree keeps its branch.
-    pub fn main_worktree(&self) -> Option<&graft_core::Worktree> {
-        self.snapshot.as_ref()?.main_worktree()
-    }
-
-    /// Why the main folder can't switch now, for a readable notice.
-    pub fn checkout_blocked(&self) -> Option<&'static str> {
-        let snap = self.snapshot.as_ref()?;
-        if snap.preview.is_some() {
-            Some("The main folder shows a preview. Restore main first, then check out.")
-        } else if self
-            .main_worktree()
-            .is_some_and(|wt| wt.in_progress.is_some())
-        {
-            Some(
-                "A merge, rebase, cherry-pick or revert is still going on in the main folder. \
-                 Finish or abort it first, then check out.",
-            )
-        } else {
-            None
-        }
-    }
-
-    /// " in the main folder" while a linked worktree is selected, so a menu
-    /// says where a checkout lands; empty while the main folder is selected.
-    pub fn in_main_suffix(&self) -> &'static str {
-        if self.worktree().is_some_and(|wt| !wt.is_main) {
-            " in the main folder"
-        } else {
-            ""
-        }
-    }
-
     fn view(&self, slot: Slot) -> Option<&DiffView> {
         match slot {
             Slot::Status => self.diff_view.as_ref(),
-            Slot::ReadOnly => self.commit_diff.as_ref(),
+            Slot::ReadOnly => self.read_only_diff.as_ref(),
         }
     }
 
     fn view_mut(&mut self, slot: Slot) -> Option<&mut DiffView> {
         match slot {
             Slot::Status => self.diff_view.as_mut(),
-            Slot::ReadOnly => self.commit_diff.as_mut(),
+            Slot::ReadOnly => self.read_only_diff.as_mut(),
         }
     }
 
@@ -292,7 +256,7 @@ impl Project {
             .find(|&slot| self.view(slot).is_some_and(|v| v.key == *key))
     }
 
-    pub fn select_file(&mut self, key: FileKey) {
+    pub(super) fn select_file(&mut self, key: FileKey) {
         if self.diff_view.as_ref().is_some_and(|v| v.key == key) {
             return;
         }
@@ -302,11 +266,11 @@ impl Project {
     }
 
     /// Show one file of a commit, stash or review (read-only).
-    pub fn select_commit_file(&mut self, key: FileKey) {
-        if self.commit_diff.as_ref().is_some_and(|v| v.key == key) {
+    pub(super) fn select_commit_file(&mut self, key: FileKey) {
+        if self.read_only_diff.as_ref().is_some_and(|v| v.key == key) {
             return;
         }
-        self.commit_diff = Some(DiffView::new(key, Slot::ReadOnly));
+        self.read_only_diff = Some(DiffView::new(key, Slot::ReadOnly));
         self.load_view(Slot::ReadOnly);
     }
 
@@ -326,9 +290,8 @@ impl Project {
         let kept = self.comment_lines(&key);
         let view = self.view_mut(slot).expect("checked above");
         view.ticket = ticket;
-        view.loading = true;
         let revealed = view.revealed.clone();
-        self.spawn(
+        self.jobs.spawn(
             move || load_shown(&git, &key, whole, &revealed, &kept),
             move |p, result| p.on_view_loaded(slot, ticket, result),
         );
@@ -339,7 +302,6 @@ impl Project {
         let Some(view) = self.view_mut(slot).filter(|v| v.ticket == ticket) else {
             return;
         };
-        view.loading = false;
         let Loaded {
             diff,
             gaps,
@@ -410,7 +372,7 @@ impl Project {
             return;
         }
         let diff = diff.clone();
-        self.spawn(
+        self.jobs.spawn(
             move || graft_core::syntax::highlight(&diff),
             move |p, syntax| {
                 if let Some(view) = p.view_mut(slot).filter(|v| v.ticket == ticket) {
@@ -580,7 +542,7 @@ impl Project {
             form.before_amend = Some((form.summary.clone(), form.body.clone()));
             if form.summary.trim().is_empty() {
                 let git = self.wt_git();
-                self.spawn(
+                self.jobs.spawn(
                     move || ops::last_commit_message(&git),
                     |p, message| p.on_last_message(message),
                 );
@@ -613,19 +575,5 @@ impl Project {
         let (summary, body) = message.split_once('\n').unwrap_or((&message, ""));
         form.summary = summary.trim().to_owned();
         form.body = body.trim().to_owned();
-    }
-
-    pub(super) fn open_path(&mut self, path: &str) {
-        let full = self.nav.worktree.join(path);
-        if let Err(e) = crate::launch::open_path(&full, &self.settings.ide_command) {
-            self.notices
-                .push(format!("Could not open {}: {e}", full.display()));
-        }
-    }
-
-    pub(super) fn reveal_path(&mut self, path: &str) {
-        if let Err(e) = crate::launch::reveal(&self.nav.worktree.join(path)) {
-            self.notices.push(format!("Could not open Explorer: {e}"));
-        }
     }
 }
