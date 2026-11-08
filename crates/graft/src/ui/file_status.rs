@@ -65,7 +65,8 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
 fn keyboard(ui: &Ui, project: &Project, status: &WorktreeStatus, actions: &mut Actions) {
     let keys = &project.settings().keys;
     let ctx = ui.ctx();
-    // Nothing to do on the many frames without a key press.
+    // Listing the rows walks the whole status: skip it on frames without a
+    // key press, which are most of them.
     let any_key = ui.input(|i| {
         i.events
             .iter()

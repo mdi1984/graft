@@ -25,7 +25,8 @@ use crate::theme::{self, color};
 use crate::ui::Actions;
 
 pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
-    // Shared handles: the screen reads them while `project` takes actions.
+    // A cheap clone (shared): `snap` and `wt` stay readable below while
+    // `project` is lent out mutably, e.g. to the comment editor.
     let Some(snap) = project.snapshot.clone() else {
         return;
     };
@@ -94,40 +95,36 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
         return;
     };
     let file = file.clone();
-    file_header(ui, project, wt, &file, actions);
+    // Side by side only helps when there is an old and a new version; then
+    // it can be toggled.
+    let both_sides = !matches!(file.change.change, Change::Added | Change::Deleted);
+    let split = both_sides.then(|| project.review.as_ref().is_none_or(|v| v.split));
+    file_header(ui, project, wt, &file, split, actions);
     let path = file.change.path.as_str();
     let diff = project.commit_diff.as_ref().and_then(|d| d.diff.as_ref());
-    let (placed, outdated) = match (diff, project.review_state()) {
+    // Copies: the comment panel below may change the comments.
+    let (placed, outdated): (Vec<_>, Vec<LineComment>) = match (diff, project.review_state()) {
         (Some(diff), Some(state)) => {
             let (placed, outdated) =
                 comments::place(diff, state.comments.iter().filter(|c| c.path == path));
-            let placed: Vec<_> = placed.into_iter().map(|(at, c)| (at, c.id)).collect();
-            let outdated: Vec<LineComment> = outdated.into_iter().cloned().collect();
-            (placed, outdated)
+            (
+                placed.into_iter().map(|(at, c)| (at, c.clone())).collect(),
+                outdated.into_iter().cloned().collect(),
+            )
         }
         _ => (Vec::new(), Vec::new()),
     };
     comment_panel(ui, project, path, &outdated, actions);
-    // Side by side only helps when there is an old and a new version.
-    let both_sides = !matches!(file.change.change, Change::Added | Change::Deleted);
-    let split = both_sides && project.review.as_ref().is_none_or(|v| v.split);
-    let state_comments = project
-        .review_state()
-        .map(|s| s.comments.as_slice())
-        .unwrap_or_default();
     let marks = Marks {
         pick: project.review.as_ref().and_then(|v| v.pick),
-        placed: placed
-            .iter()
-            .filter_map(|&(at, id)| Some((at, state_comments.iter().find(|c| c.id == id)?)))
-            .collect(),
+        placed: placed.iter().map(|(at, c)| (*at, c)).collect(),
     };
     match &project.commit_diff {
         Some(diff) => diff_view::body(
             ui,
             diff,
             project.is_operating(),
-            split,
+            split == Some(true),
             project.settings().wrap_lines,
             Some(&marks),
             actions,
@@ -413,15 +410,17 @@ fn file_list(ui: &mut Ui, project: &Project, review: &Review, actions: &mut Acti
         });
 }
 
+/// The open file's name and buttons; `split` is whether it shows side by
+/// side, `None` when it cannot.
 fn file_header(
     ui: &mut Ui,
     project: &Project,
     wt: &Worktree,
     file: &ReviewFile,
+    split: Option<bool>,
     actions: &mut Actions,
 ) {
     let viewed = project.is_viewed(file);
-    let split = project.review.as_ref().is_none_or(|v| v.split);
     let path = file.change.path.clone();
     Panel::top("review-file-header")
         .frame(
@@ -470,10 +469,11 @@ fn file_header(
                     {
                         actions.push(Action::OpenInIde(wt.path.join(&path)));
                     }
-                    let both_sides = !matches!(file.change.change, Change::Added | Change::Deleted);
-                    let toggle = if split { "Unified" } else { "Side by side" };
-                    if both_sides && button(ui, toggle, ButtonKind::Secondary, true).clicked() {
-                        actions.push(Action::ToggleReviewSplit);
+                    if let Some(split) = split {
+                        let toggle = if split { "Unified" } else { "Side by side" };
+                        if button(ui, toggle, ButtonKind::Secondary, true).clicked() {
+                            actions.push(Action::ToggleReviewSplit);
+                        }
                     }
                     if let Some(view) = &project.commit_diff {
                         diff_view::whole_file_button(ui, view, project.settings(), actions);
