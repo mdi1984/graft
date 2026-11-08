@@ -8,7 +8,7 @@ use crate::cli::Git;
 use crate::model::{
     Branch, ORIGIN, Oid, Remote, RemoteBranch, RepoSnapshot, Tag, Upstream, Worktree,
 };
-use crate::paths::{folder_name, same_path};
+use crate::paths::{self, folder_name, same_path};
 use crate::{repo, stash, status};
 
 /// Read the whole snapshot. `git` must point at the main worktree. The git
@@ -25,14 +25,19 @@ pub fn load(git: &Git) -> Result<RepoSnapshot> {
             .iter()
             .map(|wt| {
                 let at = git.at(&wt.path);
-                (!wt.prunable)
-                    .then(|| s.spawn(move || (status::load(&at).ok(), repo::in_progress(at.cwd()))))
+                let prunable = wt.prunable;
+                s.spawn(move || {
+                    let recycle_bin = paths::has_recycle_bin(at.cwd());
+                    if prunable {
+                        return (None, None, recycle_bin);
+                    }
+                    let in_progress = repo::in_progress(at.cwd());
+                    (status::load(&at).ok(), in_progress, recycle_bin)
+                })
             })
             .collect();
         for (wt, job) in worktrees.iter_mut().zip(statuses) {
-            if let Some(job) = job {
-                (wt.status, wt.in_progress) = job.join().expect("status thread");
-            }
+            (wt.status, wt.in_progress, wt.recycle_bin) = job.join().expect("status thread");
         }
         let refs = refs.join().expect("refs thread")?;
         Ok(RepoSnapshot {
@@ -176,6 +181,7 @@ fn parse_worktrees(bytes: &[u8], root: &Path, to_path: impl Fn(&str) -> PathBuf)
                     prunable: false,
                     status: None,
                     in_progress: None,
+                    recycle_bin: false,
                 });
             }
             "HEAD" => {

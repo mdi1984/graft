@@ -144,6 +144,12 @@ pub enum Action {
         tracked: Vec<String>,
         untracked: Vec<String>,
     },
+    /// Ask before discarding a whole file, see [`Action::discard_file`].
+    AskDiscard {
+        worktree: PathBuf,
+        source: graft_core::diff::Source,
+        path: String,
+    },
     Commit,
     ToggleAmend,
     Remote(RemoteOp),
@@ -1014,6 +1020,11 @@ impl Project {
             Action::StageFiles(paths) => self.stage_files(paths),
             Action::UnstageFiles(paths) => self.unstage_files(paths),
             Action::Discard { tracked, untracked } => self.discard(tracked, untracked),
+            Action::AskDiscard {
+                worktree,
+                source,
+                path,
+            } => self.ask_discard(&worktree, &source, path),
             Action::Commit => self.commit(),
             Action::ToggleAmend => self.toggle_amend(),
             Action::Remote(op) => self.remote(op),

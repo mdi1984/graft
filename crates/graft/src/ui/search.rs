@@ -622,6 +622,7 @@ mod tests {
                 prunable: false,
                 status: None,
                 in_progress: None,
+                recycle_bin: true,
             }],
             branches: std::iter::once("main")
                 .chain(branches.iter().copied())

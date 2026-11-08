@@ -141,6 +141,9 @@ pub struct Worktree {
     pub status: Option<WorktreeStatus>,
     /// A merge, cherry-pick, revert or rebase that stopped part-way.
     pub in_progress: Option<InProgress>,
+    /// Files deleted here can go to the Recycle Bin, see
+    /// [`crate::paths::has_recycle_bin`].
+    pub recycle_bin: bool,
 }
 
 impl Worktree {

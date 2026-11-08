@@ -46,8 +46,18 @@ pub fn folder_name(path: &Path) -> String {
 }
 
 /// Whether files deleted under `path` can go to the Recycle Bin. Windows
-/// has none inside WSL or on a network share: deleting there is for good.
+/// has none inside WSL or on a network share, a mapped drive (`Z:`)
+/// included: deleting there is for good. Asks the file system which share
+/// a drive maps, so not for the UI thread: it reads
+/// [`Worktree::recycle_bin`](crate::Worktree::recycle_bin).
 pub fn has_recycle_bin(path: &Path) -> bool {
+    // A mapped drive resolves to the share, `\\?\UNC\server\share\...`.
+    let resolved = std::fs::canonicalize(path);
+    recycle_bin_at(resolved.as_deref().unwrap_or(path))
+}
+
+/// [`has_recycle_bin`] for a path whose drive is not a mapped one.
+fn recycle_bin_at(path: &Path) -> bool {
     use std::path::{Component, Prefix};
     let unc = match path.components().next() {
         Some(Component::Prefix(prefix)) => {
@@ -168,14 +178,18 @@ mod tests {
 
     #[test]
     fn no_recycle_bin_in_wsl_or_on_shares() {
-        assert!(has_recycle_bin(Path::new(r"C:\dev\app")));
-        assert!(has_recycle_bin(Path::new(r"\\?\C:\dev\app")));
-        assert!(!has_recycle_bin(Path::new(
+        assert!(recycle_bin_at(Path::new(r"C:\dev\app")));
+        assert!(recycle_bin_at(Path::new(r"\\?\C:\dev\app")));
+        assert!(!recycle_bin_at(Path::new(
             r"\\wsl.localhost\Ubuntu\home\app"
         )));
-        assert!(!has_recycle_bin(Path::new("//wsl$/Ubuntu/home/app")));
-        assert!(!has_recycle_bin(Path::new(r"\\server\share\app")));
-        assert!(!has_recycle_bin(Path::new(r"\\?\UNC\server\share\app")));
+        assert!(!recycle_bin_at(Path::new("//wsl$/Ubuntu/home/app")));
+        assert!(!recycle_bin_at(Path::new(r"\\server\share\app")));
+        // A mapped drive, as canonicalize resolves it.
+        assert!(!recycle_bin_at(Path::new(r"\\?\UNC\server\share\app")));
+        // A folder on a local disk resolves to itself.
+        let local = tempfile::tempdir().unwrap();
+        assert!(has_recycle_bin(local.path()));
     }
 
     #[test]

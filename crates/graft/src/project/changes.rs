@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use graft_core::diff::{self, FileDiff, Gap, Source};
 use graft_core::ops::{self, LineOp};
-use graft_core::paths::{has_recycle_bin, same_path};
+use graft_core::paths::same_path;
 use graft_core::{Change, EntryKind, FileList, Git, StatusEntry};
 
 use super::comments::{Pick, Side};
@@ -324,49 +324,72 @@ impl CommitForm {
 
 impl Action {
     /// Ask before discarding a whole file (File status, the diff's
-    /// Discard…) in `worktree`; confirmed, [`Project::discard`] runs it.
+    /// Discard…) in `worktree`, see [`Project::ask_discard`].
     pub fn discard_file(worktree: &Path, source: &Source, path: String) -> Action {
-        let untracked = *source == Source::Untracked;
-        let (title, body, confirm_label) = if !untracked {
-            (
-                "Discard changes?",
-                format!("All unstaged changes to {path} will be lost. Staged changes stay."),
-                "Discard",
-            )
-        } else if has_recycle_bin(worktree) {
-            (
-                "Discard changes?",
-                format!("{path} is not tracked by git. It will be moved to the Recycle Bin."),
-                "Discard",
-            )
-        } else {
-            (
-                "Delete the file for good?",
-                format!(
-                    "{path} is not tracked by git. It will be deleted permanently: Windows \
-                     has no Recycle Bin inside WSL or on a network share."
-                ),
-                "Delete permanently",
-            )
-        };
-        let (tracked, untracked_paths) = if untracked {
-            (Vec::new(), vec![path])
-        } else {
-            (vec![path], Vec::new())
-        };
-        Action::Ask(Box::new(Confirm {
-            title: title.to_owned(),
-            body,
-            confirm_label: confirm_label.to_owned(),
-            action: Action::Discard {
-                tracked,
-                untracked: untracked_paths,
-            },
-        }))
+        Action::AskDiscard {
+            worktree: worktree.to_path_buf(),
+            source: source.clone(),
+            path,
+        }
+    }
+}
+
+/// The question before discarding a whole file; a new one goes to the
+/// Recycle Bin if the worktree has one, else it is deleted for good.
+fn discard_question(recycle_bin: bool, source: &Source, path: String) -> Confirm {
+    let untracked = *source == Source::Untracked;
+    let (title, body, confirm_label) = if !untracked {
+        (
+            "Discard changes?",
+            format!("All unstaged changes to {path} will be lost. Staged changes stay."),
+            "Discard",
+        )
+    } else if recycle_bin {
+        (
+            "Discard changes?",
+            format!("{path} is not tracked by git. It will be moved to the Recycle Bin."),
+            "Discard",
+        )
+    } else {
+        (
+            "Delete the file for good?",
+            format!(
+                "{path} is not tracked by git. It will be deleted permanently: Windows \
+                     has no Recycle Bin inside WSL or on a network share or drive."
+            ),
+            "Delete permanently",
+        )
+    };
+    let (tracked, untracked_paths) = if untracked {
+        (Vec::new(), vec![path])
+    } else {
+        (vec![path], Vec::new())
+    };
+    Confirm {
+        title: title.to_owned(),
+        body,
+        confirm_label: confirm_label.to_owned(),
+        action: Action::Discard {
+            tracked,
+            untracked: untracked_paths,
+        },
     }
 }
 
 impl Project {
+    /// Ask before discarding `path` in `worktree`; confirmed,
+    /// [`Project::discard`] runs it. Whether a new file goes to the Recycle
+    /// Bin is the snapshot's answer (see [`graft_core::Worktree::recycle_bin`]):
+    /// finding out takes the disk, which the UI thread never touches.
+    pub(super) fn ask_discard(&mut self, worktree: &Path, source: &Source, path: String) {
+        let recycle_bin = self
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.worktree_at(worktree))
+            .is_some_and(|wt| wt.recycle_bin);
+        self.ask(discard_question(recycle_bin, source, path));
+    }
+
     /// The diff `owner` shows, if any.
     pub fn diff(&self, owner: DiffOwner) -> Option<&DiffView> {
         match owner {
@@ -781,29 +804,36 @@ mod tests {
     /// Windows has none, says it is deleted for good.
     #[test]
     fn discarding_a_new_file_says_where_it_goes() {
-        let ask = |worktree: &str| {
-            let action = Action::discard_file(
-                Path::new(worktree),
-                &Source::Untracked,
-                "new.txt".to_owned(),
-            );
-            let Action::Ask(confirm) = action else {
-                panic!("{action:?}");
-            };
-            confirm
-        };
-        let local = ask(r"C:\dev\app");
+        let ask = |recycle_bin| discard_question(recycle_bin, &Source::Untracked, "new.txt".into());
+        let local = ask(true);
         assert!(local.body.contains("Recycle Bin"), "{}", local.body);
         assert!(!local.body.contains("permanently"), "{}", local.body);
-        for worktree in [r"\\wsl.localhost\Ubuntu\home\app", r"\\server\share\app"] {
-            let remote = ask(worktree);
-            assert!(
-                remote.body.contains("deleted permanently"),
-                "{}",
-                remote.body
-            );
-            assert_eq!(remote.confirm_label, "Delete permanently");
-        }
+        let remote = ask(false);
+        assert!(
+            remote.body.contains("deleted permanently"),
+            "{}",
+            remote.body
+        );
+        assert_eq!(remote.confirm_label, "Delete permanently");
+    }
+
+    /// Discard… asks with the snapshot's answer for the worktree: a local
+    /// folder has a Recycle Bin.
+    #[test]
+    fn discard_asks_with_the_worktrees_recycle_bin() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(dir.path().join("new.txt"), "new\n").unwrap();
+        let mut project = open(dir.path());
+        assert!(project.worktree().unwrap().recycle_bin);
+        let worktree = project.nav.worktree.clone();
+        project.apply(Action::discard_file(
+            &worktree,
+            &Source::Untracked,
+            "new.txt".to_owned(),
+        ));
+        let (confirm, _) = project.confirm.as_ref().unwrap();
+        assert!(confirm.body.contains("Recycle Bin"), "{}", confirm.body);
     }
 
     fn porcelain(dir: &std::path::Path) -> String {
