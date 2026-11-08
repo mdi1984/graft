@@ -12,7 +12,8 @@ use graft_core::history::{self, Commit, GraphRow, History, LineKind};
 use graft_core::refs::ResetMode;
 use graft_core::short;
 
-use super::branch_menu::{self, checkout_color, menu_item};
+use super::branch_menu::{self, can_item, checkout_color};
+use super::can::{self, Can};
 use super::diff_view;
 use super::file_row::{self, file_row, paint_file};
 use super::icons::Icon;
@@ -73,7 +74,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
                 diff_view::show_view(
                     ui,
                     view,
-                    project.is_operating(),
+                    &can::act(project, ""),
                     project.settings(),
                     actions,
                 )
@@ -500,7 +501,7 @@ fn curve(painter: &egui::Painter, from: Pos2, to: Pos2, vertical_first: bool, st
 }
 
 fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Actions) {
-    let busy = project.is_operating();
+    let act = can::act(project, "");
     let wt = project.worktree();
     let branch = wt.and_then(|wt| wt.branch.clone());
     let is_head = wt.and_then(|wt| wt.head) == Some(commit.id);
@@ -532,13 +533,19 @@ fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Ac
             ui.separator();
         }
     }
-    let mut item = |ui: &mut Ui, label: &str, enabled: bool, action: Action| {
-        menu_item(ui, label, enabled, actions, action);
+    let mut item = |ui: &mut Ui, label: &str, can: &Can, action: Action| {
+        can_item(ui, label, can, actions, action);
+    };
+    // Not on the commit the branch is on already.
+    let not_head = if is_head {
+        can::no("This is the current commit")
+    } else {
+        can::act(project, "")
     };
     item(
         ui,
         "New branch here…",
-        !busy,
+        &act,
         Action::OpenDialog(DialogKind::new_branch(
             commit.id.to_string(),
             format!("{short_id} {}", commit.summary),
@@ -547,7 +554,7 @@ fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Ac
     item(
         ui,
         "New tag here…",
-        !busy,
+        &act,
         Action::OpenDialog(DialogKind::NewTag {
             name: String::new(),
             message: String::new(),
@@ -558,7 +565,11 @@ fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Ac
     item(
         ui,
         &format!("Check out this commit (detached){in_main}"),
-        !busy && main_head != Some(commit.id),
+        &if main_head == Some(commit.id) {
+            can::no("The main folder is on this commit already")
+        } else {
+            can::act(project, "")
+        },
         Action::CheckoutDetached(commit.id),
     );
     ui.separator();
@@ -566,15 +577,15 @@ fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Ac
     item(
         ui,
         &format!("Cherry-pick onto {onto}"),
-        !busy && !is_head,
+        &not_head,
         Action::CherryPick(commit.id),
     );
-    item(ui, "Revert this commit", !busy, Action::Revert(commit.id));
+    item(ui, "Revert this commit", &act, Action::Revert(commit.id));
     if let Some(branch) = &branch {
         item(
             ui,
             &format!("Reset {branch} to here…"),
-            !busy && !is_head,
+            &not_head,
             Action::OpenDialog(DialogKind::Reset {
                 target: commit.id.to_string(),
                 target_label: short_id.clone(),
@@ -587,7 +598,7 @@ fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Ac
         item(
             ui,
             "Undo this commit (keep changes)",
-            !busy,
+            &act,
             Action::UndoCommit,
         );
     }

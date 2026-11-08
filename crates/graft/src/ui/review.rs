@@ -125,7 +125,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
         Some(diff) => diff_view::body(
             ui,
             diff,
-            project.is_operating(),
+            &can::act(project, ""),
             split == Some(true),
             project.settings().wrap_lines,
             Some(&marks),

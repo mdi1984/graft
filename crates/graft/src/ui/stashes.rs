@@ -8,6 +8,8 @@ use graft_core::paths::{self, folder_name};
 use graft_core::stash::Stash;
 use graft_core::{RepoSnapshot, short};
 
+use super::branch_menu::can_item;
+use super::can;
 use super::diff_view;
 use super::file_row::{FILE_ROW_HEIGHT, file_row};
 use super::widgets::{
@@ -76,7 +78,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
         Some(view) => diff_view::show_view(
             ui,
             view,
-            project.is_operating(),
+            &can::act(project, ""),
             project.settings(),
             actions,
         ),
@@ -112,26 +114,12 @@ fn list(
                     actions.push(Action::SelectStash(stash.id));
                 }
                 response.context_menu(|ui| {
-                    let busy = project.is_operating();
+                    let can = can::act(project, "");
                     let here = project.nav.worktree.clone();
-                    if ui
-                        .add_enabled(!busy, egui::Button::new("Apply here"))
-                        .clicked()
-                    {
-                        actions.push(apply(stash, here.clone(), false));
-                        ui.close();
-                    }
-                    if ui
-                        .add_enabled(!busy, egui::Button::new("Pop here"))
-                        .clicked()
-                    {
-                        actions.push(apply(stash, here, true));
-                        ui.close();
-                    }
-                    if ui.add_enabled(!busy, egui::Button::new("Drop…")).clicked() {
-                        actions.push(drop(stash));
-                        ui.close();
-                    }
+                    let apply_here = apply(stash, here.clone(), false);
+                    can_item(ui, "Apply here", &can, actions, apply_here);
+                    can_item(ui, "Pop here", &can, actions, apply(stash, here, true));
+                    can_item(ui, "Drop…", &can, actions, drop(stash));
                 });
             }
         });
@@ -163,7 +151,6 @@ fn details(
     max_height: f32,
     actions: &mut Actions,
 ) {
-    let busy = project.is_operating();
     ui.spacing_mut().item_spacing.y = 6.0;
     ui.label(
         RichText::new(&stash.message)
@@ -186,14 +173,16 @@ fn details(
     let here_label = here.map(|wt| wt.label()).unwrap_or_default();
     ui.horizontal(|ui| {
         let here_path = project.nav.worktree.clone();
-        if button(ui, "Apply", ButtonKind::Primary, !busy)
-            .on_hover_text(format!("Apply to {here_label}; keep the stash"))
+        let can = can::act(project, format!("Apply to {here_label}; keep the stash"));
+        if button(ui, "Apply", ButtonKind::Primary, can.ok)
+            .on_hover_text(can.hint)
             .clicked()
         {
             actions.push(apply(stash, here_path.clone(), false));
         }
-        if button(ui, "Pop", ButtonKind::Secondary, !busy)
-            .on_hover_text(format!("Apply to {here_label} and drop the stash"))
+        let can = can::act(project, format!("Apply to {here_label} and drop the stash"));
+        if button(ui, "Pop", ButtonKind::Secondary, can.ok)
+            .on_hover_text(can.hint)
             .clicked()
         {
             actions.push(apply(stash, here_path.clone(), true));
@@ -203,7 +192,12 @@ fn details(
             .iter()
             .filter(|wt| !wt.prunable && !graft_core::paths::same_path(&wt.path, &here_path))
             .collect();
-        ui.add_enabled_ui(!busy && !others.is_empty(), |ui| {
+        let can = if others.is_empty() {
+            can::no("There is no other worktree")
+        } else {
+            can::act(project, "")
+        };
+        let apply_to = ui.add_enabled_ui(can.ok, |ui| {
             ui.menu_button("Apply to…", |ui| {
                 for wt in others {
                     if ui
@@ -214,10 +208,13 @@ fn details(
                         ui.close();
                     }
                 }
-            });
+            })
+            .response
         });
-        if button(ui, "Branch…", ButtonKind::Secondary, !busy)
-            .on_hover_text("New branch with this stash applied")
+        can.why_not(apply_to.inner);
+        let can = can::act(project, "New branch with this stash applied");
+        if button(ui, "Branch…", ButtonKind::Secondary, can.ok)
+            .on_hover_text(can.hint)
             .clicked()
         {
             actions.push(Action::OpenDialog(DialogKind::StashBranch {
@@ -226,7 +223,11 @@ fn details(
                 name: String::new(),
             }));
         }
-        if button(ui, "Drop…", ButtonKind::Secondary, !busy).clicked() {
+        let can = can::act(project, "");
+        if can
+            .why_not(button(ui, "Drop…", ButtonKind::Secondary, can.ok))
+            .clicked()
+        {
             actions.push(drop(stash));
         }
     });

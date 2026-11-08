@@ -11,6 +11,7 @@ use graft_core::conflicts::{
 };
 use graft_core::{InProgress, Operation, Worktree};
 
+use super::can::{self, Can};
 use super::widgets::{ButtonKind, button, button_width, empty_state, section_heading_row, waiting};
 use crate::project::{Action, Confirm, ConflictView, Project};
 use crate::text::plural;
@@ -33,7 +34,7 @@ pub fn banner(ui: &mut Ui, project: &Project, wt: &Worktree, actions: &mut Actio
         return;
     };
     let left = wt.status.as_ref().map_or(0, |s| s.conflicted().count());
-    let busy = project.is_operating();
+    let can = can::act(project, "");
     Panel::top("in-progress-banner")
         .frame(
             Frame::new()
@@ -50,20 +51,25 @@ pub fn banner(ui: &mut Ui, project: &Project, wt: &Worktree, actions: &mut Actio
                 );
                 ui.label(RichText::new(title).color(color::text_mid()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let can_continue = left == 0 && !busy;
-                    let r = button(ui, "Continue", ButtonKind::Primary, can_continue);
-                    let r = if left > 0 {
-                        r.on_hover_text("Resolve every conflict first")
+                    let next = if left > 0 {
+                        can::no("Resolve every conflict first")
                     } else {
-                        r.on_hover_text(match kind {
+                        can::yes(match kind {
                             Operation::Rebase => "Commit this step and replay the next commit",
                             _ => "Commit the result",
                         })
+                        .unless(can.blocked())
                     };
-                    if r.clicked() {
+                    if button(ui, "Continue", ButtonKind::Primary, next.ok)
+                        .on_hover_text(&next.hint)
+                        .clicked()
+                    {
                         actions.push(Action::ContinueOp(*kind));
                     }
-                    if button(ui, "Abort", ButtonKind::Secondary, !busy).clicked() {
+                    if can
+                        .why_not(button(ui, "Abort", ButtonKind::Secondary, can.ok))
+                        .clicked()
+                    {
                         actions.push(abort(*kind));
                     }
                     let text = match left {
@@ -95,7 +101,7 @@ fn abort(kind: Operation) -> Action {
 
 /// The resolver for `project.conflict`, in place of the diff.
 pub fn resolver(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
-    let busy = project.is_operating();
+    let can = can::act(project, "");
     let names = project
         .worktree()
         .map_or_else(|| conflicts::side_names(None, None), side_names);
@@ -114,10 +120,10 @@ pub fn resolver(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
         Some(Ok(file)) => file.clone(),
     };
 
-    header(ui, view, &file, busy, actions);
+    header(ui, view, &file, &can, actions);
 
     if file.segments.is_empty() {
-        whole_file(ui, &file, &names, busy, actions);
+        whole_file(ui, &file, &names, &can, actions);
         return;
     }
 
@@ -139,17 +145,11 @@ pub fn resolver(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
         .show(ui, |ui| {
             Frame::new()
                 .inner_margin(Margin::symmetric(12, 10))
-                .show(ui, |ui| cards(ui, view, &file, &names, busy, actions));
+                .show(ui, |ui| cards(ui, view, &file, &names, &can, actions));
         });
 }
 
-fn header(
-    ui: &mut Ui,
-    view: &ConflictView,
-    file: &ConflictFile,
-    busy: bool,
-    actions: &mut Actions,
-) {
+fn header(ui: &mut Ui, view: &ConflictView, file: &ConflictFile, can: &Can, actions: &mut Actions) {
     Panel::top("conflict-header")
         .frame(
             Frame::new()
@@ -178,29 +178,30 @@ fn header(
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if total > 0 {
-                        let ready = view.result().is_some();
-                        if button(ui, "Save resolution", ButtonKind::Primary, ready && !busy)
-                            .on_hover_text("Write the result to the file and stage it")
+                        let save = if view.result().is_some() {
+                            can::yes("Write the result to the file and stage it")
+                                .unless(can.blocked())
+                        } else {
+                            can::no("Pick a result for every conflict first")
+                        };
+                        if button(ui, "Save resolution", ButtonKind::Primary, save.ok)
+                            .on_hover_text(&save.hint)
                             .clicked()
                         {
                             actions.push(Action::SaveResolution);
                         }
                     }
                     ui.menu_button("More", |ui| {
-                        if ui
-                            .add_enabled(!busy, egui::Button::new("Take ours for the whole file"))
-                            .clicked()
-                        {
+                        let ours = egui::Button::new("Take ours for the whole file");
+                        if can.why_not(ui.add_enabled(can.ok, ours)).clicked() {
                             actions.push(Action::TakeSide {
                                 path: file.path.clone(),
                                 ours: true,
                             });
                             ui.close();
                         }
-                        if ui
-                            .add_enabled(!busy, egui::Button::new("Take theirs for the whole file"))
-                            .clicked()
-                        {
+                        let theirs = egui::Button::new("Take theirs for the whole file");
+                        if can.why_not(ui.add_enabled(can.ok, theirs)).clicked() {
                             actions.push(Action::TakeSide {
                                 path: file.path.clone(),
                                 ours: false,
@@ -212,8 +213,9 @@ fn header(
                             actions.push(Action::OpenPath(file.path.clone()));
                             ui.close();
                         }
-                        if ui
-                            .add_enabled(!busy, egui::Button::new("Mark as resolved"))
+                        let resolved = egui::Button::new("Mark as resolved");
+                        if can
+                            .why_not(ui.add_enabled(can.ok, resolved))
                             .on_hover_text("You fixed the file in an editor: stage it as it is")
                             .clicked()
                         {
@@ -231,7 +233,7 @@ fn whole_file(
     ui: &mut Ui,
     file: &ConflictFile,
     names: &SideNames,
-    busy: bool,
+    can: &Can,
     actions: &mut Actions,
 ) {
     let (ours_name, theirs_name) = (&names.ours.long, &names.theirs.long);
@@ -272,13 +274,19 @@ fn whole_file(
                 + ui.spacing().item_spacing.x
                 + button_width(ui, &theirs, ButtonKind::Secondary);
             ui.add_space((ui.available_width() - w).max(0.0) / 2.0);
-            if button(ui, &ours, ButtonKind::Secondary, !busy).clicked() {
+            if can
+                .why_not(button(ui, &ours, ButtonKind::Secondary, can.ok))
+                .clicked()
+            {
                 actions.push(Action::TakeSide {
                     path: file.path.clone(),
                     ours: true,
                 });
             }
-            if button(ui, &theirs, ButtonKind::Secondary, !busy).clicked() {
+            if can
+                .why_not(button(ui, &theirs, ButtonKind::Secondary, can.ok))
+                .clicked()
+            {
                 actions.push(Action::TakeSide {
                     path: file.path.clone(),
                     ours: false,
@@ -293,7 +301,7 @@ fn cards(
     view: &mut ConflictView,
     file: &ConflictFile,
     names: &SideNames,
-    busy: bool,
+    can: &Can,
     actions: &mut Actions,
 ) {
     let (ours_name, theirs_name) = (&names.ours.long, &names.theirs.long);
@@ -381,10 +389,8 @@ fn cards(
                     let mut pick = |ui: &mut Ui, label: &str, r: Resolution| {
                         let selected =
                             resolution.as_ref() == Some(&r) && !matches!(r, Resolution::Custom(_));
-                        if ui
-                            .add_enabled(!busy, egui::Button::selectable(selected, label))
-                            .clicked()
-                        {
+                        let button = egui::Button::selectable(selected, label);
+                        if can.why_not(ui.add_enabled(can.ok, button)).clicked() {
                             actions.push(Action::ResolveConflict {
                                 index: i,
                                 resolution: if selected { None } else { Some(r) },
@@ -405,10 +411,8 @@ fn cards(
                         Resolution::TheirsThenOurs,
                     );
                     let editing = view.edits[i].is_some();
-                    if ui
-                        .add_enabled(!busy, egui::Button::selectable(editing, "Edit…"))
-                        .clicked()
-                    {
+                    let edit = egui::Button::selectable(editing, "Edit…");
+                    if can.why_not(ui.add_enabled(can.ok, edit)).clicked() {
                         if editing {
                             actions.push(Action::ResolveConflict {
                                 index: i,

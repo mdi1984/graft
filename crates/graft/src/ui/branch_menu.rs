@@ -12,15 +12,8 @@ use crate::theme::color;
 use crate::ui::Actions;
 use crate::ui::can::{self, Can};
 
-/// A context menu entry that sends `action` and closes the menu.
-pub fn menu_item(ui: &mut Ui, label: &str, enabled: bool, actions: &mut Actions, action: Action) {
-    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
-        actions.push(action);
-        ui.close();
-    }
-}
-
-/// A menu entry that says why, on hover, when it cannot act now.
+/// A context menu entry that sends `action` and closes the menu; when it
+/// cannot act now, hovering says why.
 pub fn can_item(ui: &mut Ui, label: &str, can: &Can, actions: &mut Actions, action: Action) {
     if ui
         .add_enabled(can.ok, egui::Button::new(label))

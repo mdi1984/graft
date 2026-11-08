@@ -6,6 +6,7 @@ use egui::{
 };
 use graft_core::{FileList, StatusEntry, WorktreeStatus};
 
+use super::can::{self, Can};
 use super::file_row;
 use super::icons::Icon;
 use super::widgets::{
@@ -93,7 +94,7 @@ fn keyboard(ui: &Ui, project: &Project, status: &WorktreeStatus, actions: &mut A
         let previous = current.map_or(0, |i| i.saturating_sub(1));
         actions.push(Action::SelectFile(rows[previous].0.clone()));
     }
-    if project.is_operating() {
+    if project.can_act().is_err() {
         return;
     }
     if keys.pressed(ctx, Command::StageFile)
@@ -122,7 +123,7 @@ fn keyboard(ui: &Ui, project: &Project, status: &WorktreeStatus, actions: &mut A
 
 fn file_lists(ui: &mut Ui, project: &Project, status: &WorktreeStatus, actions: &mut Actions) {
     let keys = &project.settings().keys;
-    let busy = project.is_operating();
+    let can = can::act(project, "");
     let selected = project.diff_view.as_ref().map(|v| &v.key);
 
     ScrollArea::vertical()
@@ -136,12 +137,12 @@ fn file_lists(ui: &mut Ui, project: &Project, status: &WorktreeStatus, actions: 
                 match list {
                     FileList::Conflicts if entries.is_empty() => continue,
                     FileList::Conflicts => {
-                        section(ui, "CONFLICTS", entries.len(), None, busy);
+                        section(ui, "CONFLICTS", entries.len(), None, &can);
                     }
                     FileList::Staged => {
                         let tip = keys.tip("Unstage every staged file", Command::UnstageAll);
                         let link = Some(("Unstage all", tip.as_str()));
-                        if section(ui, "STAGED", entries.len(), link, busy) {
+                        if section(ui, "STAGED", entries.len(), link, &can) {
                             actions.extend(toggle_action(list, paths()));
                         }
                         if entries.is_empty() {
@@ -151,7 +152,7 @@ fn file_lists(ui: &mut Ui, project: &Project, status: &WorktreeStatus, actions: 
                     FileList::Unstaged => {
                         let tip = keys.tip("Stage every changed file", Command::StageAll);
                         let link = Some(("Stage all", tip.as_str()));
-                        if section(ui, "UNSTAGED", entries.len(), link, busy) {
+                        if section(ui, "UNSTAGED", entries.len(), link, &can) {
                             actions.extend(toggle_action(list, paths()));
                         }
                         if entries.is_empty() {
@@ -162,7 +163,7 @@ fn file_lists(ui: &mut Ui, project: &Project, status: &WorktreeStatus, actions: 
                 for entry in &entries {
                     let key = FileKey::of(entry, list == FileList::Staged);
                     let selected = selected == Some(&key);
-                    file_row(ui, entry, list, &key, selected, busy, keys, actions);
+                    file_row(ui, entry, list, &key, selected, &can, keys, actions);
                 }
                 if list != FileList::Unstaged {
                     ui.add_space(10.0);
@@ -173,7 +174,7 @@ fn file_lists(ui: &mut Ui, project: &Project, status: &WorktreeStatus, actions: 
 
 /// Section heading with a count and an optional link on the right; returns
 /// whether the link was clicked.
-fn section(ui: &mut Ui, title: &str, count: usize, link: Option<(&str, &str)>, busy: bool) -> bool {
+fn section(ui: &mut Ui, title: &str, count: usize, link: Option<(&str, &str)>, can: &Can) -> bool {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
     let y = rect.center().y;
     section_heading(
@@ -199,8 +200,8 @@ fn section(ui: &mut Ui, title: &str, count: usize, link: Option<(&str, &str)>, b
             ui.scope_id().with(("section-link", title)),
             Sense::click(),
         )
-        .on_hover_text(tip);
-    let fg = if busy {
+        .on_hover_text(can.blocked().unwrap_or(tip));
+    let fg = if !can.ok {
         color::text_faint()
     } else if response.hovered() {
         color::text()
@@ -209,7 +210,7 @@ fn section(ui: &mut Ui, title: &str, count: usize, link: Option<(&str, &str)>, b
     };
     ui.painter()
         .galley(pos2(r.left() + 3.0, y - galley.size().y / 2.0), galley, fg);
-    response.clicked() && !busy
+    response.clicked() && can.ok
 }
 
 /// A note in an empty section.
@@ -237,7 +238,7 @@ fn file_row(
     list: FileList,
     key: &FileKey,
     selected: bool,
-    busy: bool,
+    can: &Can,
     keys: &Keymap,
     actions: &mut Actions,
 ) {
@@ -246,7 +247,7 @@ fn file_row(
     let (rect, response) = file_row::allocate(ui, selected, Sense::click());
     let y = rect.center().y;
     let button_rect = Rect::from_center_size(pos2(rect.right() - 14.0, y), vec2(20.0, 20.0));
-    let show_button = toggle.is_some() && (response.hovered() || selected) && !busy;
+    let show_button = toggle.is_some() && (response.hovered() || selected) && can.ok;
     let (icon, label) = if list == FileList::Unstaged {
         (Icon::Plus, "Stage")
     } else {
@@ -278,7 +279,7 @@ fn file_row(
         }
     }
     if !button_clicked {
-        if response.double_clicked() && !busy {
+        if response.double_clicked() && can.ok {
             actions.extend(toggle.clone());
         } else if response.clicked() {
             actions.push(Action::SelectFile(key.clone()));
@@ -290,14 +291,16 @@ fn file_row(
     };
     response.context_menu(|ui| {
         if let Some(toggle) = &toggle
-            && ui.add(item(label, Command::StageFile)).clicked()
+            && can
+                .why_not(ui.add_enabled(can.ok, item(label, Command::StageFile)))
+                .clicked()
         {
             actions.push(toggle.clone());
             ui.close();
         }
         if list == FileList::Unstaged
-            && ui
-                .add(item("Discard changes…", Command::DiscardFile))
+            && can
+                .why_not(ui.add_enabled(can.ok, item("Discard changes…", Command::DiscardFile)))
                 .clicked()
         {
             actions.push(Action::discard_file(&key.source, entry.path.clone()));
@@ -318,7 +321,7 @@ fn file_row(
 
 fn commit_box(ui: &mut Ui, project: &mut Project, status: &WorktreeStatus, actions: &mut Actions) {
     let staged = status.staged().count();
-    let busy = project.is_operating();
+    let act = can::act(project, "");
     let keys = project.settings().keys.clone();
     let form = &mut project.commit_form;
     let width = ui.available_width();
@@ -366,10 +369,11 @@ fn commit_box(ui: &mut Ui, project: &mut Project, status: &WorktreeStatus, actio
         }
         ui.checkbox(&mut form.push_after, "Push after commit");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let ready = form.ready(staged) && !busy;
             let label = if form.amend { "Amend commit" } else { "Commit" };
+            let can = can::yes(keys.tip(label, Command::Commit)).unless(act.blocked());
+            let ready = form.ready(staged) && can.ok;
             let clicked = button(ui, label, ButtonKind::Primary, ready)
-                .on_hover_text(keys.tip(label, Command::Commit))
+                .on_hover_text(can.hint)
                 .clicked();
             let shortcut = keys.pressed(ui.ctx(), Command::Commit);
             if ready && (clicked || shortcut) {

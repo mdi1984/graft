@@ -1,6 +1,7 @@
 //! Whether a button can act now, and its hover text: what it does, or why
 //! not. For buttons that show up in more than one place.
 
+use egui::Response;
 use graft_core::paths::{folder_name, same_path};
 use graft_core::preview::{self, Step};
 use graft_core::review::Review;
@@ -16,6 +17,24 @@ pub struct Can {
 }
 
 impl Can {
+    /// `response` of a control drawn as enabled when `self.ok`: when it is
+    /// off, hovering says why.
+    pub fn why_not(&self, response: Response) -> Response {
+        if self.ok {
+            response
+        } else if response.enabled() {
+            // Graft's own buttons stay enabled to egui and only ignore clicks.
+            response.on_hover_text(&self.hint)
+        } else {
+            response.on_disabled_hover_text(&self.hint)
+        }
+    }
+
+    /// Why not, when it cannot act.
+    pub fn blocked(&self) -> Option<&str> {
+        (!self.ok).then_some(self.hint.as_str())
+    }
+
     /// Not while `blocked` says why nothing can start.
     pub fn unless(self, blocked: Option<&str>) -> Self {
         match blocked {

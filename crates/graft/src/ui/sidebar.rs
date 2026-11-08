@@ -6,7 +6,7 @@ use graft_core::console::redact;
 use graft_core::paths::same_path;
 use graft_core::{Branch, RemoteBranch, RepoSnapshot, Upstream, Worktree, paths, remote};
 
-use super::branch_menu::{self, Open, can_item, checkout_color, menu_item};
+use super::branch_menu::{self, Open, can_item, checkout_color};
 use super::can::{self, Can};
 use super::icons::Icon;
 use super::widgets::{
@@ -72,7 +72,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
                 if response.clicked() && !wt.prunable {
                     actions.push(Action::OpenWorktree(wt.path.clone()));
                 }
-                response.context_menu(|ui| worktree_menu(ui, wt, project.is_operating(), actions));
+                response.context_menu(|ui| worktree_menu(ui, wt, &can::act(project, ""), actions));
             }
             ui.add_space(SECTION_GAP);
 
@@ -116,7 +116,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
                         actions.push(Action::Reveal(tag.target));
                     }
                     response.context_menu(|ui| {
-                        tag_menu(ui, repo, &tag.name, project.is_operating(), actions)
+                        tag_menu(ui, repo, &tag.name, &can::act(project, ""), actions)
                     });
                 }
                 if repo.tags.is_empty() {
@@ -379,10 +379,11 @@ fn worktree_row(ui: &mut Ui, wt: &Worktree, selected: bool) -> Response {
     response.on_hover_text(graft_core::paths::display(&wt.path))
 }
 
-fn worktree_menu(ui: &mut Ui, wt: &Worktree, busy: bool, actions: &mut Actions) {
+fn worktree_menu(ui: &mut Ui, wt: &Worktree, can: &Can, actions: &mut Actions) {
     if wt.prunable {
-        if ui
-            .add_enabled(!busy, egui::Button::new("Prune missing worktrees"))
+        let prune = egui::Button::new("Prune missing worktrees");
+        if can
+            .why_not(ui.add_enabled(can.ok, prune))
             .on_hover_text("The folder is gone; forget it (git worktree prune)")
             .clicked()
         {
@@ -408,8 +409,8 @@ fn worktree_menu(ui: &mut Ui, wt: &Worktree, busy: bool, actions: &mut Actions) 
     }
     ui.separator();
     let lock_label = if wt.locked { "Unlock" } else { "Lock" };
-    if ui
-        .add_enabled(!busy, egui::Button::new(lock_label))
+    if can
+        .why_not(ui.add_enabled(can.ok, egui::Button::new(lock_label)))
         .on_hover_text("A locked worktree is never removed or pruned")
         .clicked()
     {
@@ -419,16 +420,13 @@ fn worktree_menu(ui: &mut Ui, wt: &Worktree, busy: bool, actions: &mut Actions) 
         });
         ui.close();
     }
-    let remove = ui.add_enabled(!busy && !wt.locked, egui::Button::new("Remove worktree…"));
     let remove = if wt.locked {
-        remove.on_disabled_hover_text("Unlock it first")
+        &can::no("Unlock it first")
     } else {
-        remove
+        can
     };
-    if remove.clicked() {
-        actions.push(Action::Ask(Box::new(remove_confirm(wt))));
-        ui.close();
-    }
+    let ask = Action::Ask(Box::new(remove_confirm(wt)));
+    can_item(ui, "Remove worktree…", remove, actions, ask);
 }
 
 fn remove_confirm(wt: &Worktree) -> Confirm {
@@ -476,39 +474,41 @@ fn branch_menu(
     let Some(repo) = &project.snapshot else {
         return;
     };
-    let busy = project.is_operating();
+    let act = can::act(project, "");
     let name = branch.name.as_str();
     let is_head = head == Some(name);
     branch_menu::local_items(ui, project, repo, name, false, actions);
     if !is_head {
         merge_items(ui, project, name, actions);
     }
-    menu_item(
+    can_item(
         ui,
         "New branch from here…",
-        !busy,
+        &act,
         actions,
         Action::OpenDialog(DialogKind::new_branch(name, name)),
     );
-    menu_item(
+    can_item(
         ui,
         "Rename…",
-        !busy,
+        &act,
         actions,
         Action::OpenDialog(DialogKind::RenameBranch {
             old: name.to_owned(),
             name: name.to_owned(),
         }),
     );
-    let deletable = repo.worktree_for_branch(name).is_none();
-    let delete = ui.add_enabled(!busy && deletable, egui::Button::new("Delete…"));
-    let delete = if deletable {
-        delete
+    let delete = if repo.worktree_for_branch(name).is_some() {
+        &can::no("It is checked out in a worktree")
     } else {
-        delete.on_disabled_hover_text("It is checked out in a worktree")
+        &act
     };
-    if delete.clicked() {
-        actions.push(Action::Ask(Box::new(Confirm {
+    can_item(
+        ui,
+        "Delete…",
+        delete,
+        actions,
+        Action::Ask(Box::new(Confirm {
             title: format!("Delete branch {name}?"),
             body: match &branch.upstream {
                 Upstream::Tracking { name: up, .. } => {
@@ -523,9 +523,8 @@ fn branch_menu(
                 name: name.to_owned(),
                 force: false,
             },
-        })));
-        ui.close();
-    }
+        })),
+    );
     ui.separator();
     if ui.button("Copy name").clicked() {
         ui.ctx().copy_text(name.to_owned());
@@ -540,22 +539,20 @@ fn merge_items(ui: &mut Ui, project: &Project, name: &str, actions: &mut Actions
     let Some(current) = wt.branch.as_deref() else {
         return;
     };
-    let enabled = can::merge(project.snapshot.as_deref(), Some(wt))
-        .unless(project.can_act().err())
-        .ok;
+    let can = can::merge(project.snapshot.as_deref(), Some(wt)).unless(project.can_act().err());
     if let Some(kind) = merge_dialog(project, Some(name)) {
-        menu_item(
+        can_item(
             ui,
             &format!("Merge {name} into {current}…"),
-            enabled,
+            &can,
             actions,
             Action::OpenDialog(kind),
         );
     }
-    menu_item(
+    can_item(
         ui,
         &format!("Rebase {current} onto {name}…"),
-        enabled,
+        &can,
         actions,
         Action::Ask(Box::new(Confirm {
             title: format!("Rebase {current} onto {name}?"),
@@ -579,22 +576,22 @@ fn remote_branch_menu(
     branch: &RemoteBranch,
     actions: &mut Actions,
 ) {
-    let busy = project.is_operating();
+    let act = can::act(project, "");
     merge_items(ui, project, &branch.name, actions);
     let local = branch.branch_name();
     // With a local branch of its name, that is what opens.
     branch_menu::remote_items(ui, project, repo, branch, actions);
-    menu_item(
+    can_item(
         ui,
         "New branch from here…",
-        !busy,
+        &act,
         actions,
         Action::OpenDialog(DialogKind::new_branch(&branch.name, &branch.name)),
     );
-    menu_item(
+    can_item(
         ui,
         &format!("Delete on {}…", branch.remote),
-        !busy,
+        &act,
         actions,
         Action::Ask(Box::new(Confirm {
             title: format!("Delete {} on the remote?", branch.name),
@@ -616,12 +613,12 @@ fn remote_branch_menu(
     }
 }
 
-fn tag_menu(ui: &mut Ui, repo: &RepoSnapshot, tag: &str, busy: bool, actions: &mut Actions) {
+fn tag_menu(ui: &mut Ui, repo: &RepoSnapshot, tag: &str, can: &Can, actions: &mut Actions) {
     if let Some(remote) = remote::default_remote(repo.remotes.iter().map(|r| r.name.as_str())) {
-        menu_item(
+        can_item(
             ui,
             &format!("Push to {remote}"),
-            !busy,
+            can,
             actions,
             Action::Remote(RemoteOp::PushTag {
                 remote: remote.to_owned(),
@@ -629,10 +626,10 @@ fn tag_menu(ui: &mut Ui, repo: &RepoSnapshot, tag: &str, busy: bool, actions: &m
             }),
         );
     }
-    menu_item(
+    can_item(
         ui,
         "Delete…",
-        !busy,
+        can,
         actions,
         Action::Ask(Box::new(Confirm {
             title: format!("Delete tag {tag}?"),

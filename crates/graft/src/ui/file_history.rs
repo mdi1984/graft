@@ -8,6 +8,7 @@ use egui::{
 use graft_core::diff::{display_text, display_width};
 use graft_core::file_log::Blame;
 
+use super::can;
 use super::diff_view;
 use super::widgets::{
     ButtonKind, TWO_LINE_HEIGHT, button, elided, empty_state, paint_galley_left, two_line_row,
@@ -54,11 +55,11 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
         .frame(Frame::new().fill(color::sidebar_bg()))
         .show(ui, |ui| commit_list(ui, view, commits, actions));
 
-    let busy = project.is_operating();
+    let can = can::act(project, "");
     let wrap = project.settings().wrap_lines;
     match view.mode {
         FileHistoryMode::Changes => match &view.diff {
-            Some(diff) => diff_view::body(ui, diff, busy, false, wrap, None, actions),
+            Some(diff) => diff_view::body(ui, diff, &can, false, wrap, None, actions),
             None => {
                 waiting(ui);
             }

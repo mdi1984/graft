@@ -19,6 +19,7 @@ use graft_core::diff::{FileDiff, Gap, Hunk, Kind, Line, Source, display_width};
 use graft_core::ops::LineOp;
 use graft_core::syntax::{Spans, Token};
 
+use super::can::{self, Can};
 use super::file_row::paint_change_letter;
 use super::icons::Icon;
 use super::widgets::{
@@ -397,7 +398,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
     show_view(
         ui,
         view,
-        project.is_operating(),
+        &can::act(project, ""),
         project.settings(),
         actions,
     );
@@ -408,18 +409,18 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
 pub fn show_view(
     ui: &mut Ui,
     view: &DiffView,
-    busy: bool,
+    can: &Can,
     settings: &Settings,
     actions: &mut Actions,
 ) {
     if view.owner.closes() && keys::plain_key(ui.ctx(), Key::Escape) {
         actions.push(Action::CloseDiff(view.owner));
     }
-    header(ui, view, busy, settings, actions);
+    header(ui, view, can, settings, actions);
     if !view.selection.is_empty() {
-        selection_bar(ui, view, busy, actions);
+        selection_bar(ui, view, can, actions);
     }
-    body(ui, view, busy, false, settings.wrap_lines, None, actions);
+    body(ui, view, can, false, settings.wrap_lines, None, actions);
 }
 
 /// The diff without its header: unified, or side by side with `split`;
@@ -428,7 +429,7 @@ pub fn show_view(
 pub fn body(
     ui: &mut Ui,
     view: &DiffView,
-    busy: bool,
+    can: &Can,
     split: bool,
     wrap: bool,
     marks: Option<&Marks>,
@@ -466,7 +467,7 @@ pub fn body(
     if split {
         side_by_side(ui, view, diff, wrap, marks, actions);
     } else {
-        lines(ui, view, diff, busy, wrap, marks, actions);
+        lines(ui, view, diff, can, wrap, marks, actions);
     }
 }
 
@@ -743,7 +744,7 @@ fn paint_code(
     }
 }
 
-fn header(ui: &mut Ui, view: &DiffView, busy: bool, settings: &Settings, actions: &mut Actions) {
+fn header(ui: &mut Ui, view: &DiffView, can: &Can, settings: &Settings, actions: &mut Actions) {
     Panel::top("diff-header")
         .frame(
             Frame::new()
@@ -772,15 +773,24 @@ fn header(ui: &mut Ui, view: &DiffView, busy: bool, settings: &Settings, actions
                     let paths = vec![path.clone()];
                     match view.staging {
                         Some(Staging::Staged) => {
-                            if button(ui, "Unstage file", ButtonKind::Secondary, !busy).clicked() {
+                            if can
+                                .why_not(button(ui, "Unstage file", ButtonKind::Secondary, can.ok))
+                                .clicked()
+                            {
                                 actions.push(Action::UnstageFiles(paths));
                             }
                         }
                         Some(Staging::Unstaged) => {
-                            if button(ui, "Stage file", ButtonKind::Secondary, !busy).clicked() {
+                            if can
+                                .why_not(button(ui, "Stage file", ButtonKind::Secondary, can.ok))
+                                .clicked()
+                            {
                                 actions.push(Action::StageFiles(paths));
                             }
-                            if button(ui, "Discard…", ButtonKind::Secondary, !busy).clicked() {
+                            if can
+                                .why_not(button(ui, "Discard…", ButtonKind::Secondary, can.ok))
+                                .clicked()
+                            {
                                 actions.push(Action::discard_file(&view.key.source, path.clone()));
                             }
                         }
@@ -844,7 +854,7 @@ pub fn whole_file_button(ui: &mut Ui, view: &DiffView, settings: &Settings, acti
     }
 }
 
-fn selection_bar(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Actions) {
+fn selection_bar(ui: &mut Ui, view: &DiffView, can: &Can, actions: &mut Actions) {
     Panel::bottom("diff-selection")
         .frame(
             Frame::new()
@@ -867,15 +877,28 @@ fn selection_bar(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Actions
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     match view.staging {
                         Some(Staging::Staged) => {
-                            if button(ui, "Unstage lines", ButtonKind::Primary, !busy).clicked() {
+                            if can
+                                .why_not(button(ui, "Unstage lines", ButtonKind::Primary, can.ok))
+                                .clicked()
+                            {
                                 actions.push(Action::LinesOp(LineOp::Unstage));
                             }
                         }
                         Some(Staging::Unstaged) => {
-                            if button(ui, "Stage lines", ButtonKind::Primary, !busy).clicked() {
+                            if can
+                                .why_not(button(ui, "Stage lines", ButtonKind::Primary, can.ok))
+                                .clicked()
+                            {
                                 actions.push(Action::LinesOp(LineOp::Stage));
                             }
-                            if button(ui, "Discard lines…", ButtonKind::Secondary, !busy).clicked()
+                            if can
+                                .why_not(button(
+                                    ui,
+                                    "Discard lines…",
+                                    ButtonKind::Secondary,
+                                    can.ok,
+                                ))
+                                .clicked()
                             {
                                 actions.push(Action::Ask(Box::new(Confirm {
                                     title: "Discard the selected lines?".to_owned(),
@@ -904,7 +927,7 @@ fn lines(
     ui: &mut Ui,
     view: &DiffView,
     diff: &FileDiff,
-    busy: bool,
+    can: &Can,
     wrap: bool,
     marks: Option<&Marks>,
     actions: &mut Actions,
@@ -940,7 +963,7 @@ fn lines(
                 let (rect, _) = ui.allocate_exact_size(vec2(content_width, ROW), Sense::hover());
                 match *row {
                     Row::Gap(g) => gap_row(ui, rect, view, g, actions),
-                    Row::Hunk(h) => hunk_row(ui, rect, view, diff, h, busy, actions),
+                    Row::Hunk(h) => hunk_row(ui, rect, view, diff, h, can, actions),
                     Row::Comment(b, part) => comment_row(ui, rect, &blocks[b], part, actions),
                     Row::Lines(None, None, _) => {}
                     Row::Lines(left, right, part) => {
@@ -988,7 +1011,7 @@ fn hunk_row(
     view: &DiffView,
     diff: &FileDiff,
     h: usize,
-    busy: bool,
+    can: &Can,
     actions: &mut Actions,
 ) {
     paint_hunk_header(ui, rect, &diff.hunks[h], GUTTER);
@@ -1006,8 +1029,8 @@ fn hunk_row(
         let r = Rect::from_min_size(pos2(x, rect.top() + 2.0), vec2(w, ROW - 4.0));
         x -= 6.0;
         let id = ui.scope_id().with(("hunk-btn", h, label));
-        let enabled = !busy;
-        if small_button(ui, r, id, text, enabled, danger).clicked() && enabled {
+        let response = small_button(ui, r, id, text, can.ok, danger);
+        if can.why_not(response).clicked() && can.ok {
             actions.push(action);
         }
     };
