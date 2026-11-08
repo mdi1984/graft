@@ -9,7 +9,7 @@ use graft_core::paths::same_path;
 use graft_core::{Oid, Operation, review};
 
 use super::ops::{At, say};
-use super::{DialogKind, Project, Tab, WorkspaceView, readable};
+use super::{Action, Confirm, DialogKind, Project, Tab, WorkspaceView, readable};
 
 /// The resolver for one conflicted file of the selected worktree.
 pub struct ConflictView {
@@ -223,18 +223,39 @@ impl Project {
         view.resolutions[index] = Some(Resolution::Custom(Vec::new()));
     }
 
-    pub(super) fn save_resolution(&mut self) {
+    /// Write the resolver's result. Edits made to the file on disk since
+    /// the resolver loaded it are only replaced once the user agreed
+    /// (`confirmed`): otherwise finding them asks first.
+    pub(super) fn save_resolution(&mut self, confirmed: bool) {
         let Some(view) = &self.conflict else { return };
         let (Some(content), Some(Ok(file))) = (view.result(), &view.file) else {
             return;
         };
         let file = file.clone();
-        let done = format!("Resolved {}", file.path);
+        let path = file.path.clone();
         self.run_op(
             At::Selected,
             "Saving resolution",
-            move |git| conflicts::resolve_with(&git, &file, &content),
-            say(done),
+            move |git| {
+                if !confirmed && conflicts::edited_since_load(&git, &file) {
+                    return Ok(false);
+                }
+                conflicts::resolve_with(&git, &file, &content)?;
+                Ok(true)
+            },
+            move |p, _, result| match result {
+                Ok(true) => p.infos.push(format!("Resolved {path}")),
+                Ok(false) => p.ask(Confirm {
+                    title: format!("{path} was edited since the resolver opened it"),
+                    body: "Saving replaces the file with the resolver's result, and the \
+                           edits made to it on disk are lost. To keep the file as it is \
+                           now, use More > Mark as resolved instead."
+                        .to_owned(),
+                    confirm_label: "Overwrite".to_owned(),
+                    action: Action::SaveResolutionAnyway,
+                }),
+                Err(e) => p.report(e),
+            },
         );
     }
 
@@ -281,5 +302,59 @@ impl Project {
             move |git| conflicts::abort(&git, kind),
             say(format!("{} aborted", kind.noun())),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{git, open, wait};
+
+    /// The file was fixed by hand in an editor while the resolver was open:
+    /// Save resolution asks before it replaces those edits.
+    #[test]
+    fn saving_asks_before_it_replaces_edits_made_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        git(&main, &["init", "-q", "-b", "main"]);
+        std::fs::write(main.join("a.txt"), "a\n").unwrap();
+        git(&main, &["add", "a.txt"]);
+        git(&main, &["commit", "-q", "-m", "first"]);
+        git(&main, &["switch", "-q", "-c", "other"]);
+        std::fs::write(main.join("a.txt"), "other\n").unwrap();
+        git(&main, &["commit", "-q", "-am", "other"]);
+        git(&main, &["switch", "-q", "main"]);
+        std::fs::write(main.join("a.txt"), "main\n").unwrap();
+        git(&main, &["commit", "-q", "-am", "main"]);
+        let merge = std::process::Command::new("git")
+            .args(["merge", "other"])
+            .current_dir(&main)
+            .output()
+            .unwrap();
+        assert!(!merge.status.success(), "the merge must stop");
+
+        let mut project = open(&main);
+        wait(&mut project, "the resolver never loaded", |p| {
+            p.conflict.as_ref().is_some_and(|c| c.file.is_some())
+        });
+        project.apply(Action::ResolveConflict {
+            index: 0,
+            resolution: Some(Resolution::Theirs),
+        });
+        std::fs::write(main.join("a.txt"), "fixed by hand\n").unwrap();
+        let on_disk = || std::fs::read_to_string(main.join("a.txt")).unwrap();
+
+        project.apply(Action::SaveResolution);
+        wait(&mut project, "nothing was asked", |p| {
+            p.confirm.is_some() && !p.is_operating()
+        });
+        assert_eq!(on_disk(), "fixed by hand\n");
+        project.apply(Action::ConfirmYes);
+        wait(&mut project, "the resolution was never saved", |p| {
+            !p.is_operating() && !p.infos.is_empty()
+        });
+        assert!(project.notices.is_empty(), "{:?}", project.notices);
+        assert_eq!(on_disk().trim_end(), "other");
     }
 }

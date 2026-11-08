@@ -148,6 +148,9 @@ pub struct ConflictFile {
     /// The file split into clean parts and conflicts (text files where both
     /// sides exist).
     pub segments: Vec<Segment>,
+    /// A hash of the working file when this was loaded (`None`: missing),
+    /// see [`edited_since_load`].
+    pub on_disk: Option<u64>,
 }
 
 impl ConflictFile {
@@ -183,6 +186,7 @@ impl Resolution {
 }
 
 pub fn load(git: &Git, path: &str) -> Result<ConflictFile> {
+    let on_disk = disk_hash(git, path);
     let out = git.run(["ls-files", "-u", "-z", "--", path])?;
     let mut sides: [Option<Side>; 3] = [None, None, None];
     for record in out.stdout.split(|b| *b == 0).filter(|r| !r.is_empty()) {
@@ -250,7 +254,23 @@ pub fn load(git: &Git, path: &str) -> Result<ConflictFile> {
         theirs,
         binary,
         segments,
+        on_disk,
     })
+}
+
+/// A hash of the working file's content; `None` when it is missing.
+fn disk_hash(git: &Git, path: &str) -> Option<u64> {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let bytes = std::fs::read(git.cwd().join(path)).ok()?;
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+/// Whether the working file changed since `file` was loaded (edited by
+/// hand, e.g. in another editor): saving a resolution would replace that.
+pub fn edited_since_load(git: &Git, file: &ConflictFile) -> bool {
+    disk_hash(git, &file.path) != file.on_disk
 }
 
 /// Store `content` as a blob; returns its id.

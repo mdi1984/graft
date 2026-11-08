@@ -234,6 +234,9 @@ pub enum Action {
     EditConflict(usize),
     /// Write the open file's resolved content and stage it.
     SaveResolution,
+    /// Save it although the file was edited on disk since the resolver
+    /// loaded it: the user agreed to replace those edits.
+    SaveResolutionAnyway,
     /// Resolve a whole file with one side.
     TakeSide {
         path: String,
@@ -1060,7 +1063,8 @@ impl Project {
                 self.resolve_conflict(index, resolution)
             }
             Action::EditConflict(index) => self.edit_conflict(index),
-            Action::SaveResolution => self.save_resolution(),
+            Action::SaveResolution => self.save_resolution(false),
+            Action::SaveResolutionAnyway => self.save_resolution(true),
             Action::TakeSide { path, ours } => self.take_side(path, ours),
             Action::MarkResolved(path) => self.mark_resolved(path),
             Action::ContinueOp(kind) => self.continue_op(kind),

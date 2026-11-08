@@ -48,6 +48,12 @@ fn merge_resolve_and_continue() {
     let file = conflicts::load(&git, "f.txt").unwrap();
     assert!(!file.binary);
     assert_eq!(file.conflicts(), 1);
+    // Saving notices a hand edit made after loading.
+    assert!(!conflicts::edited_since_load(&git, &file));
+    let loaded = std::fs::read(dir.join("f.txt")).unwrap();
+    std::fs::write(dir.join("f.txt"), "fixed by hand\n").unwrap();
+    assert!(conflicts::edited_since_load(&git, &file));
+    std::fs::write(dir.join("f.txt"), loaded).unwrap();
     let content = conflicts::assemble(&file.segments, &[Some(Resolution::OursThenTheirs)]).unwrap();
     assert_eq!(content, b"a\nB-main\nB-topic\nc\n");
     conflicts::resolve_with(&git, &file, &content).unwrap();
