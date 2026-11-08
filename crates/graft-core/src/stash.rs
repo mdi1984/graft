@@ -29,7 +29,8 @@ impl Stash {
 #[derive(Clone, Debug, Default)]
 pub struct Options {
     pub message: String,
-    /// Also stash untracked files (`-u`).
+    /// Also stash untracked files (`-u`). Not with `staged_only`: untracked
+    /// files are never staged.
     pub include_untracked: bool,
     /// Leave staged changes in place (`--keep-index`). Not with
     /// `staged_only`, which stashes just the staged changes.
@@ -98,7 +99,7 @@ fn parse_subject(subject: &str) -> (Option<String>, String) {
 
 pub fn push(git: &Git, options: &Options) -> Result<()> {
     let mut args = vec!["stash", "push"];
-    if options.include_untracked {
+    if options.include_untracked && !options.staged_only {
         args.push("--include-untracked");
     }
     if options.keep_index && !options.staged_only {

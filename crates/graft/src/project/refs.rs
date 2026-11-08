@@ -896,6 +896,34 @@ mod tests {
         assert_eq!(restored.trim_end(), "stashed");
     }
 
+    /// "Only stash what is staged" works with the dialog's other options as
+    /// they start (untracked files included): the untracked file stays.
+    #[test]
+    fn stashing_only_what_is_staged_with_the_default_options() {
+        let Setup {
+            _dir,
+            mut project,
+            main,
+            ..
+        } = setup(|main| {
+            std::fs::write(main.join("staged.txt"), "staged\n").unwrap();
+            git(main, &["add", "staged.txt"]);
+            std::fs::write(main.join("untracked.txt"), "untracked\n").unwrap();
+        });
+        project.apply(Action::OpenWorktree(main.clone()));
+        let mut kind = DialogKind::stash();
+        if let DialogKind::Stash { staged_only, .. } = &mut kind {
+            *staged_only = true;
+        }
+        project.apply(Action::OpenDialog(kind));
+        project.apply(Action::SubmitDialog);
+        wait(&mut project, "the stash never ended", |p| !p.is_operating());
+        assert!(project.dialog.is_none(), "{:?}", project.dialog);
+        assert!(project.notices.is_empty(), "{:?}", project.notices);
+        assert!(!main.join("staged.txt").exists());
+        assert!(main.join("untracked.txt").exists());
+    }
+
     /// A failed merge leaves the dialog open; when the branch changes
     /// before the next try, OK refuses instead of merging into it.
     #[test]

@@ -71,15 +71,20 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Actions) {
                 field_label(ui, "Message (optional)");
                 edited |= focused_field(ui, message, "What you were doing", WIDTH, focus);
                 ui.add_space(4.0);
-                edited |= ui
-                    .checkbox(include_untracked, "Include untracked files")
-                    .changed();
-                edited |= ui
-                    .add_enabled_ui(!*staged_only, |ui| {
-                        ui.checkbox(keep_index, "Keep staged changes in place too")
-                            .changed()
-                    })
-                    .inner;
+                // Untracked files are never staged; staged changes leave.
+                let only_staged = "Not with \"Only stash what is staged\"";
+                for (value, label) in [
+                    (include_untracked, "Include untracked files"),
+                    (keep_index, "Keep staged changes in place too"),
+                ] {
+                    edited |= ui
+                        .add_enabled_ui(!*staged_only, |ui| {
+                            ui.checkbox(value, label)
+                                .on_disabled_hover_text(only_staged)
+                                .changed()
+                        })
+                        .inner;
+                }
                 edited |= ui
                     .checkbox(staged_only, "Only stash what is staged")
                     .changed();
