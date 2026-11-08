@@ -13,7 +13,9 @@ use anyhow::{Result, anyhow, bail};
 
 use crate::cli::{Git, Progress};
 use crate::jobs::CancelToken;
-use crate::model::{DEFAULT_BRANCHES, Oid, RepoSnapshot, Upstream, Worktree};
+use crate::model::{
+    DEFAULT_BRANCHES, Oid, RepoSnapshot, Upstream, Worktree, branch_name, local_ref,
+};
 use crate::paths::{display, folder_name, glob_match, pattern_list};
 use crate::{refs, remote, repo, snapshot, worktree};
 
@@ -154,13 +156,13 @@ pub fn plan(git: &Git, snap: &RepoSnapshot, patterns: &str) -> Result<Plan> {
         Some(d) => git
             .read([
                 "for-each-ref",
-                "--format=%(refname:short)",
+                "--format=%(refname)",
                 "--merged",
-                d,
+                &local_ref(d),
                 "refs/heads",
             ])?
             .lines()
-            .map(str::to_owned)
+            .filter_map(|full| Some(branch_name(full)?.to_owned()))
             .collect(),
         None => Vec::new(),
     };
@@ -366,7 +368,7 @@ pub fn execute(
 /// Whether `branch` no longer points at `target`, the commit the scan saw
 /// (or cannot be read).
 fn moved(git: &Git, branch: &str, target: Oid) -> bool {
-    !matches!(git.rev(&format!("refs/heads/{branch}")), Ok(Some(at)) if at == target)
+    !matches!(git.rev(&local_ref(branch)), Ok(Some(at)) if at == target)
 }
 
 const MOVED: &str = "it moved since the scan (new commits?), so it was kept.";
@@ -379,7 +381,7 @@ fn delete_branch(git: &Git, branch: &str, target: Oid) -> Result<()> {
     if moved(git, branch, target) {
         bail!(MOVED);
     }
-    let full = format!("refs/heads/{branch}");
+    let full = local_ref(branch);
     let checked_out = git.read(["for-each-ref", "--format=%(worktreepath)", &full])?;
     if !checked_out.trim().is_empty() {
         bail!("it is checked out in a worktree, so it was kept.");

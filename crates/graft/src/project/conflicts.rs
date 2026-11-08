@@ -188,10 +188,11 @@ impl Project {
     pub(super) fn rebase(&mut self, onto: String) {
         let done = format!("Rebased onto {onto}");
         let doing = format!("Rebasing onto {onto}");
+        let rev = self.rev(&onto);
         self.run_head_op(
             At::Selected,
             "Rebasing",
-            move |git| conflicts::rebase(&git, &onto),
+            move |git| conflicts::rebase(&git, &rev),
             after_conflicts(done, doing, None),
         );
     }

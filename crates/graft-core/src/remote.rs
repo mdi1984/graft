@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 
 use crate::cli::{Git, Progress};
 use crate::jobs::CancelToken;
-use crate::model::{ORIGIN, Upstream};
+use crate::model::{ORIGIN, Upstream, branch_name, local_ref};
 use crate::refs::{self, RefKind};
 
 /// Fetch every remote. With `prune`, remote branches deleted there go too,
@@ -94,15 +94,13 @@ pub fn push(git: &Git, cancel: &CancelToken, on_progress: impl FnMut(Progress)) 
     let remotes = git.read(["remote"])?;
     match push_plan(&upstream(git)?, remotes.lines()) {
         Ok(PushPlan::Upstream) => git.run_progress(&["push", "--progress"], cancel, on_progress),
-        // The full name: a tag named like the branch makes the short one
-        // ambiguous.
         Ok(PushPlan::Publish { remote }) => git.run_progress(
             &[
                 "push",
                 "--progress",
                 "--set-upstream",
                 &remote,
-                &format!("refs/heads/{branch}"),
+                &local_ref(&branch),
             ],
             cancel,
             on_progress,
@@ -155,7 +153,7 @@ pub fn delete_remote_branch(
     progress: impl FnMut(Progress),
 ) -> Result<()> {
     git.run_progress(
-        &["push", "--progress", remote, "--delete", branch],
+        &["push", "--progress", remote, "--delete", &local_ref(branch)],
         cancel,
         progress,
     )
@@ -184,11 +182,12 @@ fn current_branch(git: &Git) -> Result<String> {
 /// The current branch's upstream as far as git can resolve it: one deleted
 /// on the remote counts as none.
 fn upstream(git: &Git) -> Result<Upstream> {
-    let out = git.run_raw(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])?;
-    let name = out.stdout_str().trim().to_owned();
+    let out = git.run_raw(["rev-parse", "--symbolic-full-name", "@{u}"])?;
+    let full = out.stdout_str();
+    let name = branch_name(full.trim()).unwrap_or_default();
     Ok(if out.success() && !name.is_empty() {
         Upstream::Tracking {
-            name,
+            name: name.to_owned(),
             ahead: 0,
             behind: 0,
         }

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::cli::Git;
+use crate::model::remote_ref;
 use crate::paths::{display, glob_match, pattern_list, through_link};
 
 /// Files worth copying into a new worktree by default: ignored, so git will
@@ -45,7 +46,15 @@ pub fn add(git: &Git, path: &Path, start: &Start) -> Result<()> {
             git.run(["worktree", "add", &path, name])?;
         }
         Start::Tracking { name, remote } => {
-            git.run(["worktree", "add", "--track", "-b", name, &path, remote])?;
+            git.run([
+                "worktree",
+                "add",
+                "--track",
+                "-b",
+                name,
+                &path,
+                &remote_ref(remote),
+            ])?;
         }
     }
     Ok(())

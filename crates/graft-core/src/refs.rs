@@ -4,6 +4,7 @@
 use anyhow::{Result, bail};
 
 use crate::cli::Git;
+use crate::model::remote_ref;
 
 /// How far `git reset` goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,7 +107,7 @@ pub fn switch(git: &Git, branch: &str) -> Result<()> {
 
 /// Create a local branch tracking `remote_branch` (e.g. `origin/x`) and switch to it.
 pub fn switch_tracking(git: &Git, local: &str, remote_branch: &str) -> Result<()> {
-    git.run(["switch", "-c", local, "--track", remote_branch])?;
+    git.run(["switch", "-c", local, "--track", &remote_ref(remote_branch)])?;
     Ok(())
 }
 

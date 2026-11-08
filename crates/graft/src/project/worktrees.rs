@@ -85,7 +85,7 @@ impl NewWorktreeForm {
                 }
                 Ok(Start::NewBranch {
                     name: name.to_owned(),
-                    base: self.base.trim().to_owned(),
+                    base: snap.rev(self.base.trim()),
                 })
             }
             BranchMode::Existing => {

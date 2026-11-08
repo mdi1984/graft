@@ -39,5 +39,5 @@ pub use jobs::{CancelToken, JobPool, Panicked, Waker, catch, is_cancelled, is_pa
 pub use model::{
     Branch, Change, EntryKind, FileList, InProgress, ORIGIN, Oid, Operation, Preview, Remote,
     RemoteBranch, RepoSnapshot, Restore, StatusEntry, Tag, Upstream, Worktree, WorktreeStatus,
-    null_oid, short,
+    local_ref, null_oid, remote_ref, short,
 };

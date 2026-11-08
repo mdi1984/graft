@@ -674,6 +674,15 @@ impl Project {
         self.worktree_in(self.snapshot.as_ref()?)
     }
 
+    /// A branch, remote branch or tag picked by name, as git must be given
+    /// it (see [`RepoSnapshot::rev`]).
+    fn rev(&self, name: &str) -> String {
+        match &self.snapshot {
+            Some(snap) => snap.rev(name),
+            None => name.to_owned(),
+        }
+    }
+
     /// The selected worktree in `snap`: a screen holding its own handle on
     /// the snapshot can borrow from it while it changes the project.
     pub fn worktree_in<'a>(&self, snap: &'a RepoSnapshot) -> Option<&'a Worktree> {

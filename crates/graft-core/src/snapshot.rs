@@ -6,7 +6,7 @@ use anyhow::Result;
 
 use crate::cli::Git;
 use crate::model::{
-    Branch, ORIGIN, Oid, Remote, RemoteBranch, RepoSnapshot, Tag, Upstream, Worktree,
+    Branch, ORIGIN, Oid, Remote, RemoteBranch, RepoSnapshot, Tag, Upstream, Worktree, branch_name,
 };
 use crate::paths::{self, folder_name, same_path};
 use crate::{repo, stash, status};
@@ -66,7 +66,7 @@ struct Refs {
 fn load_refs(git: &Git) -> Result<Refs> {
     let out = git.read([
         "for-each-ref",
-        "--format=%(refname)%00%(objectname)%00%(*objectname)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(symref)%00%(objecttype)%00%(*objecttype)",
+        "--format=%(refname)%00%(objectname)%00%(*objectname)%00%(upstream)%00%(upstream:track,nobracket)%00%(symref)%00%(objecttype)%00%(*objecttype)",
         "refs/heads",
         "refs/remotes",
         "refs/tags",
@@ -131,6 +131,7 @@ fn parse_upstream(upstream: &str, track: &str) -> Upstream {
     if upstream.is_empty() {
         return Upstream::None;
     }
+    let upstream = branch_name(upstream).unwrap_or(upstream);
     if track == "gone" {
         return Upstream::Gone {
             name: upstream.to_owned(),
@@ -294,8 +295,8 @@ mod tests {
         let oid = "1111111111111111111111111111111111111111";
         let peeled = "2222222222222222222222222222222222222222";
         let text = format!(
-            "refs/heads/main\0{oid}\0\0origin/main\0ahead 2, behind 1\0\n\
-             refs/heads/old\0{oid}\0\0origin/old\0gone\0\n\
+            "refs/heads/main\0{oid}\0\0refs/remotes/origin/main\0ahead 2, behind 1\0\n\
+             refs/heads/old\0{oid}\0\0refs/remotes/origin/old\0gone\0\n\
              refs/heads/local\0{oid}\0\0\0\0\n\
              refs/remotes/origin/HEAD\0{oid}\0\0\0\0refs/remotes/origin/main\n\
              refs/remotes/origin/feature/x\0{oid}\0\0\0\0\n\

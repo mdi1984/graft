@@ -14,6 +14,26 @@ pub(crate) const DEFAULT_BRANCHES: [&str; 4] = ["main", "master", "trunk", "deve
 /// The remote `git clone` sets up: the one to use when there is a choice.
 pub const ORIGIN: &str = "origin";
 
+/// A local branch as a revision, by its full name: git takes a short name
+/// for a tag when a tag is named the same (and `:short` names then read
+/// `heads/x`), so branches are always passed this way and read back with
+/// [`branch_name`].
+pub fn local_ref(branch: &str) -> String {
+    format!("refs/heads/{branch}")
+}
+
+/// A remote branch (`origin/x`) as a revision; see [`local_ref`].
+pub fn remote_ref(branch: &str) -> String {
+    format!("refs/remotes/{branch}")
+}
+
+/// The branch a full ref names: `refs/heads/x` is `x`,
+/// `refs/remotes/origin/x` is `origin/x`.
+pub(crate) fn branch_name(full: &str) -> Option<&str> {
+    full.strip_prefix("refs/heads/")
+        .or_else(|| full.strip_prefix("refs/remotes/"))
+}
+
 /// Why main must stay as it is while it shows a preview.
 const PREVIEW_SHOWN: &str = "The main folder shows a preview. Restore main first.";
 
@@ -87,6 +107,22 @@ impl RepoSnapshot {
             };
             on == Some(branch)
         })
+    }
+
+    /// A branch, remote branch or tag picked from one of Graft's lists by
+    /// name, as a revision (see [`local_ref`]); anything else (a commit id)
+    /// as it is. A local branch wins over a remote branch or tag of the
+    /// same name.
+    pub fn rev(&self, name: &str) -> String {
+        if self.branch(name).is_some() {
+            local_ref(name)
+        } else if self.remote_branches.iter().any(|b| b.name == name) {
+            remote_ref(name)
+        } else if self.tags.iter().any(|t| t.name == name) {
+            format!("refs/tags/{name}")
+        } else {
+            name.to_owned()
+        }
     }
 
     /// What can be merged into the branch `into`: the other local branches,

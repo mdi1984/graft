@@ -329,6 +329,7 @@ impl Project {
                 } else {
                     format!("Created branch {name}")
                 };
+                let start = self.rev(&start);
                 self.run_op(
                     At::Selected,
                     "Creating branch",
@@ -397,6 +398,7 @@ impl Project {
                     format!("Merged {rev} into {into}"),
                     format!("Merging {rev}"),
                 );
+                let rev = self.rev(&rev);
                 self.run_op(
                     At::Selected,
                     "Merging",

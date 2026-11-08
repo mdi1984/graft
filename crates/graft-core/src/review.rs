@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::changes::{FileChange, between, count_lines, is_binary};
 use crate::cli::Git;
-use crate::model::{Change, ORIGIN, Oid, RepoSnapshot};
+use crate::model::{Change, ORIGIN, Oid, RepoSnapshot, local_ref};
 use crate::paths::display;
 use crate::repo::in_progress;
 
@@ -70,12 +70,13 @@ pub fn default_base(snap: &RepoSnapshot, current: Option<&str>) -> Option<String
 /// Untracked files bigger than this are not read to count their lines.
 const MAX_COUNTED: u64 = 8 * 1024 * 1024;
 
-/// `git` points at the worktree under review.
-pub fn load(git: &Git, base: &str) -> Result<Review> {
+/// `git` points at the worktree under review; `rev` is `base` as a
+/// revision ([`RepoSnapshot::rev`]).
+pub fn load(git: &Git, base: &str, rev: &str) -> Result<Review> {
     let head = git.rev("HEAD")?.context("This branch has no commits yet")?;
     let head_hex = head.to_string();
     let merge_base = git
-        .read(["merge-base", "--end-of-options", base, &head_hex])
+        .read(["merge-base", "--end-of-options", rev, &head_hex])
         .with_context(|| format!("{base} and this branch have no common history"))?;
     let merge_base = merge_base.trim().to_owned();
     // The rest runs side by side: each git start costs tens of milliseconds
@@ -190,10 +191,10 @@ pub fn merge(git: &Git, branch: &str, into: &str, head: Oid) -> Result<bool> {
             "Nothing was merged: {into} is no longer checked out in {place}. Check it out there, then merge again."
         );
     }
-    if git.rev(&format!("refs/heads/{branch}"))? != Some(head) {
+    if git.rev(&local_ref(branch))? != Some(head) {
         bail!(
             "Nothing was merged: {branch} moved since you reviewed it. Look at its new commits in Review, then merge again."
         );
     }
-    crate::conflicts::merge(git, branch, false)
+    crate::conflicts::merge(git, &local_ref(branch), false)
 }

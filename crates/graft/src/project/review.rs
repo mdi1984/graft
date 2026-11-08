@@ -175,16 +175,20 @@ impl Project {
             .review_state()
             .and_then(|s| s.base.clone())
             .or_else(|| review::default_base(self.snapshot.as_ref()?, current));
+        let rev = base
+            .as_deref()
+            .zip(self.snapshot.as_ref())
+            .map(|(base, snap)| snap.rev(base));
         let git = self.wt_git();
         self.jobs.spawn(
             move || {
-                let base = base.ok_or_else(|| {
-                    anyhow::anyhow!(
+                let (Some(base), Some(rev)) = (base, rev) else {
+                    anyhow::bail!(
                         "There is no main or master branch to review against. Pick a base \
                          branch above."
-                    )
-                })?;
-                review::load(&git, &base)
+                    );
+                };
+                review::load(&git, &base, &rev)
             },
             move |p, result| p.on_review(ticket, readable(result)),
         );

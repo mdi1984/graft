@@ -32,7 +32,7 @@ fn branch_changes_since_fork_including_uncommitted() {
     std::fs::write(dir.join("d.txt"), "draft\nnotes\n").unwrap();
 
     let git = common::git(dir);
-    let r = review::load(&git, "main").unwrap();
+    let r = review::load(&git, "main", "refs/heads/main").unwrap();
     assert_eq!(r.commits, 1);
     let paths: Vec<&str> = r.files.iter().map(|f| f.change.path.as_str()).collect();
     assert_eq!(paths, ["a.txt", "b.txt", "c.txt", "d.txt", "gone.txt"]);
@@ -54,13 +54,13 @@ fn branch_changes_since_fork_including_uncommitted() {
 
     // Viewed marks follow the content.
     let before = get("a.txt").viewed_key();
-    let again = review::load(&git, "main").unwrap();
+    let again = review::load(&git, "main", "refs/heads/main").unwrap();
     assert_eq!(again.files[0].viewed_key(), before);
     std::fs::write(dir.join("a.txt"), "changed again\n").unwrap();
-    let after = review::load(&git, "main").unwrap();
+    let after = review::load(&git, "main", "refs/heads/main").unwrap();
     assert_ne!(after.files[0].viewed_key(), before);
 
-    assert!(review::load(&git, "nope").is_err());
+    assert!(review::load(&git, "nope", "refs/heads/nope").is_err());
 }
 
 #[test]
@@ -112,7 +112,7 @@ fn untracked_blank_lines_count() {
     std::fs::write(dir.join("new.txt"), "one\n\ntwo\n\n").unwrap();
     common::commit(dir, "committed.txt", "one\n\ntwo\n\n", "same text");
 
-    let r = review::load(&common::git(dir), "main").unwrap();
+    let r = review::load(&common::git(dir), "main", "refs/heads/main").unwrap();
     let get = |p: &str| r.files.iter().find(|f| f.change.path == p).unwrap();
     assert_eq!(get("committed.txt").change.added, Some(4));
     assert_eq!(get("new.txt").change.added, Some(4));
@@ -136,7 +136,7 @@ fn folders_do_not_break_the_review() {
     common::commit(&nested, "n.txt", "n\n", "nested");
     std::fs::write(dir.join("b.txt"), "b\n").unwrap();
 
-    let r = review::load(&common::git(dir), "main").unwrap();
+    let r = review::load(&common::git(dir), "main", "refs/heads/main").unwrap();
     let paths: Vec<&str> = r.files.iter().map(|f| f.change.path.as_str()).collect();
     assert_eq!(paths, ["b.txt", "sub"]);
     let b = r.files.iter().find(|f| f.change.path == "b.txt").unwrap();
@@ -158,7 +158,7 @@ fn merge_takes_only_the_reviewed_commits() {
     sh(main, &["worktree", "add", "-q", "-b", "feature", agent_arg]);
     common::commit(&agent, "b.txt", "b\n", "reviewed");
 
-    let r = review::load(&common::git(&agent), "main").unwrap();
+    let r = review::load(&common::git(&agent), "main", "refs/heads/main").unwrap();
     assert_eq!(r.head.to_string(), common::rev(&agent, "HEAD"));
     common::commit(&agent, "c.txt", "c\n", "after the review");
     let before = common::rev(main, "HEAD");
@@ -169,7 +169,7 @@ fn merge_takes_only_the_reviewed_commits() {
     );
     assert_eq!(common::rev(main, "HEAD"), before);
 
-    let r = review::load(&common::git(&agent), "main").unwrap();
+    let r = review::load(&common::git(&agent), "main", "refs/heads/main").unwrap();
     let stopped = review::merge(&common::git(main), "feature", "main", r.head).unwrap();
     assert!(!stopped);
     assert_eq!(common::rev(main, "HEAD"), common::rev(&agent, "HEAD"));
@@ -202,7 +202,7 @@ fn merge_refuses_when_the_target_changed() {
         &agent, "b.txt", "b
 ", "reviewed",
     );
-    let r = review::load(&common::git(&agent), "main").unwrap();
+    let r = review::load(&common::git(&agent), "main", "refs/heads/main").unwrap();
     let merge = || review::merge(&common::git(main), "feature", "main", r.head);
 
     sh(main, &["checkout", "-q", "-b", "other"]);
@@ -245,7 +245,7 @@ fn a_moved_file_shows_as_a_rename() {
     std::fs::write(dir.join("b.txt"), "one\ntwo\nTHREE\nfour\nfive\n").unwrap();
 
     let git = common::git(dir);
-    let r = review::load(&git, "main").unwrap();
+    let r = review::load(&git, "main", "refs/heads/main").unwrap();
     let file = &r.files[0].change;
     assert_eq!(
         (file.path.as_str(), file.orig_path.as_deref()),
