@@ -94,8 +94,16 @@ pub fn push(git: &Git, cancel: &CancelToken, on_progress: impl FnMut(Progress)) 
     let remotes = git.read(["remote"])?;
     match push_plan(&upstream(git)?, remotes.lines()) {
         Ok(PushPlan::Upstream) => git.run_progress(&["push", "--progress"], cancel, on_progress),
+        // The full name: a tag named like the branch makes the short one
+        // ambiguous.
         Ok(PushPlan::Publish { remote }) => git.run_progress(
-            &["push", "--progress", "--set-upstream", &remote, &branch],
+            &[
+                "push",
+                "--progress",
+                "--set-upstream",
+                &remote,
+                &format!("refs/heads/{branch}"),
+            ],
             cancel,
             on_progress,
         ),

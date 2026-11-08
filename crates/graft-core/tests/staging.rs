@@ -232,7 +232,9 @@ fn commit_amend_and_push() {
     ops::commit(&git, "Add b, reworded", true).unwrap();
     assert_eq!(sh(&dir, &["log", "--format=%s"]), "Add b, reworded\ninit");
 
-    // Push a branch without upstream to a bare "origin".
+    // Push a branch without upstream to a bare "origin", also when a tag
+    // is named like it.
+    sh(&dir, &["tag", "main"]);
     let bare = common::init_bare(&tmp.path().join("origin.git"));
     sh(&dir, &["remote", "add", "origin", bare.to_str().unwrap()]);
     remote::push(&git, &CancelToken::default(), |_| {}).unwrap();
