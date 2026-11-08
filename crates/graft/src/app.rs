@@ -519,8 +519,10 @@ impl GraftApp {
         );
     }
 
+    /// Close a project's tab, unless an operation still runs there (see
+    /// [`Project::may_close`]). Every way of closing tabs comes here.
     fn close_project(&mut self, index: usize) {
-        if index >= self.projects.len() {
+        if !self.projects.get_mut(index).is_some_and(Project::may_close) {
             return;
         }
         let project = self.projects.remove(index);

@@ -69,6 +69,27 @@ impl Project {
         false
     }
 
+    /// False, after saying why, while an operation runs: closing the tab
+    /// would drop what it does when it ends (push after commit, conflicts,
+    /// its error).
+    pub fn may_close(&mut self) -> bool {
+        let Some(op) = &self.op else {
+            return true;
+        };
+        let what = op.label.trim_end_matches('…');
+        let cancel = if op.can_cancel() {
+            " (or cancel it)"
+        } else {
+            ""
+        };
+        let notice = format!(
+            "Wait for \"{what}\" to finish{cancel} before closing the {} tab.",
+            self.name
+        );
+        self.notices.push(notice);
+        false
+    }
+
     /// The running operation's progress, while it has any to show.
     pub fn op_progress(&self) -> Option<Progress> {
         self.op.as_ref().map(Running::progress)
@@ -250,6 +271,35 @@ mod tests {
         wait(&mut project, "the operation never ended", |p| {
             !p.is_operating()
         });
+    }
+
+    /// Closing the tab waits for the running operation, whose end still
+    /// has work to do (push after commit, conflicts, errors).
+    #[test]
+    fn a_tab_does_not_close_while_an_operation_runs() {
+        let dir = repo();
+        let mut project = open(dir.path());
+        let (release, released) = crossbeam_channel::bounded::<()>(1);
+        project.run_op(
+            At::Main,
+            "Merging",
+            move |_| -> anyhow::Result<()> {
+                let _ = released.recv();
+                Ok(())
+            },
+            quietly,
+        );
+        assert!(!project.may_close());
+        let notice = format!(
+            "Wait for \"Merging\" to finish before closing the {} tab.",
+            project.name
+        );
+        assert_eq!(project.notices, [notice]);
+        release.send(()).unwrap();
+        wait(&mut project, "the operation never ended", |p| {
+            !p.is_operating()
+        });
+        assert!(project.may_close());
     }
 
     #[test]
