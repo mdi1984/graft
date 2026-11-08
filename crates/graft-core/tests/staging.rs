@@ -801,3 +801,59 @@ fn a_file_moved_unchanged_says_where_from() {
     assert_eq!(d.renamed_from.as_deref(), Some("moved/a.txt"));
     assert_eq!(d.moved_unchanged(), None);
 }
+
+/// A repository with `f` committed as `old`, then written as `new`.
+fn changed_file(old: &str, new: &str) -> (tempfile::TempDir, Git) {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = common::init(&tmp.path().join("r"));
+    common::commit(&dir, "f", old, "init");
+    std::fs::write(dir.join("f"), new).unwrap();
+    (tmp, common::git(&dir))
+}
+
+fn staged_f(git: &Git) -> String {
+    String::from_utf8(git.run(["show", ":f"]).unwrap().stdout).unwrap()
+}
+
+fn lines_of(git: &Git, source: Source, op: LineOp, texts: &[&str]) -> anyhow::Result<()> {
+    let d = diff::load(git, &source, "f", None).unwrap();
+    ops::apply_lines(git, &d, &source, op, pick(&d, texts))
+}
+
+/// Git shows lines added after a last line without a newline as "-b", "+b"
+/// and the new lines. Staging only some of them gives b its newline, never
+/// glues them onto b.
+#[test]
+fn staging_lines_after_a_last_line_without_newline() {
+    let (_tmp, git) = changed_file("a\nb", "a\nb\nc\nd\n");
+    lines_of(&git, Source::Unstaged, LineOp::Stage, &["c"]).unwrap();
+    assert_eq!(staged_f(&git), "a\nb\nc\n");
+    assert!(sh(git.cwd(), &["diff"]).ends_with("\n a\n b\n c\n+d"));
+
+    // b changed as well, and the new version has no newline at the end.
+    let (_tmp, git) = changed_file("a\nb", "a\nB\nc");
+    lines_of(&git, Source::Unstaged, LineOp::Stage, &["c"]).unwrap();
+    assert_eq!(staged_f(&git), "a\nb\nc");
+    lines_of(&git, Source::Unstaged, LineOp::Stage, &["b", "B"]).unwrap();
+    assert_eq!(staged_f(&git), "a\nB\nc");
+}
+
+/// Unstaging or discarding "-b" (b losing its newline again) needs the lines
+/// after b to go too; alone it is refused and nothing changes.
+#[test]
+fn unstaging_and_discarding_lines_after_a_last_line_without_newline() {
+    let (_tmp, git) = changed_file("a\nb", "a\nb\nc\nd\n");
+    let dir = git.cwd().to_path_buf();
+    sh(&dir, &["add", "f"]);
+    assert!(lines_of(&git, Source::Staged, LineOp::Unstage, &["b"]).is_err());
+    assert_eq!(staged_f(&git), "a\nb\nc\nd\n");
+    lines_of(&git, Source::Staged, LineOp::Unstage, &["c"]).unwrap();
+    assert_eq!(staged_f(&git), "a\nb\nd\n");
+
+    sh(&dir, &["reset", "-q"]);
+    let err = lines_of(&git, Source::Unstaged, LineOp::Discard, &["b"]).unwrap_err();
+    assert!(err.to_string().contains("select those too"), "{err:#}");
+    assert_eq!(std::fs::read(dir.join("f")).unwrap(), b"a\nb\nc\nd\n");
+    lines_of(&git, Source::Unstaged, LineOp::Discard, &["d"]).unwrap();
+    assert_eq!(std::fs::read(dir.join("f")).unwrap(), b"a\nb\nc\n");
+}

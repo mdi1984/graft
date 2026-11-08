@@ -103,22 +103,24 @@ pub fn apply_lines(
         return Ok(());
     }
     let everything = chosen == Chosen::All;
+    let patch = |direction| {
+        build_patch(diff, direction, &selected).context(
+            "The newline at the end of the file goes with the lines added after it: select those too.",
+        )
+    };
     match (source, op) {
         (Source::Unstaged, LineOp::Stage) => {
-            let patch = build_patch(diff, Direction::Forward, &selected).expect("lines chosen");
-            apply_patch(git, &patch, true, false)
+            apply_patch(git, &patch(Direction::Forward)?, true, false)
         }
         // As a whole file: a rename's old path comes back too.
         (Source::Staged, LineOp::Unstage) if everything => {
             unstage_paths(git, std::slice::from_ref(&diff.path))
         }
         (Source::Staged, LineOp::Unstage) => {
-            let patch = build_patch(diff, Direction::Reverse, &selected).expect("lines chosen");
-            apply_patch(git, &patch, true, true)
+            apply_patch(git, &patch(Direction::Reverse)?, true, true)
         }
         (Source::Unstaged, LineOp::Discard) => {
-            let patch = build_patch(diff, Direction::Reverse, &selected).expect("lines chosen");
-            apply_patch(git, &patch, false, true)
+            apply_patch(git, &patch(Direction::Reverse)?, false, true)
         }
         (Source::Untracked, LineOp::Stage) if everything => {
             stage_paths(git, std::slice::from_ref(&diff.path))

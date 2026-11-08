@@ -613,8 +613,8 @@ pub(crate) fn chosen(diff: &FileDiff, selected: impl Fn(usize, usize) -> bool) -
     }
 }
 
-/// A patch containing only the selected lines, or `None` if nothing is
-/// selected. `selected(hunk, line)` says whether a changed line is included.
+/// A patch containing only the selected lines, or `None` if it would change
+/// nothing. `selected(hunk, line)` says whether a changed line is included.
 pub(crate) fn build_patch(
     diff: &FileDiff,
     direction: Direction,
@@ -626,12 +626,17 @@ pub(crate) fn build_patch(
     }
     let mut body = Vec::new();
     for (h, hunk) in diff.hunks.iter().enumerate() {
-        let mut lines: Vec<(u8, &Line)> = Vec::new();
-        let mut hunk_any = false;
+        let mut take: Vec<bool> = (hunk.lines.iter().enumerate())
+            .map(|(l, line)| line.is_change() && selected(h, l))
+            .collect();
+        let made_up = tie_final_newline(hunk, &mut take, direction);
+        if !take.contains(&true) {
+            continue;
+        }
+        // (marker, content, followed by "\ No newline at end of file")
+        let mut lines: Vec<(u8, &[u8], bool)> = Vec::new();
         for (l, line) in hunk.lines.iter().enumerate() {
-            let take = line.is_change() && selected(h, l);
-            hunk_any |= take;
-            let marker = match (line.kind, take, direction) {
+            let marker = match (line.kind, take[l], direction) {
                 (Kind::Context, ..) => Some(b' '),
                 (Kind::Added, true, _) => Some(b'+'),
                 (Kind::Removed, true, _) => Some(b'-'),
@@ -641,14 +646,18 @@ pub(crate) fn build_patch(
                 (Kind::Removed, false, Direction::Reverse) => None,
             };
             if let Some(m) = marker {
-                lines.push((m, line));
+                lines.push((m, &line.content, line.no_newline));
+            }
+            if made_up == Some(l) {
+                lines.push((b'+', &line.content, false));
             }
         }
-        if !hunk_any {
-            continue;
-        }
-        let old_count = lines.iter().filter(|(m, _)| *m != b'+').count();
-        let new_count = lines.iter().filter(|(m, _)| *m != b'-').count();
+        // "No newline" belongs only on the last line of its side: anywhere
+        // else git would glue the next line on. Without it git refuses.
+        let last_old = lines.iter().rposition(|(m, ..)| *m != b'+');
+        let last_new = lines.iter().rposition(|(m, ..)| *m != b'-');
+        let old_count = lines.iter().filter(|(m, ..)| *m != b'+').count();
+        let new_count = lines.iter().filter(|(m, ..)| *m != b'-').count();
         body.extend_from_slice(
             format!(
                 "@@ -{},{} +{},{} @@\n",
@@ -656,14 +665,18 @@ pub(crate) fn build_patch(
             )
             .as_bytes(),
         );
-        for (m, line) in lines {
+        for (i, &(m, content, no_newline)) in lines.iter().enumerate() {
             body.push(m);
-            body.extend_from_slice(&line.content);
+            body.extend_from_slice(content);
             body.push(b'\n');
-            if line.no_newline {
+            let last = (m == b'+' || last_old == Some(i)) && (m == b'-' || last_new == Some(i));
+            if no_newline && last {
                 body.extend_from_slice(b"\\ No newline at end of file\n");
             }
         }
+    }
+    if body.is_empty() {
+        return None;
     }
     let mut patch = if chosen == Chosen::All {
         diff.header.clone()
@@ -672,6 +685,38 @@ pub(crate) fn build_patch(
     };
     patch.extend_from_slice(&body);
     Some(patch)
+}
+
+/// The old version's last line without a newline ("-b" and "\ No newline")
+/// and the lines added after it go together: they need b to get its newline
+/// (git shows "+b"). Staging any of them stages that newline too; unstaging
+/// or discarding the newline needs all of them. Returns the line after which
+/// to write the "+b" when the diff has none (b changed as well).
+fn tie_final_newline(hunk: &Hunk, take: &mut [bool], direction: Direction) -> Option<usize> {
+    let lines = &hunk.lines;
+    let last = lines
+        .iter()
+        .position(|l| l.kind == Kind::Removed && l.no_newline)?;
+    let after: Vec<usize> = (last + 1..lines.len())
+        .filter(|&l| lines[l].kind == Kind::Added)
+        .collect();
+    let with_newline = after
+        .iter()
+        .copied()
+        .find(|&l| lines[l].content == lines[last].content);
+    let pair = match direction {
+        Direction::Forward if !take[last] && after.iter().any(|&l| take[l]) => true,
+        Direction::Reverse if take[last] && after.iter().any(|&l| !take[l]) => false,
+        _ => return None,
+    };
+    take[last] = pair;
+    match with_newline {
+        Some(l) => {
+            take[l] = pair;
+            None
+        }
+        None => pair.then_some(last),
+    }
 }
 
 /// A header for a patch that only takes part of a file's change. A partial
