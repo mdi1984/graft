@@ -397,13 +397,7 @@ mod tests {
             after_update(&args[..1]),
             Some(AfterUpdate { old_pid: None })
         );
-        assert_eq!(
-            after_update(&[PathBuf::from(
-                r"C:
-epo"
-            )]),
-            None
-        );
+        assert_eq!(after_update(&[PathBuf::from(r"C:\repo")]), None);
         assert_eq!(after_update(&[]), None);
     }
 

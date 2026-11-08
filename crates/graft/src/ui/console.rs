@@ -14,6 +14,8 @@ use crate::keys::{Command, Keymap};
 use crate::theme::{self, color};
 
 pub const STATUS_HEIGHT: f32 = 26.0;
+/// Width of the "ok" / "exit N" column of a console row.
+const MARK_COLUMN: f32 = 48.0;
 
 /// The latest console entries, re-read only when the console changed.
 /// Entries are told apart by their `seq`, which stays put when old ones
@@ -209,8 +211,11 @@ fn entry_row(ui: &mut Ui, entry: &Entry) {
         ("ok".to_owned(), color::added())
     };
     let mark = painter.layout_no_wrap(mark, theme::small(), mark_color);
+    // A column for the usual marks; a long exit code (a Windows crash
+    // code) pushes the command along instead of under it.
+    let mark_width = (mark.size().x + 10.0).max(MARK_COLUMN);
     paint_galley_left(painter, x, y, mark);
-    x += 48.0;
+    x += mark_width;
     let duration = painter.layout_no_wrap(
         format!("{} ms", entry.duration.as_millis()),
         theme::small(),

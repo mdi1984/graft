@@ -20,7 +20,6 @@ use graft_core::ops::LineOp;
 use graft_core::syntax::{Spans, Token};
 
 use super::file_row::paint_change_letter;
-use super::file_status;
 use super::icons::Icon;
 use super::widgets::{
     ButtonKind, button, elided_path, empty_state, icon_button, paint_check, paint_galley_left,
@@ -158,7 +157,6 @@ fn paint_word(
     }
 }
 
-/// How many rows a line takes when wrapped at `width` (one without wrapping).
 /// How many characters wide the widest line shows, cut lines included.
 fn longest_line(diff: &FileDiff) -> usize {
     diff.hunks
@@ -169,6 +167,7 @@ fn longest_line(diff: &FileDiff) -> usize {
         .unwrap_or(0)
 }
 
+/// How many rows a line takes when wrapped at `width` (one without wrapping).
 fn line_rows(
     painter: &Painter,
     view: &DiffView,
@@ -782,10 +781,7 @@ fn header(ui: &mut Ui, view: &DiffView, busy: bool, settings: &Settings, actions
                                 actions.push(Action::StageFiles(paths));
                             }
                             if button(ui, "Discard…", ButtonKind::Secondary, !busy).clicked() {
-                                actions.push(file_status::discard_file(
-                                    &view.key.source,
-                                    path.clone(),
-                                ));
+                                actions.push(Action::discard_file(&view.key.source, path.clone()));
                             }
                         }
                         None => {

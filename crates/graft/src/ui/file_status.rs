@@ -4,7 +4,6 @@
 use egui::{
     Color32, Frame, Margin, Panel, Rect, RichText, ScrollArea, Sense, Stroke, Ui, pos2, vec2,
 };
-use graft_core::diff::Source;
 use graft_core::{FileList, StatusEntry, WorktreeStatus};
 
 use super::file_row;
@@ -14,7 +13,7 @@ use super::widgets::{
 };
 use super::{conflicts, diff_view};
 use crate::keys::{Command, Keymap};
-use crate::project::{Action, Confirm, FileKey, Project};
+use crate::project::{Action, FileKey, Project};
 use crate::text::plural;
 use crate::theme::{self, RADIUS, color};
 use crate::ui::Actions;
@@ -117,7 +116,7 @@ fn keyboard(ui: &Ui, project: &Project, status: &WorktreeStatus, actions: &mut A
     if keys.pressed(ctx, Command::DiscardFile)
         && let Some((key, FileList::Unstaged)) = current.map(|i| &rows[i])
     {
-        actions.push(discard_file(&key.source, key.path.clone()));
+        actions.push(Action::discard_file(&key.source, key.path.clone()));
     }
 }
 
@@ -301,7 +300,7 @@ fn file_row(
                 .add(item("Discard changes…", Command::DiscardFile))
                 .clicked()
         {
-            actions.push(discard_file(&key.source, entry.path.clone()));
+            actions.push(Action::discard_file(&key.source, entry.path.clone()));
             ui.close();
         }
         ui.separator();
@@ -384,28 +383,4 @@ fn commit_box(ui: &mut Ui, project: &mut Project, status: &WorktreeStatus, actio
             ui.label(RichText::new(note).color(color::text_weak()));
         });
     });
-}
-
-/// Ask before discarding a whole file.
-pub fn discard_file(source: &Source, path: String) -> Action {
-    let untracked = *source == Source::Untracked;
-    let body = if untracked {
-        format!("{path} is not tracked by git. It will be moved to the Recycle Bin.")
-    } else {
-        format!("All unstaged changes to {path} will be lost. Staged changes stay.")
-    };
-    let (tracked, untracked_paths) = if untracked {
-        (Vec::new(), vec![path])
-    } else {
-        (vec![path], Vec::new())
-    };
-    Action::Ask(Box::new(Confirm {
-        title: "Discard changes?".to_owned(),
-        body,
-        confirm_label: "Discard".to_owned(),
-        action: Action::Discard {
-            tracked,
-            untracked: untracked_paths,
-        },
-    }))
 }

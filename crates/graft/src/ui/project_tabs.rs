@@ -43,6 +43,8 @@ const LABEL_MAX_WIDTH: f32 = 180.0;
 const ICON_GAP: f32 = 9.0;
 /// Between the tabs and "+", and after the last button.
 const BUTTON_GAP: f32 = 3.0;
+/// Between "+" and "All tabs".
+const BETWEEN_BUTTONS: f32 = 4.0;
 
 pub struct TabInfo {
     pub name: String,
@@ -160,12 +162,7 @@ pub fn show(
         })
         .collect();
     let left = icon.right() + ICON_GAP;
-    // "+", and "All tabs" when there are tabs.
-    let buttons = if tabs.is_empty() {
-        BUTTON_GAP + BUTTON + BUTTON_GAP
-    } else {
-        BUTTON_GAP + BUTTON + 4.0 + BUTTON + BUTTON_GAP
-    };
+    let (.., buttons) = strip_buttons(0.0, mid, !tabs.is_empty());
     let right = pill.map_or(gear.left(), |p| p.left()) - 8.0;
     let room = (right - left - buttons).max(MIN_WIDTH);
     let tab_count =
@@ -392,10 +389,7 @@ pub fn show(
     }
     ui.data_mut(|d| d.insert_temp(scroll_id, offset.clamp(0.0, max_offset)));
 
-    let plus = Rect::from_min_size(
-        pos2(view.right() + BUTTON_GAP, mid - BUTTON / 2.0),
-        vec2(BUTTON, BUTTON),
-    );
+    let (plus, all, _) = strip_buttons(view.right(), mid, !tabs.is_empty());
     let response = ui
         .interact(plus, ui.scope_id().with("new-tab"), Sense::click())
         .on_hover_text(keys.tip("Open a repository", Command::NewTab));
@@ -403,11 +397,7 @@ pub fn show(
     if response.clicked() {
         action = Some(TabAction::NewTab);
     }
-    if !tabs.is_empty() {
-        let rect = Rect::from_center_size(
-            pos2(plus.right() + 4.0 + BUTTON / 2.0, mid),
-            vec2(BUTTON, BUTTON),
-        );
+    if let Some(rect) = all {
         let response = ui
             .interact(rect, all_tabs_id(ui), Sense::click())
             .on_hover_text(keys.tip("All tabs", Command::AllTabs));
@@ -446,6 +436,18 @@ pub fn show(
     }
     window_frame::caption_buttons(ui, strip, mid);
     action
+}
+
+/// Where "+" and, with tabs, "All tabs" go when the tab strip ends at `x`,
+/// and the width they take with their gaps: the room the strip leaves them.
+fn strip_buttons(x: f32, mid: f32, all_tabs: bool) -> (Rect, Option<Rect>, f32) {
+    let plus = Rect::from_min_size(
+        pos2(x + BUTTON_GAP, mid - BUTTON / 2.0),
+        vec2(BUTTON, BUTTON),
+    );
+    let all = all_tabs.then(|| plus.translate(vec2(BUTTON + BETWEEN_BUTTONS, 0.0)));
+    let end = all.unwrap_or(plus).right() + BUTTON_GAP;
+    (plus, all, end - x)
 }
 
 /// A spinner, error dot or dirty dot at `x`; returns the room it took.

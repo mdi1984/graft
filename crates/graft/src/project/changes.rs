@@ -12,7 +12,7 @@ use graft_core::{EntryKind, FileList, Git, StatusEntry};
 
 use super::comments::{Pick, Side};
 use super::ops::{At, quietly};
-use super::{Project, RemoteOp, readable};
+use super::{Action, Confirm, Project, RemoteOp, readable};
 
 /// One file in one of the File status lists.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -254,6 +254,33 @@ impl CommitForm {
     /// Something typed that a reset would lose.
     pub fn is_drafted(&self) -> bool {
         !self.summary.trim().is_empty() || !self.body.trim().is_empty()
+    }
+}
+
+impl Action {
+    /// Ask before discarding a whole file (File status, the diff's
+    /// Discard…); confirmed, [`Project::discard`] runs it.
+    pub fn discard_file(source: &Source, path: String) -> Action {
+        let untracked = *source == Source::Untracked;
+        let body = if untracked {
+            format!("{path} is not tracked by git. It will be moved to the Recycle Bin.")
+        } else {
+            format!("All unstaged changes to {path} will be lost. Staged changes stay.")
+        };
+        let (tracked, untracked_paths) = if untracked {
+            (Vec::new(), vec![path])
+        } else {
+            (vec![path], Vec::new())
+        };
+        Action::Ask(Box::new(Confirm {
+            title: "Discard changes?".to_owned(),
+            body,
+            confirm_label: "Discard".to_owned(),
+            action: Action::Discard {
+                tracked,
+                untracked: untracked_paths,
+            },
+        }))
     }
 }
 
@@ -522,6 +549,7 @@ impl Project {
         self.run_op(At::Selected, "Unstaging", job, quietly);
     }
 
+    /// Discard whole files: what [`Action::discard_file`] asks for.
     pub(super) fn discard(&mut self, tracked: Vec<String>, untracked: Vec<String>) {
         let job = move |git: Git| ops::discard_paths(&git, &tracked, &untracked);
         self.run_op(At::Selected, "Discarding", job, quietly);
