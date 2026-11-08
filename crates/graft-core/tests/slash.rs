@@ -13,6 +13,20 @@ fn commit(dir: &Path, file: &str, text: &str) {
     common::commit(dir, file, text, file);
 }
 
+/// A branch with a commit of its own, merged into main (checked out in
+/// `dir`).
+fn merged_branch(dir: &Path, name: &str) {
+    sh(dir, &["switch", "-q", "-c", name]);
+    commit(
+        dir,
+        &format!("{}.txt", name.replace('/', "-")),
+        "done
+",
+    );
+    sh(dir, &["switch", "-q", "main"]);
+    sh(dir, &["merge", "-q", "--ff-only", name]);
+}
+
 #[test]
 fn scan_execute_and_restore() {
     let tmp = tempfile::tempdir().unwrap();
@@ -36,7 +50,7 @@ fn scan_execute_and_restore() {
     commit(&main, "idea.txt", "idea\n");
     sh(&main, &["switch", "-q", "main"]);
     // merged into main, in a clean worktree / in a dirty worktree.
-    sh(&main, &["branch", "merged-clean"]);
+    merged_branch(&main, "merged-clean");
     sh(&main, &["branch", "merged-dirty"]);
     sh(&main, &["branch", "release/1"]);
     let git = common::git(&main);
@@ -121,6 +135,79 @@ fn scan_execute_and_restore() {
     );
 }
 
+/// A new worktree for an agent starts at main, so its branch is "merged"
+/// until the agent commits: Slash must not offer to remove its folder (and
+/// the ignored files in it, which Recently slashed cannot bring back).
+#[test]
+fn branches_without_commits_of_their_own_are_not_merged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main = common::init(&tmp.path().join("app"));
+    commit(
+        &main,
+        ".gitignore",
+        ".env
+",
+    );
+    let git = common::git(&main);
+    let agent = tmp.path().join("agent");
+    let start = Start::NewBranch {
+        name: "agent/x".into(),
+        base: "main".into(),
+    };
+    worktree::add(&git, &agent, &start).unwrap();
+    std::fs::write(
+        agent.join(".env"),
+        "SECRET=1
+",
+    )
+    .unwrap();
+    sh(&main, &["branch", "fresh"]);
+    merged_branch(&main, "done");
+    // Merged, but its reflog (where it started) is gone.
+    merged_branch(&main, "old");
+    sh(
+        &main,
+        &["reflog", "expire", "--expire=now", "refs/heads/old"],
+    );
+    commit(
+        &main,
+        "a.txt",
+        "main moved on
+",
+    );
+
+    let snap = snapshot::load(&git).unwrap();
+    let plan = slash::plan(&git, &snap, &default_protected()).unwrap();
+    let find = |name: &str| {
+        plan.candidates
+            .iter()
+            .find(|c| c.branch.as_deref() == Some(name))
+    };
+    for fresh in ["agent/x", "fresh"] {
+        assert!(find(fresh).is_none(), "{plan:?}");
+        assert!(
+            plan.kept
+                .iter()
+                .any(|(b, why)| b == fresh && why.contains("no commits of its own")),
+            "{plan:?}"
+        );
+    }
+    let done = find("done").unwrap();
+    assert_eq!((done.reason, done.suggested), (Reason::Merged, true));
+    let old = find("old").unwrap();
+    assert_eq!((old.reason, old.suggested), (Reason::Merged, false));
+
+    let chosen: Vec<_> = plan
+        .candidates
+        .into_iter()
+        .filter(|c| c.suggested)
+        .collect();
+    let outcome = slash::execute(&git, &chosen, &CancelToken::default(), |_| {});
+    assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+    assert!(agent.join(".env").exists());
+    assert!(snapshot::load(&git).unwrap().branch("agent/x").is_some());
+}
+
 /// Ignored build output (node_modules, target…) nested deeper than Windows'
 /// old 260-character limit.
 fn deep_ignored_files(worktree: &Path) {
@@ -135,7 +222,7 @@ fn deep_ignored_files(worktree: &Path) {
 fn repo_with_merged_branch(tmp: &Path) -> (Git, std::path::PathBuf) {
     let main = common::init(&tmp.join("app"));
     commit(&main, ".gitignore", "node_modules/\n");
-    sh(&main, &["branch", "merged-deep"]);
+    merged_branch(&main, "merged-deep");
     let git = common::git(&main);
     let wt = tmp.join("wt-deep");
     worktree::add(&git, &wt, &Start::Existing("merged-deep".into())).unwrap();
@@ -199,7 +286,7 @@ fn repo_with_merged_branches(tmp: &Path, count: usize) -> (Git, Vec<slash::Candi
     let main = common::init(&tmp.join("app"));
     commit(&main, "a.txt", "a\n");
     for i in 0..count {
-        sh(&main, &["branch", &format!("done/{i}")]);
+        merged_branch(&main, &format!("done/{i}"));
     }
     let git = common::git(&main);
     let snap = snapshot::load(&git).unwrap();
@@ -257,9 +344,9 @@ fn branches_that_moved_since_the_scan_are_kept() {
     let (git, wt) = repo_with_merged_branch(tmp.path());
     let main = git.read(["rev-parse", "--show-toplevel"]).unwrap();
     let main = Path::new(main.trim());
-    sh(main, &["branch", "done/plain"]);
+    merged_branch(main, "done/plain");
     sh(main, &["config", "branch.done/gone.remote", "origin"]);
-    sh(main, &["branch", "done/gone"]);
+    merged_branch(main, "done/gone");
     let snap = snapshot::load(&git).unwrap();
     let chosen = slash::plan(&git, &snap, &default_protected())
         .unwrap()

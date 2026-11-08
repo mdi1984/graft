@@ -1,11 +1,12 @@
 //! Slash: clean up branches and worktrees that are done. Fetch with prune,
-//! then propose branches whose upstream is gone, branches merged into the
-//! default branch, branches never pushed (not pre-selected), and worktree
-//! entries whose folder is missing. Worktrees go before their branches.
+//! then propose branches whose upstream is gone, branches whose own commits
+//! are merged into the default branch, branches never pushed (not
+//! pre-selected), and worktree entries whose folder is missing. Worktrees go before their branches.
 //! Never touched: the main worktree's branch, the default branch, protected
 //! names, locked or dirty worktrees. Every deleted branch is reported with its
 //! commit so it can be restored.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow, bail};
@@ -80,6 +81,49 @@ fn protected(name: &str, patterns: &str) -> bool {
     pattern_list(patterns).any(|p| glob_match(p, name))
 }
 
+/// Where each of `branches` started: the commit of the oldest entry in its
+/// reflog. Branches without a reflog (expired, or never written) are left out.
+fn created_at(git: &Git, branches: &[String]) -> Result<HashMap<String, Oid>> {
+    let mut oldest: HashMap<String, (u32, Oid)> = HashMap::new();
+    if branches.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let input: String = branches
+        .iter()
+        .map(|b| {
+            format!(
+                "refs/heads/{b}
+"
+            )
+        })
+        .collect();
+    // On stdin: hundreds of merged branches do not fit on the command line.
+    let args = [
+        "log",
+        "-g",
+        "--ignore-missing",
+        "--stdin",
+        "--format=%gD %H",
+    ];
+    let out = git.run_input(args, input.as_bytes())?.stdout_str();
+    for line in out.lines() {
+        let parsed = line.rsplit_once(' ').and_then(|(selector, oid)| {
+            let (refname, index) = selector.rsplit_once("@{")?;
+            let branch = refname.strip_prefix("refs/heads/")?;
+            let index = index.strip_suffix('}')?.parse().ok()?;
+            Some((branch, index, Oid::from_hex(oid.as_bytes()).ok()?))
+        });
+        let Some((branch, index, oid)) = parsed else {
+            continue;
+        };
+        let entry = oldest.entry(branch.to_owned()).or_insert((index, oid));
+        if index >= entry.0 {
+            *entry = (index, oid);
+        }
+    }
+    Ok(oldest.into_iter().map(|(b, (_, oid))| (b, oid)).collect())
+}
+
 /// Fetch (with prune) and work out what could go. `git` points at the main
 /// worktree.
 pub fn scan(
@@ -120,6 +164,7 @@ pub fn plan(git: &Git, snap: &RepoSnapshot, patterns: &str) -> Result<Plan> {
             .collect(),
         None => Vec::new(),
     };
+    let created_at = created_at(git, &merged)?;
     let main_branch = snap.main_branch();
 
     let mut out = Plan {
@@ -172,12 +217,24 @@ pub fn plan(git: &Git, snap: &RepoSnapshot, patterns: &str) -> Result<Plan> {
             Some(wt) => Some(wt.path.clone()),
             None => None,
         };
+        // A branch created from the default branch is "merged" before it has
+        // commits of its own: a new worktree an agent has not committed in
+        // yet, with its ignored .env and build output. Without a reflog to
+        // tell, it is offered but not pre-selected.
+        let suggested = match (reason, created_at.get(name)) {
+            (Reason::Merged, Some(start)) if *start == branch.target => {
+                out.kept.push(keep("it has no commits of its own yet"));
+                continue;
+            }
+            (Reason::Merged, created) => created.is_some(),
+            (reason, _) => reason != Reason::NeverPushed,
+        };
         out.candidates.push(Candidate {
             reason,
             branch: Some(name.to_owned()),
             target: Some(branch.target),
             worktree,
-            suggested: reason != Reason::NeverPushed,
+            suggested,
         });
     }
     for wt in snap.worktrees.iter().filter(|wt| wt.prunable && !wt.locked) {
