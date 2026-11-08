@@ -10,6 +10,16 @@ pub enum Kind {
     Info,
 }
 
+impl Kind {
+    /// Seconds a toast of this kind stays.
+    fn ttl(self) -> f64 {
+        match self {
+            Kind::Error => 10.0,
+            Kind::Info => 4.0,
+        }
+    }
+}
+
 struct Toast {
     text: String,
     kind: Kind,
@@ -49,13 +59,8 @@ impl Toasts {
 
     pub fn show(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
-        self.items.retain(|t| {
-            let ttl = match t.kind {
-                Kind::Error => 10.0,
-                Kind::Info => 4.0,
-            };
-            t.shown_at.is_none_or(|at| now - at < ttl)
-        });
+        self.items
+            .retain(|t| t.shown_at.is_none_or(|at| now - at < t.kind.ttl()));
         if self.items.is_empty() {
             return;
         }
@@ -100,6 +105,14 @@ impl Toasts {
         if let Some(i) = dismiss {
             self.items.remove(i);
         }
-        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        // Come back when the next one is due to go.
+        let next = self
+            .items
+            .iter()
+            .filter_map(|t| Some(t.kind.ttl() - (now - t.shown_at?)))
+            .reduce(f64::min);
+        if let Some(seconds) = next {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(seconds.max(0.0)));
+        }
     }
 }

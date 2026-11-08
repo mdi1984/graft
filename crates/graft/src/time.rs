@@ -26,6 +26,11 @@ pub fn absolute(seconds: i64) -> String {
     format(seconds, "%-d %b %Y, %H:%M")
 }
 
+/// "14:05:09".
+pub fn clock(seconds: i64) -> String {
+    format(seconds, "%H:%M:%S")
+}
+
 fn format(seconds: i64, pattern: &str) -> String {
     match Timestamp::from_second(seconds) {
         Ok(ts) => ts
