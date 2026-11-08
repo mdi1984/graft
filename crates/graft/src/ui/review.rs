@@ -199,18 +199,21 @@ fn header(
             width += ui.min_rect().width();
         });
     });
-    // Only the one-line layout measures what one line needs; the two-line
-    // one keeps that until there is room for it again.
-    if one_line {
-        remember_width(ui, needed, width);
-    } else {
+    if !one_line {
         ui.horizontal(|ui| {
+            let start = ui.cursor().left();
             stats(ui, review);
+            width += ui.cursor().left() - start;
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 progress(ui, review, viewed);
+                // On one line, the usual gap separates these from the buttons.
+                width += ui.min_rect().width() + ui.spacing().item_spacing.x;
             });
         });
     }
+    // Both layouts measure what one line needs, so the header goes back to
+    // one line once that fits again (e.g. a shorter base branch).
+    remember_width(ui, needed, width);
 }
 
 /// What "Open in IDE" runs, from the settings.
@@ -255,7 +258,9 @@ fn progress(ui: &mut Ui, review: &Review, viewed: usize) {
             .size(theme::SMALL_SIZE),
     );
     ui.add_space(4.0);
-    ui.vertical(|ui| {
+    // Right-aligned like the rest of the row: `ui.vertical` would put the
+    // bar at the far left of the space that is left.
+    ui.with_layout(Layout::top_down(Align::Max), |ui| {
         ui.add_space(13.0);
         progress_bar(ui, Some(viewed as f32 / total.max(1) as f32), 140.0);
     });
@@ -728,4 +733,57 @@ fn file_note(
             }
         });
     ui.data_mut(|d| d.insert_temp(id, open));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{git, open};
+
+    /// The header measures what one line needs alike on one line and on
+    /// two: it neither flickers between them nor stays on two lines once
+    /// one fits again.
+    #[test]
+    fn both_header_layouts_measure_one_line_alike() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("app");
+        std::fs::create_dir(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        git(&root, &["add", "a.txt"]);
+        git(&root, &["commit", "-q", "-m", "first"]);
+        let project = open(&root);
+        let snap = project.snapshot.clone().unwrap();
+        let wt = project.worktree().unwrap().clone();
+        let review = Review {
+            base: "main".to_owned(),
+            merge_base: wt.head.unwrap(),
+            commits: 12,
+            files: Vec::new(),
+        };
+
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx);
+        theme::apply(&ctx, egui::ThemePreference::Dark);
+        let needed = Id::unique("review-header-width");
+        let measure = |width: f32| {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(width, 400.0))),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                let mut actions = Actions::default();
+                header(ui, &project, &snap, &wt, &review, 0, &mut actions);
+            });
+            output.drop_without_applying_deltas();
+            ctx.data(|d| d.get_temp::<f32>(needed)).unwrap()
+        };
+        let one_line = measure(4000.0);
+        let two_lines = measure(one_line - 1.0);
+        assert!(
+            (one_line - two_lines).abs() < 0.01,
+            "{one_line} vs {two_lines}"
+        );
+        assert_eq!(measure(one_line), one_line, "back on one line");
+    }
 }
