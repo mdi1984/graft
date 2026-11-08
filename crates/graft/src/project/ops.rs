@@ -42,15 +42,31 @@ impl Project {
     pub fn can_act(&self) -> Result<(), &'static str> {
         if self.snapshot.is_none() {
             Err("Still loading the repository")
-        } else if let Some(op) = &self.op {
-            Err(if op.can_cancel() {
+        } else {
+            self.busy().map_or(Ok(()), Err)
+        }
+    }
+
+    /// Why no operation can start while one runs.
+    fn busy(&self) -> Option<&'static str> {
+        self.op.as_ref().map(|op| {
+            if op.can_cancel() {
                 "Wait for the running operation to finish, or cancel it"
             } else {
                 "Wait for the running operation to finish"
-            })
-        } else {
-            Ok(())
-        }
+            }
+        })
+    }
+
+    /// False, after saying why, if `label` cannot start because another
+    /// operation runs.
+    fn may_start(&mut self, label: &str) -> bool {
+        let Some(reason) = self.busy() else {
+            return true;
+        };
+        self.notices
+            .push(format!("{label} did not start. {reason}."));
+        false
     }
 
     /// The running operation's progress, while it has any to show.
@@ -60,7 +76,8 @@ impl Project {
 
     /// Run a quick git command `at` a worktree, then refresh and hand
     /// `done` the folder it ran in (resolved when it started) and the
-    /// result. False (and nothing runs) while another operation runs.
+    /// result. False (and nothing runs, which a notice says) while another
+    /// operation runs.
     pub(super) fn run_op<R: JobResult>(
         &mut self,
         at: At,
@@ -68,7 +85,7 @@ impl Project {
         job: impl FnOnce(Git) -> R + Send + 'static,
         done: impl FnOnce(&mut Project, PathBuf, R) + Send + 'static,
     ) -> bool {
-        if self.op.is_some() {
+        if !self.may_start(label) {
             return false;
         }
         let path = self.path_of(at);
@@ -93,7 +110,7 @@ impl Project {
         job: impl FnOnce(Git, &CancelToken, &dyn Fn(Progress)) -> R + Send + 'static,
         done: impl FnOnce(&mut Project, PathBuf, R) + Send + 'static,
     ) -> bool {
-        if self.op.is_some() {
+        if !self.may_start(label) {
             return false;
         }
         let path = self.path_of(at);
@@ -173,6 +190,39 @@ mod tests {
         });
         assert_eq!(project.notices.len(), 1, "{:?}", project.notices);
         assert!(project.notices[0].contains("boom"));
+    }
+
+    /// An operation asked for while another runs does not start, and says
+    /// so (e.g. Settings → Save identity during a pull).
+    #[test]
+    fn an_operation_refused_while_another_runs_says_why() {
+        let dir = repo();
+        let mut project = open(dir.path());
+        let (release, released) = crossbeam_channel::bounded::<()>(1);
+        project.run_op(
+            At::Main,
+            "Waiting",
+            move |_| -> anyhow::Result<()> {
+                let _ = released.recv();
+                Ok(())
+            },
+            quietly,
+        );
+        let started = project.run_op(
+            At::Main,
+            "Saving identity",
+            |_| -> anyhow::Result<()> { Ok(()) },
+            quietly,
+        );
+        assert!(!started);
+        assert_eq!(
+            project.notices,
+            ["Saving identity did not start. Wait for the running operation to finish."]
+        );
+        release.send(()).unwrap();
+        wait(&mut project, "the operation never ended", |p| {
+            !p.is_operating()
+        });
     }
 
     #[test]

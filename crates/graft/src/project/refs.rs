@@ -470,9 +470,6 @@ impl Project {
         job: impl FnOnce(Git) -> anyhow::Result<R> + Send + 'static,
         done: impl FnOnce(&mut Project, PathBuf, anyhow::Result<R>) + Send + 'static,
     ) {
-        if self.is_operating() {
-            return;
-        }
         if let Some(reason) = self.checkout_blocked() {
             self.notices.push(reason.to_owned());
             return;
