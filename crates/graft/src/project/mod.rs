@@ -763,6 +763,13 @@ impl Project {
                     .is_some_and(|id| history.index.contains_key(&id));
                 self.history = Some(history);
                 self.data_generation += 1;
+                // Another worktree was picked while it loaded: build it again
+                // for that one (from the commits just read) and select its HEAD.
+                if self.worktree_parent() != self.history_parent {
+                    self.pending = Some(Pending::Head);
+                    self.load_history(false);
+                    return;
+                }
                 if !keep || head {
                     self.select_head();
                 }
@@ -1057,4 +1064,57 @@ fn build_labels(snap: &RepoSnapshot, selected: &Path) -> HashMap<Oid, Vec<RefLab
         list.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.name.cmp(&b.name)));
     }
     labels
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{git, open, wait};
+
+    #[test]
+    fn a_dirty_worktree_picked_during_the_first_load_gets_its_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("app");
+        std::fs::create_dir(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        git(&root, &["add", "a.txt"]);
+        git(&root, &["commit", "-q", "-m", "first"]);
+        let other = tmp.path().join("other");
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "topic",
+                other.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(other.join("a.txt"), "changed\n").unwrap();
+        let mut project = open(&root);
+        // Git's spelling of the folder (the temp folder may be a short name).
+        let snap = project.snapshot.clone().unwrap();
+        let other = snap.worktrees.iter().find(|wt| !wt.is_main).unwrap();
+        let other = other.path.clone();
+        wait(&mut project, "the worktree never showed dirty", |p| {
+            p.snapshot
+                .as_ref()
+                .and_then(|s| s.worktree_at(&other))
+                .is_some_and(|wt| wt.is_dirty())
+        });
+
+        // The first history load, built for the clean main worktree, is
+        // still running when the dirty one is picked.
+        project.history = None;
+        project.load_history(true);
+        project.apply(Action::OpenWorktree(other));
+        wait(&mut project, "history never loaded", |p| {
+            !p.history_loading && p.history.is_some()
+        });
+        let history = project.history.as_ref().unwrap();
+        assert!(history.index.contains_key(&history::worktree_id()));
+        assert_eq!(project.selected, Some(history::worktree_id()));
+    }
 }
