@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow, bail};
 
 use crate::cli::{Git, Progress};
 use crate::jobs::CancelToken;
@@ -202,7 +202,8 @@ pub fn plan(git: &Git, snap: &RepoSnapshot, patterns: &str) -> Result<Plan> {
 
 /// Delete the chosen candidates: worktrees first, then branches. Keeps going
 /// after an error and reports everything. Reports each step to
-/// `on_progress`; `cancel` stops before the next one.
+/// `on_progress`; `cancel` stops before the next one. A branch that moved
+/// since the scan (new commits) is kept, and so is its worktree.
 pub fn execute(
     git: &Git,
     chosen: &[Candidate],
@@ -210,10 +211,9 @@ pub fn execute(
     mut on_progress: impl FnMut(Progress),
 ) -> Outcome {
     let mut outcome = Outcome::default();
-    let removals: Vec<&PathBuf> = chosen
+    let removals: Vec<&Candidate> = chosen
         .iter()
-        .filter(|c| c.reason != Reason::MissingWorktree)
-        .filter_map(|c| c.worktree.as_ref())
+        .filter(|c| c.reason != Reason::MissingWorktree && c.worktree.is_some())
         .collect();
     let prune = chosen.iter().any(|c| c.reason == Reason::MissingWorktree);
     let deletions = chosen
@@ -235,12 +235,19 @@ pub fn execute(
     };
 
     let mut failed_worktrees = Vec::new();
-    for path in removals {
+    for c in removals {
+        let path = c.worktree.as_ref().expect("filtered");
         if !step(format!("Removing worktree {}", folder_name(path))) {
             outcome.cancelled = true;
             return outcome;
         }
-        match worktree::remove(git, path, false) {
+        let removed = match (&c.branch, c.target) {
+            (Some(branch), Some(target)) if moved(git, branch, target) => Err(anyhow!(
+                "its branch {branch} moved since the scan (new commits?), so both were kept."
+            )),
+            _ => worktree::remove(git, path, false),
+        };
+        match removed {
             Ok(()) => outcome.worktrees_removed += 1,
             Err(e) => {
                 outcome
@@ -286,8 +293,8 @@ pub fn execute(
         if kept {
             continue;
         }
-        match refs::delete_branch(git, branch, true) {
-            Ok(_) => outcome.slashed.push(Slashed {
+        match delete_branch(git, branch, target) {
+            Ok(()) => outcome.slashed.push(Slashed {
                 branch: branch.clone(),
                 target,
             }),
@@ -295,6 +302,37 @@ pub fn execute(
         }
     }
     outcome
+}
+
+/// Whether `branch` no longer points at `target`, the commit the scan saw
+/// (or cannot be read).
+fn moved(git: &Git, branch: &str, target: Oid) -> bool {
+    !matches!(git.rev(&format!("refs/heads/{branch}")), Ok(Some(at)) if at == target)
+}
+
+const MOVED: &str = "it moved since the scan (new commits?), so it was kept.";
+
+/// Delete `branch` only while it is still at `target` (git checks and
+/// deletes in one step) and no worktree has it checked out, then drop its
+/// settings (upstream and the like) as `git branch -D` would.
+fn delete_branch(git: &Git, branch: &str, target: Oid) -> Result<()> {
+    if moved(git, branch, target) {
+        bail!(MOVED);
+    }
+    let full = format!("refs/heads/{branch}");
+    let checked_out = git.read(["for-each-ref", "--format=%(worktreepath)", &full])?;
+    if !checked_out.trim().is_empty() {
+        bail!("it is checked out in a worktree, so it was kept.");
+    }
+    if let Err(e) = git.run(["update-ref", "-d", &full, &target.to_string()]) {
+        if moved(git, branch, target) {
+            bail!(MOVED);
+        }
+        return Err(e);
+    }
+    let section = format!("branch.{branch}");
+    git.run_accepting(["config", "--remove-section", &section], None, |_| true)?;
+    Ok(())
 }
 
 /// Bring back a slashed branch at its old commit.

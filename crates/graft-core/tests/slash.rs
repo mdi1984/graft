@@ -250,3 +250,50 @@ fn cancelling_stops_after_the_current_step() {
     let left = git.read(["branch", "--list", "done/*"]).unwrap();
     assert_eq!(left.lines().count(), 3);
 }
+
+#[test]
+fn branches_that_moved_since_the_scan_are_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (git, wt) = repo_with_merged_branch(tmp.path());
+    let main = git.read(["rev-parse", "--show-toplevel"]).unwrap();
+    let main = Path::new(main.trim());
+    sh(main, &["branch", "done/plain"]);
+    sh(main, &["config", "branch.done/gone.remote", "origin"]);
+    sh(main, &["branch", "done/gone"]);
+    let snap = snapshot::load(&git).unwrap();
+    let chosen = slash::plan(&git, &snap, &default_protected())
+        .unwrap()
+        .candidates;
+    assert_eq!(chosen.len(), 3);
+
+    // An agent commits in the worktree and on the plain branch meanwhile.
+    commit(&wt, "agent.txt", "work\n");
+    sh(main, &["switch", "-q", "done/plain"]);
+    commit(main, "agent2.txt", "more work\n");
+    sh(main, &["switch", "-q", "main"]);
+    let moved_to = git.read(["rev-parse", "done/plain"]).unwrap();
+
+    let outcome = slash::execute(&git, &chosen, &CancelToken::default(), |_| {});
+    assert_eq!(outcome.errors.len(), 2, "{:?}", outcome.errors);
+    assert!(
+        outcome
+            .errors
+            .iter()
+            .all(|e| e.contains("moved since the scan")),
+        "{:?}",
+        outcome.errors
+    );
+    assert_eq!(outcome.worktrees_removed, 0);
+    assert!(wt.join("agent.txt").exists());
+    assert_eq!(git.read(["rev-parse", "done/plain"]).unwrap(), moved_to);
+    // The one that did not move goes, settings and all.
+    let slashed: Vec<_> = outcome.slashed.iter().map(|s| s.branch.as_str()).collect();
+    assert_eq!(slashed, ["done/gone"]);
+    assert!(
+        git.read(["branch", "--list", "done/gone"])
+            .unwrap()
+            .is_empty()
+    );
+    let settings = std::fs::read_to_string(main.join(".git/config")).unwrap();
+    assert!(!settings.contains("done/gone"), "{settings}");
+}
