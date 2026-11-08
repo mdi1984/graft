@@ -41,7 +41,7 @@ pub use refs::{Dialog, DialogKind};
 pub use remote::RemoteOp;
 pub use review::{ReviewState, ReviewView};
 pub use slash::{SlashView, SlashedBranch};
-pub use worktrees::{BranchMode, NewWorktreeForm, checkout_choices};
+pub use worktrees::{BranchMode, NewWorktreeForm, checkout_choices, start_choices};
 
 use crate::jobs::Jobs;
 use crate::running::Running;

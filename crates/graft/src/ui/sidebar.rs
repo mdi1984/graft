@@ -235,8 +235,6 @@ fn row(ui: &mut Ui, height: f32) -> (Rect, Response) {
     ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click())
 }
 
-/// Section heading, with a "+" button at the right if `plus`; returns the
-/// button's response.
 /// A section heading, with a "+" button when `plus` says what it adds (or
 /// why it can't now); the button's response takes clicks only when it can.
 fn heading(ui: &mut Ui, title: &str, plus: Option<&Can>) -> Option<Response> {

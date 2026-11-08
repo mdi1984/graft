@@ -11,7 +11,7 @@ use graft_core::{RepoSnapshot, short};
 use super::branch_menu::can_item;
 use super::can;
 use super::diff_view;
-use super::file_row::{FILE_ROW_HEIGHT, file_row};
+use super::file_row::{Extras, FILE_ROW_HEIGHT, file_row};
 use super::widgets::{
     ButtonKind, button, empty_state, hint, section_heading_row, two_line_row, waiting,
 };
@@ -264,8 +264,13 @@ fn details(
                     source: Source::Commit(file.commit),
                     path: file.change.path.clone(),
                 };
-                let note = file.is_untracked(stash).then_some("untracked");
-                if file_row(ui, &file.change, open == Some(&key), note).clicked() {
+                let extras = Extras {
+                    note: file
+                        .is_untracked(stash)
+                        .then(|| ("untracked", color::text_faint())),
+                    ..Extras::default()
+                };
+                if file_row(ui, &file.change, open == Some(&key), extras).clicked() {
                     actions.push(Action::SelectStashFile(key));
                 }
             }

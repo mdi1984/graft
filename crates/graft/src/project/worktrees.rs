@@ -122,6 +122,15 @@ fn remote_branch<'a>(snap: &'a RepoSnapshot, name: &str) -> Option<&'a str> {
         .map(|b| b.branch_name())
 }
 
+/// What a new branch can start from: local branches, remote branches,
+/// tags.
+pub fn start_choices(snap: &RepoSnapshot) -> Vec<String> {
+    let branches = snap.branches.iter().map(|b| b.name.clone());
+    let remote = snap.remote_branches.iter().map(|b| b.name.clone());
+    let tags = snap.tags.iter().map(|t| t.name.clone());
+    branches.chain(remote).chain(tags).collect()
+}
+
 /// Branches that can get a worktree of their own: local branches not checked
 /// out anywhere, then remote branches without a local branch of that name.
 pub fn checkout_choices(snap: &RepoSnapshot) -> Vec<String> {

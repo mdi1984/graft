@@ -15,7 +15,7 @@ use graft_core::short;
 use super::branch_menu::{self, can_item, checkout_color};
 use super::can::{self, Can};
 use super::diff_view;
-use super::file_row::{self, file_row, paint_file};
+use super::file_row::{self, Extras, file_row, paint_file};
 use super::icons::Icon;
 use super::widgets::{
     ButtonKind, button, chip, chip_size, elided, empty_state, icon_button, loading,
@@ -118,6 +118,32 @@ impl Columns {
         }
         cols
     }
+
+    /// Where each column starts in `rect` (the header or a row); `None`
+    /// for a hidden one.
+    fn xs(&self, rect: Rect) -> ColumnXs {
+        let commit = rect.right() - self.commit;
+        let date = commit - self.date;
+        let author = date - self.author;
+        let shown = |width: f32, x: f32| (width > 0.0).then_some(x);
+        ColumnXs {
+            description: rect.left() + self.graph + 6.0,
+            description_end: author,
+            author: shown(self.author, author),
+            date: shown(self.date, date),
+            commit: shown(self.commit, commit),
+        }
+    }
+}
+
+/// The left edges of the columns in one row, from [`Columns::xs`].
+struct ColumnXs {
+    description: f32,
+    /// Where the next column (or the row) starts.
+    description_end: f32,
+    author: Option<f32>,
+    date: Option<f32>,
+    commit: Option<f32>,
 }
 
 fn commit_list(ui: &mut Ui, project: &Project, history: &History, actions: &mut Actions) {
@@ -305,17 +331,16 @@ fn header_row(ui: &mut Ui, cols: &mut Columns, width_id: Id) {
     if cols.graph >= 50.0 {
         label(rect.left() + 10.0, "Graph");
     }
-    label(rect.left() + cols.graph + 6.0, "Description");
-    let mut x = rect.right() - cols.commit;
-    if cols.commit > 0.0 {
-        label(x, "Commit");
-    }
-    x -= cols.date;
-    if cols.date > 0.0 {
-        label(x, "Date");
-    }
-    if cols.author > 0.0 {
-        label(x - cols.author, "Author");
+    let xs = cols.xs(rect);
+    label(xs.description, "Description");
+    for (x, text) in [
+        (xs.commit, "Commit"),
+        (xs.date, "Date"),
+        (xs.author, "Author"),
+    ] {
+        if let Some(x) = x {
+            label(x, text);
+        }
     }
 }
 
@@ -349,26 +374,24 @@ fn paint_row(
     paint_graph(ui, graph_rect, row, commit, is_head, bg);
 
     let y = rect.center().y;
-    let mut right = rect.right() - cols.commit;
-    if cols.commit > 0.0 && !commit.is_worktree() {
-        let sha = painter.layout_no_wrap(short(&commit.id), theme::mono(), color::text_faint());
-        paint_galley_left(painter, right, y, sha);
-    }
-    right -= cols.date;
-    if cols.date > 0.0 && !commit.is_worktree() {
-        let date = time::relative(commit.time, now);
-        let date = elided(
-            ui,
-            &date,
-            theme::body(),
-            color::text_weak(),
-            cols.date - 8.0,
-        );
-        paint_galley_left(painter, right, y, date);
-    }
-    if cols.author > 0.0 {
-        right -= cols.author;
-        if !commit.is_worktree() {
+    let xs = cols.xs(rect);
+    if !commit.is_worktree() {
+        if let Some(x) = xs.commit {
+            let sha = painter.layout_no_wrap(short(&commit.id), theme::mono(), color::text_faint());
+            paint_galley_left(painter, x, y, sha);
+        }
+        if let Some(x) = xs.date {
+            let date = time::relative(commit.time, now);
+            let date = elided(
+                ui,
+                &date,
+                theme::body(),
+                color::text_weak(),
+                cols.date - 8.0,
+            );
+            paint_galley_left(painter, x, y, date);
+        }
+        if let Some(x) = xs.author {
             let author = elided(
                 ui,
                 &commit.author,
@@ -376,12 +399,12 @@ fn paint_row(
                 color::text_mid(),
                 cols.author - 10.0,
             );
-            paint_galley_left(painter, right, y, author);
+            paint_galley_left(painter, x, y, author);
         }
     }
 
-    let mut x = rect.left() + cols.graph + 6.0;
-    let desc_right = right - 10.0;
+    let mut x = xs.description;
+    let desc_right = xs.description_end - 10.0;
     let chips_max = ((desc_right - x) * 0.5).max(0.0);
     let chips_end = x + chips_max;
     for (n, label) in labels.iter().enumerate() {
@@ -783,7 +806,7 @@ fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &m
             source: Source::Commit(d.id),
             path: file.path.clone(),
         };
-        let response = file_row(ui, file, open == Some(&key), None);
+        let response = file_row(ui, file, open == Some(&key), Extras::default());
         response.context_menu(|ui| file_row::menu_items(ui, &file.path, actions));
         if response.clicked() {
             actions.push(Action::SelectCommitFile(key));
@@ -846,4 +869,32 @@ fn uncommitted(ui: &mut Ui, project: &Project, actions: &mut Actions) {
                 );
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Header and rows place the columns from one method: right to left
+    /// commit, date, author; a hidden column takes no room.
+    #[test]
+    fn columns_line_up_from_the_right() {
+        let rect = Rect::from_min_max(pos2(0.0, 0.0), pos2(1000.0, 20.0));
+        let mut cols = Columns {
+            graph: 100.0,
+            author: 120.0,
+            date: 90.0,
+            commit: 70.0,
+        };
+        let xs = cols.xs(rect);
+        assert_eq!(xs.description, 106.0);
+        assert_eq!(xs.commit, Some(930.0));
+        assert_eq!(xs.date, Some(840.0));
+        assert_eq!(xs.author, Some(720.0));
+        assert_eq!(xs.description_end, 720.0);
+        cols.author = 0.0;
+        let xs = cols.xs(rect);
+        assert_eq!(xs.author, None);
+        assert_eq!(xs.description_end, 840.0);
+    }
 }

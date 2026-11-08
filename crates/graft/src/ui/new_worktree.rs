@@ -6,7 +6,7 @@ use graft_core::RepoSnapshot;
 
 use super::widgets::dialog::{self, footer};
 use super::widgets::{ButtonKind, button, error_label, field_label, hint, note, text_field, title};
-use crate::project::{Action, BranchMode, NewWorktreeForm, checkout_choices};
+use crate::project::{Action, BranchMode, NewWorktreeForm, checkout_choices, start_choices};
 use crate::theme;
 use crate::ui::Actions;
 
@@ -41,11 +41,7 @@ pub fn show(
                     name.request_focus();
                 }
                 field_label(ui, "Starts from");
-                let mut choices: Vec<String> =
-                    snap.branches.iter().map(|b| b.name.clone()).collect();
-                choices.extend(snap.remote_branches.iter().map(|b| b.name.clone()));
-                choices.extend(snap.tags.iter().map(|t| t.name.clone()));
-                picker(ui, "wt-base", &mut form.base, &choices);
+                picker(ui, "wt-base", &mut form.base, &start_choices(snap));
             }
             BranchMode::Existing => {
                 form.focus = false;

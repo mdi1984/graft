@@ -12,10 +12,10 @@ use graft_core::{Change, RepoSnapshot, Worktree};
 
 use super::can;
 use super::diff_view::{self, Marks};
-use super::file_row;
+use super::file_row::{self, Extras, file_row};
 use super::widgets::{
-    Badge, ButtonKind, ahead, button, empty_state, fits, paint_check, paint_galley_left,
-    progress_bar, remember_width, section_heading_row, waiting,
+    ButtonKind, button, empty_state, fits, paint_check, progress_bar, remember_width,
+    section_heading_row, waiting,
 };
 use crate::keys::{self, Command};
 use crate::project::comments::{self, LineComment};
@@ -276,18 +276,14 @@ fn base_picker(
             .color(color::dirty_fg()),
     );
     ui.label(RichText::new("against").color(color::text_weak()));
-    let current = wt.branch.as_deref();
+    // What could be merged into the branch is what it can be reviewed
+    // against (a detached HEAD: every branch).
+    let current = wt.branch.as_deref().unwrap_or_default();
     egui::ComboBox::from_id_salt("review-base")
         .selected_text(RichText::new(base.unwrap_or("pick a branch")).font(theme::mono()))
         .height(360.0)
         .show_ui(ui, |ui| {
-            let local = snap
-                .branches
-                .iter()
-                .map(|b| b.name.as_str())
-                .filter(|b| Some(*b) != current);
-            let remote = snap.remote_branches.iter().map(|b| b.name.as_str());
-            for name in local.chain(remote) {
+            for name in snap.merge_choices(current) {
                 if ui
                     .selectable_label(base == Some(name), RichText::new(name).font(theme::mono()))
                     .clicked()
@@ -354,7 +350,23 @@ fn file_list(ui: &mut Ui, project: &Project, review: &Review, actions: &mut Acti
                 let path = &file.change.path;
                 let viewed = project.is_viewed(file);
                 let is_selected = selected == Some(path.as_str());
-                let (rect, response) = file_row::allocate(ui, is_selected, Sense::click());
+                let note = if file.untracked {
+                    Some("untracked")
+                } else if file.uncommitted {
+                    Some("uncommitted")
+                } else {
+                    None
+                };
+                let extras = Extras {
+                    inset: 22.0,
+                    note: note.map(|note| (note, color::dirty_fg())),
+                    // Comments on this file.
+                    badge: project
+                        .review_state()
+                        .map_or(0, |s| s.file_comment_count(path)),
+                };
+                let response = file_row(ui, &file.change, is_selected, extras);
+                let rect = response.rect;
                 let y = rect.center().y;
                 let check = Rect::from_center_size(pos2(rect.left() + 12.0, y), vec2(14.0, 14.0));
                 let check_response = ui.interact(
@@ -363,44 +375,6 @@ fn file_list(ui: &mut Ui, project: &Project, review: &Review, actions: &mut Acti
                     Sense::click(),
                 );
                 paint_check(ui.painter(), check, viewed, check_response.hovered());
-
-                let note = if file.untracked {
-                    Some("untracked")
-                } else if file.uncommitted {
-                    Some("uncommitted")
-                } else {
-                    None
-                };
-                let (stats, stats_color) = match note {
-                    Some(note) => (note.to_owned(), color::dirty_fg()),
-                    None => (
-                        file_row::stats(file.change.added, file.change.removed),
-                        color::text_faint(),
-                    ),
-                };
-                let stats = ui
-                    .painter()
-                    .layout_no_wrap(stats, theme::small(), stats_color);
-                let stats_x = rect.right() - 6.0 - stats.size().x;
-                paint_galley_left(ui.painter(), stats_x, y, stats);
-                // Comments on this file: a badge left of the stats.
-                let count = project
-                    .review_state()
-                    .map_or(0, |s| s.file_comment_count(path));
-                let mut path_right = stats_x - 8.0;
-                if count > 0 {
-                    let badge = Badge::new(ui, count.to_string(), ahead());
-                    path_right -= badge.width() + 6.0;
-                    badge.paint(ui.painter(), path_right + 6.0, y);
-                }
-                file_row::paint_file(
-                    ui,
-                    rect.left() + 26.0,
-                    y,
-                    file.change.change,
-                    path,
-                    path_right,
-                );
                 if viewed {
                     // Dim viewed files so what is left stands out.
                     ui.painter().rect_filled(
@@ -415,7 +389,6 @@ fn file_list(ui: &mut Ui, project: &Project, review: &Review, actions: &mut Acti
                 } else if response.clicked() {
                     actions.push(Action::SelectReviewFile(path.clone()));
                 }
-                response.on_hover_text(file_row::tip(path, file.change.orig_path.as_deref()));
             }
         });
 }

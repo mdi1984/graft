@@ -6,7 +6,7 @@ use egui::{Align2, Color32, Rect, Response, Sense, Ui, pos2, vec2};
 use graft_core::Change;
 use graft_core::changes::FileChange;
 
-use super::widgets::{elided, paint_galley_left, paint_row_bg};
+use super::widgets::{Badge, ahead, elided, paint_galley_left, paint_row_bg};
 use crate::project::Action;
 use crate::theme::{self, color};
 use crate::ui::Actions;
@@ -86,26 +86,43 @@ pub fn stats(added: Option<usize>, removed: Option<usize>) -> String {
     }
 }
 
-/// A changed file of a commit or stash; `note` replaces the line counts.
-pub fn file_row(ui: &mut Ui, file: &FileChange, selected: bool, note: Option<&str>) -> Response {
+/// What a file row shows besides the file.
+#[derive(Default)]
+pub struct Extras<'a> {
+    /// Room left free before the change letter (Review's Viewed box).
+    pub inset: f32,
+    /// Shown in its color instead of the line counts (e.g. "untracked").
+    pub note: Option<(&'a str, Color32)>,
+    /// A count left of the line counts (Review's comments); none at 0.
+    pub badge: usize,
+}
+
+/// A changed file of a commit, stash or review.
+pub fn file_row(ui: &mut Ui, file: &FileChange, selected: bool, extras: Extras) -> Response {
     let (rect, response) = allocate(ui, selected, Sense::click());
     let y = rect.center().y;
-    let stats = match note {
-        Some(note) => note.to_owned(),
-        None => stats(file.added, file.removed),
+    let (stats, stats_color) = match extras.note {
+        Some((note, color)) => (note.to_owned(), color),
+        None => (stats(file.added, file.removed), color::text_faint()),
     };
     let stats = ui
         .painter()
-        .layout_no_wrap(stats, theme::small(), color::text_faint());
+        .layout_no_wrap(stats, theme::small(), stats_color);
     let stats_x = rect.right() - 4.0 - stats.size().x;
     paint_galley_left(ui.painter(), stats_x, y, stats);
+    let mut path_right = stats_x - 8.0;
+    if extras.badge > 0 {
+        let badge = Badge::new(ui, extras.badge.to_string(), ahead());
+        path_right -= badge.width() + 6.0;
+        badge.paint(ui.painter(), path_right + 6.0, y);
+    }
     paint_file(
         ui,
-        rect.left() + 4.0,
+        rect.left() + 4.0 + extras.inset,
         y,
         file.change,
         &file.path,
-        stats_x - 8.0,
+        path_right,
     );
     response.on_hover_text(tip(&file.path, file.orig_path.as_deref()))
 }
