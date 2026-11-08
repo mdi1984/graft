@@ -199,18 +199,18 @@ fn header(
             width += ui.min_rect().width();
         });
     });
-    if !one_line {
+    // Only the one-line layout measures what one line needs; the two-line
+    // one keeps that until there is room for it again.
+    if one_line {
+        remember_width(ui, needed, width);
+    } else {
         ui.horizontal(|ui| {
-            let start = ui.cursor().left();
             stats(ui, review);
-            width += ui.cursor().left() - start;
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 progress(ui, review, viewed);
-                width += ui.min_rect().width();
             });
         });
     }
-    remember_width(ui, needed, width);
 }
 
 /// What "Open in IDE" runs, from the settings.
