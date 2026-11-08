@@ -13,6 +13,9 @@ pub fn load(git: &Git) -> Result<WorktreeStatus> {
         "--porcelain=v2",
         "--branch",
         "--untracked-files=all",
+        // Renames as `renamed_from` in ops.rs finds them, whatever
+        // status.renames says.
+        "--renames",
         "-z",
     ])?;
     Ok(parse(&out.stdout))

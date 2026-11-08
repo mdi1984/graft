@@ -43,7 +43,14 @@ pub fn unstage_paths(git: &Git, paths: &[String]) -> Result<()> {
 /// The old paths of the staged renames whose new path is in `paths`, as
 /// git (and so File status) detects renames.
 fn renamed_from(git: &Git, paths: &[String]) -> Result<Vec<String>> {
-    let out = git.run(["diff", "--cached", "--name-status", "-z", "--diff-filter=R"])?;
+    let out = git.run([
+        "diff",
+        "--cached",
+        "-M",
+        "--name-status",
+        "-z",
+        "--diff-filter=R",
+    ])?;
     // Records of three fields: the status (R and a score), old, new.
     let fields: Vec<String> = out
         .stdout
