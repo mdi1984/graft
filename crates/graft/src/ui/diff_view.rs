@@ -791,7 +791,11 @@ fn header(ui: &mut Ui, view: &DiffView, can: &Can, settings: &Settings, actions:
                                 .why_not(button(ui, "Discard…", ButtonKind::Secondary, can.ok))
                                 .clicked()
                             {
-                                actions.push(Action::discard_file(&view.key.source, path.clone()));
+                                actions.push(Action::discard_file(
+                                    &view.worktree,
+                                    &view.key.source,
+                                    path.clone(),
+                                ));
                             }
                         }
                         None => {

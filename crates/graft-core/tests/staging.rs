@@ -509,3 +509,20 @@ fn commit_keeps_lines_starting_with_a_hash() {
         "#42 Fix crash, reworded\n\n# Why"
     );
 }
+
+/// Discarding a file added with intent takes it out of the index before it
+/// moves the file: when git cannot change the index, the file stays where
+/// it is and the index still knows it (no entry for a missing file).
+#[test]
+fn a_failed_discard_keeps_the_file_added_with_intent() {
+    let (_tmp, git) = repo();
+    let dir = git.cwd().to_path_buf();
+    std::fs::write(dir.join("intent.txt"), "keep me\n").unwrap();
+    sh(&dir, &["add", "-N", "intent.txt"]);
+    let lock = dir.join(".git").join("index.lock");
+    std::fs::write(&lock, "").unwrap();
+    assert!(ops::discard_paths(&git, &[], &["intent.txt".to_owned()]).is_err());
+    std::fs::remove_file(&lock).unwrap();
+    assert_eq!(std::fs::read(dir.join("intent.txt")).unwrap(), b"keep me\n");
+    assert_eq!(sh(&dir, &["ls-files", "--", "intent.txt"]), "intent.txt");
+}

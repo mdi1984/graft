@@ -13,7 +13,7 @@ use super::widgets::{
     ButtonKind, button, empty_state, hint, paint_icon_button, section_heading, text_field,
 };
 use super::{conflicts, diff_view};
-use crate::keys::{Command, Keymap};
+use crate::keys::Command;
 use crate::project::{Action, FileKey, Project};
 use crate::text::plural;
 use crate::theme::{self, RADIUS, color};
@@ -117,7 +117,11 @@ fn keyboard(ui: &Ui, project: &Project, status: &WorktreeStatus, actions: &mut A
     if keys.pressed(ctx, Command::DiscardFile)
         && let Some((key, FileList::Unstaged)) = current.map(|i| &rows[i])
     {
-        actions.push(Action::discard_file(&key.source, key.path.clone()));
+        actions.push(Action::discard_file(
+            &project.nav.worktree,
+            &key.source,
+            key.path.clone(),
+        ));
     }
 }
 
@@ -163,7 +167,7 @@ fn file_lists(ui: &mut Ui, project: &Project, status: &WorktreeStatus, actions: 
                 for entry in &entries {
                     let key = FileKey::of(entry, list == FileList::Staged);
                     let selected = selected == Some(&key);
-                    file_row(ui, entry, list, &key, selected, &can, keys, actions);
+                    file_row(ui, entry, list, &key, selected, &can, project, actions);
                 }
                 if list != FileList::Unstaged {
                     ui.add_space(10.0);
@@ -239,9 +243,10 @@ fn file_row(
     key: &FileKey,
     selected: bool,
     can: &Can,
-    keys: &Keymap,
+    project: &Project,
     actions: &mut Actions,
 ) {
+    let keys = &project.settings().keys;
     let change = list.change(entry);
     let toggle = toggle_action(list, vec![entry.path.clone()]);
     let (rect, response) = file_row::allocate(ui, selected, Sense::click());
@@ -303,7 +308,11 @@ fn file_row(
                 .why_not(ui.add_enabled(can.ok, item("Discard changes…", Command::DiscardFile)))
                 .clicked()
         {
-            actions.push(Action::discard_file(&key.source, entry.path.clone()));
+            actions.push(Action::discard_file(
+                &project.nav.worktree,
+                &key.source,
+                entry.path.clone(),
+            ));
             ui.close();
         }
         ui.separator();

@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::cli::Git;
 use crate::diff::{Chosen, Direction, FileDiff, Kind, Source, build_patch, chosen};
-use crate::paths::display;
+use crate::paths::{display, has_recycle_bin};
 
 /// Stage whole files (including deletions).
 pub fn stage_paths(git: &Git, paths: &[String]) -> Result<()> {
@@ -40,8 +40,9 @@ fn has_head(git: &Git) -> Result<bool> {
 }
 
 /// Throw away unstaged changes. Tracked files go back to their staged (or
-/// committed) state; untracked files go to the Recycle Bin, not oblivion,
-/// and leave the index if they were added with intent (`add -N`).
+/// committed) state; untracked files leave the index if they were added
+/// with intent (`add -N`), then go to the Recycle Bin, not oblivion. Where
+/// Windows has none (see [`has_recycle_bin`]) they are deleted for good.
 pub fn discard_paths(git: &Git, tracked: &[String], untracked: &[String]) -> Result<()> {
     if !tracked.is_empty() {
         let mut args = vec!["restore", "--worktree", "--"];
@@ -49,11 +50,24 @@ pub fn discard_paths(git: &Git, tracked: &[String], untracked: &[String]) -> Res
         git.run(args)?;
     }
     if !untracked.is_empty() {
-        let files: Vec<_> = untracked.iter().map(|p| git.cwd().join(p)).collect();
-        trash::delete_all(&files).context("move untracked files to the Recycle Bin")?;
+        // Out of the index first: if that fails, the files are still there
+        // (never an intent-to-add entry for a missing file).
         let mut args = vec!["rm", "--cached", "--ignore-unmatch", "-q", "--"];
         args.extend(untracked.iter().map(String::as_str));
         git.run(args)?;
+        let files: Vec<_> = untracked.iter().map(|p| git.cwd().join(p)).collect();
+        if has_recycle_bin(git.cwd()) {
+            trash::delete_all(&files).context("move untracked files to the Recycle Bin")?;
+        } else {
+            for file in &files {
+                let deleted = if file.is_dir() {
+                    std::fs::remove_dir_all(file)
+                } else {
+                    std::fs::remove_file(file)
+                };
+                deleted.with_context(|| format!("delete {}", display(file)))?;
+            }
+        }
     }
     Ok(())
 }

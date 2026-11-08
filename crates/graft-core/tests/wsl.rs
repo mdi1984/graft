@@ -245,6 +245,26 @@ fn partial_stage_of_new_script_keeps_mode() {
     assert_eq!(d.sh("cd app && git show :new.sh"), "#!/bin/sh\necho a");
 }
 
+/// Windows has no Recycle Bin inside WSL: discarding a new file deletes
+/// it (and its intent-to-add entry) for good, as the question says.
+#[test]
+fn discarding_new_files_deletes_them() {
+    let Some(d) = Distro::start("discarding_new_files_deletes_them") else {
+        return;
+    };
+    repo_with_worktree(&d);
+    d.sh(
+        "cd app && printf 'a\\n' > new.txt && printf 'b\\n' > intent.txt && git add -N intent.txt",
+    );
+    let app = d.path("app");
+    assert!(!graft_core::paths::has_recycle_bin(&app));
+    let git = Git::new(&app, Console::default());
+    let files = ["new.txt".to_owned(), "intent.txt".to_owned()];
+    ops::discard_paths(&git, &[], &files).unwrap();
+    assert!(!app.join("new.txt").exists() && !app.join("intent.txt").exists());
+    assert_eq!(d.sh("cd app && git status --porcelain"), "");
+}
+
 #[test]
 fn preview_in_main() {
     let Some(d) = Distro::start("preview_in_main") else {

@@ -5,11 +5,11 @@
 
 use std::collections::BTreeSet;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use graft_core::diff::{self, FileDiff, Gap, Source};
 use graft_core::ops::{self, LineOp};
-use graft_core::paths::same_path;
+use graft_core::paths::{has_recycle_bin, same_path};
 use graft_core::{Change, EntryKind, FileList, Git, StatusEntry};
 
 use super::comments::{Pick, Side};
@@ -324,13 +324,30 @@ impl CommitForm {
 
 impl Action {
     /// Ask before discarding a whole file (File status, the diff's
-    /// Discard…); confirmed, [`Project::discard`] runs it.
-    pub fn discard_file(source: &Source, path: String) -> Action {
+    /// Discard…) in `worktree`; confirmed, [`Project::discard`] runs it.
+    pub fn discard_file(worktree: &Path, source: &Source, path: String) -> Action {
         let untracked = *source == Source::Untracked;
-        let body = if untracked {
-            format!("{path} is not tracked by git. It will be moved to the Recycle Bin.")
+        let (title, body, confirm_label) = if !untracked {
+            (
+                "Discard changes?",
+                format!("All unstaged changes to {path} will be lost. Staged changes stay."),
+                "Discard",
+            )
+        } else if has_recycle_bin(worktree) {
+            (
+                "Discard changes?",
+                format!("{path} is not tracked by git. It will be moved to the Recycle Bin."),
+                "Discard",
+            )
         } else {
-            format!("All unstaged changes to {path} will be lost. Staged changes stay.")
+            (
+                "Delete the file for good?",
+                format!(
+                    "{path} is not tracked by git. It will be deleted permanently: Windows \
+                     has no Recycle Bin inside WSL or on a network share."
+                ),
+                "Delete permanently",
+            )
         };
         let (tracked, untracked_paths) = if untracked {
             (Vec::new(), vec![path])
@@ -338,9 +355,9 @@ impl Action {
             (vec![path], Vec::new())
         };
         Action::Ask(Box::new(Confirm {
-            title: "Discard changes?".to_owned(),
+            title: title.to_owned(),
             body,
-            confirm_label: "Discard".to_owned(),
+            confirm_label: confirm_label.to_owned(),
             action: Action::Discard {
                 tracked,
                 untracked: untracked_paths,
@@ -759,6 +776,35 @@ impl Project {
 mod tests {
     use super::*;
     use crate::testing::{git, open, wait};
+
+    /// Discarding a new file asks to move it to the Recycle Bin, or, where
+    /// Windows has none, says it is deleted for good.
+    #[test]
+    fn discarding_a_new_file_says_where_it_goes() {
+        let ask = |worktree: &str| {
+            let action = Action::discard_file(
+                Path::new(worktree),
+                &Source::Untracked,
+                "new.txt".to_owned(),
+            );
+            let Action::Ask(confirm) = action else {
+                panic!("{action:?}");
+            };
+            confirm
+        };
+        let local = ask(r"C:\dev\app");
+        assert!(local.body.contains("Recycle Bin"), "{}", local.body);
+        assert!(!local.body.contains("permanently"), "{}", local.body);
+        for worktree in [r"\\wsl.localhost\Ubuntu\home\app", r"\\server\share\app"] {
+            let remote = ask(worktree);
+            assert!(
+                remote.body.contains("deleted permanently"),
+                "{}",
+                remote.body
+            );
+            assert_eq!(remote.confirm_label, "Delete permanently");
+        }
+    }
 
     fn porcelain(dir: &std::path::Path) -> String {
         let out = std::process::Command::new("git")

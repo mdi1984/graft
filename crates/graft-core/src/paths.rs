@@ -45,6 +45,19 @@ pub fn folder_name(path: &Path) -> String {
         .unwrap_or_else(|| display(path))
 }
 
+/// Whether files deleted under `path` can go to the Recycle Bin. Windows
+/// has none inside WSL or on a network share: deleting there is for good.
+pub fn has_recycle_bin(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    let unc = match path.components().next() {
+        Some(Component::Prefix(prefix)) => {
+            matches!(prefix.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..))
+        }
+        _ => false,
+    };
+    !unc && wsl_parts(path).is_none()
+}
+
 /// Whether `rel` under `root` passes through a symlink or junction (or is
 /// one). Writing there could land outside the repository.
 pub(crate) fn through_link(root: &Path, rel: &Path) -> bool {
@@ -151,6 +164,18 @@ mod tests {
             Path::new(r"\\wsl.localhost\Debian\home\app")
         ));
         assert!(same_path(Path::new(r"C:\Dev\x\"), Path::new("c:/dev/x")));
+    }
+
+    #[test]
+    fn no_recycle_bin_in_wsl_or_on_shares() {
+        assert!(has_recycle_bin(Path::new(r"C:\dev\app")));
+        assert!(has_recycle_bin(Path::new(r"\\?\C:\dev\app")));
+        assert!(!has_recycle_bin(Path::new(
+            r"\\wsl.localhost\Ubuntu\home\app"
+        )));
+        assert!(!has_recycle_bin(Path::new("//wsl$/Ubuntu/home/app")));
+        assert!(!has_recycle_bin(Path::new(r"\\server\share\app")));
+        assert!(!has_recycle_bin(Path::new(r"\\?\UNC\server\share\app")));
     }
 
     #[test]
