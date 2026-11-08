@@ -958,12 +958,12 @@ impl GraftApp {
         }
     }
 
-    /// What the status bar shows as running, and whether it can be cancelled.
+    /// What the status bar shows as running, and whether it can be
+    /// cancelled there: the shown tab's own activity, which Cancel stops;
+    /// else the start page's clone or init, cancelled on the start page.
     fn activity(&self) -> Option<(String, bool)> {
-        if let Some(status) = self.start.busy_status() {
-            return Some((status, false));
-        }
-        self.projects[self.active?].activity()
+        let tab = self.active.and_then(|i| self.projects[i].activity());
+        tab.or_else(|| self.start.busy_status().map(|status| (status, false)))
     }
 
     fn project_ui(&mut self, ui: &mut egui::Ui, index: usize) {
