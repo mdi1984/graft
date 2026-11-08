@@ -451,12 +451,8 @@ pub fn body(
         );
         return;
     }
-    if let Some(old) = diff.moved_unchanged() {
-        empty_state(
-            ui,
-            "Moved",
-            &format!("Moved from {old}, content unchanged."),
-        );
+    if let Some(moved) = diff.moved_unchanged() {
+        empty_state(ui, "Moved", &moved);
         return;
     }
     if diff.hunks.is_empty() {

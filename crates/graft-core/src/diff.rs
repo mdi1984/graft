@@ -142,11 +142,21 @@ impl FileDiff {
         }
     }
 
-    /// The old path of a file that was only moved: renamed with its content
-    /// unchanged (text or binary), so the diff has nothing else to show.
-    pub fn moved_unchanged(&self) -> Option<&str> {
+    /// What shows instead of the diff of a file that was only moved:
+    /// renamed with its content unchanged (text or binary), so there are no
+    /// lines to show, only where it came from and whether its mode changed.
+    pub fn moved_unchanged(&self) -> Option<String> {
         let unchanged = self.hunks.is_empty() && !self.binary;
-        self.renamed_from.as_deref().filter(|_| unchanged)
+        let old = self.renamed_from.as_deref().filter(|_| unchanged)?;
+        let mode_changed = self
+            .header
+            .split(|&b| b == b'\n')
+            .any(|line| line.starts_with(b"old mode "));
+        Some(if mode_changed {
+            format!("Moved from {old}, content unchanged, file mode changed.")
+        } else {
+            format!("Moved from {old}, content unchanged.")
+        })
     }
 
     /// A combined diff (`diff --cc`), the kind shown for a file with

@@ -779,8 +779,19 @@ fn a_file_moved_unchanged_says_where_from() {
     for (old, new) in [("a.txt", "moved/a.txt"), ("pic.bin", "moved/pic.bin")] {
         let d = diff::load(&git, &Source::Commit(id), new, Some(old)).unwrap();
         assert!(d.hunks.is_empty() && !d.binary && !d.new_file, "{d:?}");
-        assert_eq!(d.moved_unchanged(), Some(old));
+        let said = format!("Moved from {old}, content unchanged.");
+        assert_eq!(d.moved_unchanged(), Some(said));
     }
+    // Moved and made executable: the mode change is not hidden.
+    sh(&dir, &["mv", "moved/pic.bin", "run.sh"]);
+    sh(&dir, &["update-index", "--chmod=+x", "run.sh"]);
+    sh(&dir, &["commit", "-q", "-m", "executable"]);
+    let id = graft_core::Oid::from_hex(rev(&dir, "HEAD").as_bytes()).unwrap();
+    let d = diff::load(&git, &Source::Commit(id), "run.sh", Some("moved/pic.bin")).unwrap();
+    assert_eq!(
+        d.moved_unchanged().as_deref(),
+        Some("Moved from moved/pic.bin, content unchanged, file mode changed.")
+    );
     // Moved and edited: the lines that changed show instead.
     sh(&dir, &["mv", "moved/a.txt", "b.txt"]);
     std::fs::write(dir.join("b.txt"), "one\ntwo\nTHREE\nfour\nfive\n").unwrap();
