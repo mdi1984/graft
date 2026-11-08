@@ -10,6 +10,7 @@ use graft_core::{Git, Oid, Worktree, conflicts, remote, stash};
 use super::conflicts::after_conflicts;
 use super::ops::{At, say};
 use super::{Action, Confirm, Project, Tab, WorkspaceView};
+use crate::jobs::shown_error;
 
 /// A dialog that asks for a name or a choice before running a git command.
 #[derive(Clone, Debug)]
@@ -148,7 +149,7 @@ fn from_dialog<T>(
             && let Some(dialog) = &mut p.dialog
         {
             dialog.submitting = false;
-            dialog.error = Some(format!("{e:#}"));
+            dialog.error = shown_error(e);
             return;
         }
         if result.is_ok() {

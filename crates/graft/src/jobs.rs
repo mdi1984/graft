@@ -7,7 +7,29 @@
 //! failure.
 
 use crossbeam_channel::{Receiver, Sender};
-use graft_core::{JobPool, Panicked, Waker};
+use graft_core::refusal::{no_identity, no_remote};
+use graft_core::{JobPool, Panicked, Waker, is_cancelled, is_panic};
+
+/// A failed job's error as the user sees it, in words they can act on.
+/// `None` when there is nothing to show: a cancel is no failure, and a
+/// panic was announced when it happened.
+pub fn shown_error(error: &anyhow::Error) -> Option<String> {
+    if is_cancelled(error) || is_panic(error) {
+        return None;
+    }
+    let text = format!("{error:#}");
+    Some(if no_remote(&text) {
+        "This repository has no remote yet. Add one under REMOTES in the sidebar \
+         (Add remote…)."
+            .to_owned()
+    } else if no_identity(&text) {
+        "Git doesn't know who you are yet. Set your name and email in Settings \
+         (the gear at the top right)."
+            .to_owned()
+    } else {
+        text
+    })
+}
 
 /// What owns jobs: it announces a job's panic.
 pub trait Owner: 'static {
@@ -184,5 +206,17 @@ mod tests {
         assert_eq!(counter.panics.len(), 2, "each panic is announced once");
         assert!(counter.failed.iter().any(|m| m.contains("long boom")));
         assert!(counter.failed.iter().any(|m| m.ends_with(": boom")));
+    }
+
+    #[test]
+    fn a_cancel_shows_nothing_and_known_failures_say_what_to_do() {
+        let cancel = graft_core::CancelToken::default();
+        cancel.cancel();
+        let cancelled = cancel.check().unwrap_err();
+        assert_eq!(shown_error(&cancelled), None);
+        let plain = anyhow::anyhow!("disk full").context("Could not save");
+        assert_eq!(shown_error(&plain).unwrap(), "Could not save: disk full");
+        let no_remote = anyhow::anyhow!("fatal: No configured push destination.");
+        assert!(shown_error(&no_remote).unwrap().contains("Add remote"));
     }
 }

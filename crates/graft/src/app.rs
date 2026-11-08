@@ -11,11 +11,11 @@ use egui::{CentralPanel, Frame, Margin, Panel};
 use graft_core::console::Console;
 use graft_core::paths::same_path;
 use graft_core::repo::{self, Location};
-use graft_core::{JobPool, Waker, is_cancelled, is_panic};
+use graft_core::{JobPool, Waker};
 use serde::{Deserialize, Serialize};
 
 use crate::groups::{self, GroupId, TabGroup};
-use crate::jobs::Jobs;
+use crate::jobs::{Jobs, shown_error};
 use crate::keys::{self, Command};
 use crate::project::{Action, Project, RepoMemory, ReviewState, SlashedBranch};
 use crate::running::Running;
@@ -271,17 +271,17 @@ impl GraftApp {
     fn opened(&mut self, result: anyhow::Result<Location>) {
         match result {
             Ok(location) => self.add_project(location),
-            // A panic was announced when it happened.
-            Err(e) if is_cancelled(&e) || is_panic(&e) => self.start.stop(None),
-            Err(e) => self.open_failed(format!("{e:#}")),
+            Err(e) => match shown_error(&e) {
+                Some(error) => self.open_failed(error),
+                None => self.start.stop(None),
+            },
         }
     }
 
-    /// Say why something failed, as a toast. A cancel is no failure; a
-    /// panic was announced when it happened.
+    /// Say why something failed (see [`shown_error`]), as a toast.
     fn report(&mut self, error: anyhow::Error) {
-        if !is_cancelled(&error) && !is_panic(&error) {
-            self.toasts.error(format!("{error:#}"));
+        if let Some(error) = shown_error(&error) {
+            self.toasts.error(error);
         }
     }
 

@@ -12,6 +12,7 @@ use graft_core::worktree::{self, Start};
 
 use super::Project;
 use super::ops::{At, quietly, say};
+use crate::jobs::shown_error;
 use crate::launch;
 use crate::text::plural;
 
@@ -219,7 +220,7 @@ impl Project {
             Err(e) => match &mut p.new_worktree {
                 Some(form) => {
                     form.creating = false;
-                    form.error = Some(format!("{e:#}"));
+                    form.error = shown_error(&e);
                 }
                 None => p.report(e),
             },

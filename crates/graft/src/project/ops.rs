@@ -4,11 +4,10 @@
 
 use std::path::PathBuf;
 
-use graft_core::refusal::{no_identity, no_remote};
-use graft_core::{CancelToken, Git, Progress, is_cancelled, is_panic};
+use graft_core::{CancelToken, Git, Progress};
 
 use super::Project;
-use crate::jobs::JobResult;
+use crate::jobs::{JobResult, shown_error};
 use crate::running::Running;
 
 /// Where an operation runs.
@@ -123,24 +122,9 @@ impl Project {
         }
     }
 
-    /// Say why something failed, in words the user can act on. A cancel is
-    /// no failure; a panic was announced when it happened.
+    /// Say why something failed (see [`shown_error`]), as a toast.
     pub(super) fn report(&mut self, error: anyhow::Error) {
-        if is_cancelled(&error) || is_panic(&error) {
-            return;
-        }
-        let text = format!("{error:#}");
-        self.notices.push(if no_remote(&text) {
-            "This repository has no remote yet. Add one under REMOTES in the sidebar \
-             (Add remote…)."
-                .to_owned()
-        } else if no_identity(&text) {
-            "Git doesn't know who you are yet. Set your name and email in Settings \
-             (the gear at the top right)."
-                .to_owned()
-        } else {
-            text
-        });
+        self.notices.extend(shown_error(&error));
     }
 }
 
