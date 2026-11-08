@@ -597,13 +597,26 @@ fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Ac
     );
     ui.separator();
     let onto = branch.as_deref().unwrap_or("HEAD");
+    // Picking one side of a merge (-m) is not offered.
+    let not_merge = |done: &str, can: &Can| {
+        if commit.parents.len() > 1 {
+            can::no(format!("Merge commits can't be {done} here"))
+        } else {
+            can.clone()
+        }
+    };
     item(
         ui,
         &format!("Cherry-pick onto {onto}"),
-        &not_head,
+        &not_merge("cherry-picked", &not_head),
         Action::CherryPick(commit.id),
     );
-    item(ui, "Revert this commit", &act, Action::Revert(commit.id));
+    item(
+        ui,
+        "Revert this commit",
+        &not_merge("reverted", &act),
+        Action::Revert(commit.id),
+    );
     if let Some(branch) = &branch {
         item(
             ui,

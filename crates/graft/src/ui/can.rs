@@ -11,6 +11,7 @@ use crate::project::{Action, Project};
 
 pub const FINISH_FIRST: &str = "Finish or abort what is in progress first";
 
+#[derive(Clone)]
 pub struct Can {
     pub ok: bool,
     pub hint: String,
