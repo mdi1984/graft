@@ -494,15 +494,17 @@ fn discarding_a_file_added_with_intent_keeps_its_content() {
 
     // It is in the Recycle Bin: put it back.
     let here = std::fs::canonicalize(&dir).unwrap();
-    let trashed: Vec<_> = trash::os_limited::list()
+    let named: Vec<_> = trash::os_limited::list()
         .unwrap()
         .into_iter()
-        .filter(|item| {
-            item.name == "intent.txt"
-                && std::fs::canonicalize(&item.original_parent).is_ok_and(|p| p == here)
-        })
+        .filter(|item| item.name == "intent.txt")
         .collect();
-    assert_eq!(trashed.len(), 1);
+    let parents: Vec<_> = named.iter().map(|i| i.original_parent.clone()).collect();
+    let trashed: Vec<_> = named
+        .into_iter()
+        .filter(|item| std::fs::canonicalize(&item.original_parent).is_ok_and(|p| p == here))
+        .collect();
+    assert_eq!(trashed.len(), 1, "{here:?} not among {parents:?}");
     trash::os_limited::restore_all(trashed).unwrap();
     assert_eq!(
         std::fs::read(dir.join("intent.txt")).unwrap(),
