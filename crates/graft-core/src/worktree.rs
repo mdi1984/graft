@@ -15,7 +15,8 @@ pub const DEFAULT_COPY_PATTERNS: &str = ".env, .env.*, *.local, *.local.json";
 /// What the new worktree checks out.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Start {
-    /// Create `name` at `base` (a branch, tag or commit).
+    /// Create `name` at `base` (a branch, tag or commit), without an
+    /// upstream even when `base` is a remote branch.
     NewBranch { name: String, base: String },
     /// Check out an existing local branch.
     Existing(String),
@@ -38,7 +39,7 @@ pub fn add(git: &Git, path: &Path, start: &Start) -> Result<()> {
     let path = git.path_arg(path)?;
     match start {
         Start::NewBranch { name, base } => {
-            git.run(["worktree", "add", "-b", name, &path, base])?;
+            git.run(["worktree", "add", "--no-track", "-b", name, &path, base])?;
         }
         Start::Existing(name) => {
             git.run(["worktree", "add", &path, name])?;

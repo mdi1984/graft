@@ -71,3 +71,49 @@ fn add_copy_lock_and_remove() {
     worktree::prune(&git).unwrap();
     assert_eq!(snapshot::load(&git).unwrap().worktrees.len(), 1);
 }
+
+/// A new branch or worktree started from a remote branch does not track
+/// it (pushing would go there); checking a remote branch out to track it does.
+#[test]
+fn new_branches_from_a_remote_branch_have_no_upstream() {
+    let tmp = tempfile::tempdir().unwrap();
+    let server = common::init_bare(&tmp.path().join("server.git"));
+    let seed = common::init(&tmp.path().join("seed"));
+    common::commit(&seed, "a.txt", "a\n", "a");
+    sh(&seed, &["push", "-q", server.to_str().unwrap(), "main"]);
+    let main = common::clone(&server, &tmp.path().join("app"));
+    let git = common::git(&main);
+    let upstream = |branch: &str| {
+        sh(
+            &main,
+            &[
+                "for-each-ref",
+                "--format=%(upstream:short)",
+                &format!("refs/heads/{branch}"),
+            ],
+        )
+    };
+
+    let path = worktree::default_path(&main, "wt");
+    let start = Start::NewBranch {
+        name: "wt".into(),
+        base: "origin/main".into(),
+    };
+    worktree::add(&git, &path, &start).unwrap();
+    assert_eq!(upstream("wt"), "");
+
+    graft_core::refs::create_branch(&git, "kept", "origin/main", false).unwrap();
+    assert_eq!(upstream("kept"), "");
+    graft_core::refs::create_branch(&git, "switched", "origin/main", true).unwrap();
+    assert_eq!(upstream("switched"), "");
+
+    graft_core::refs::switch_tracking(&git, "tracked", "origin/main").unwrap();
+    assert_eq!(upstream("tracked"), "origin/main");
+    let tracking = worktree::default_path(&main, "wt2");
+    let start = Start::Tracking {
+        name: "wt2".into(),
+        remote: "origin/main".into(),
+    };
+    worktree::add(&git, &tracking, &start).unwrap();
+    assert_eq!(upstream("wt2"), "origin/main");
+}

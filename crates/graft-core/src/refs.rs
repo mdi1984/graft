@@ -85,12 +85,15 @@ pub(crate) fn check_name(git: &Git, kind: RefKind, name: &str) -> Result<()> {
 }
 
 /// Create `name` at `start`; with `checkout`, switch the worktree to it.
+/// The new branch has no upstream, even when `start` is a remote branch
+/// (pushing it would otherwise go to that branch); [`switch_tracking`]
+/// is for tracking one.
 pub fn create_branch(git: &Git, name: &str, start: &str, checkout: bool) -> Result<()> {
     check_branch_name(git, name)?;
     if checkout {
-        git.run(["switch", "-c", name, start])?;
+        git.run(["switch", "--no-track", "-c", name, start])?;
     } else {
-        git.run(["branch", name, start])?;
+        git.run(["branch", "--no-track", name, start])?;
     }
     Ok(())
 }
