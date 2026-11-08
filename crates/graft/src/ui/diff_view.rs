@@ -731,7 +731,7 @@ fn header(ui: &mut Ui, view: &DiffView, busy: bool, settings: &Settings, actions
                         format!("+{}  −{}", d.added(), d.removed()),
                         d.change(&view.key.source),
                     ),
-                    None => (String::new(), FileDiff::default().change(&view.key.source)),
+                    None => (String::new(), view.key.source.change()),
                 };
                 let (rect, _) = ui.allocate_exact_size(vec2(18.0, 30.0), Sense::hover());
                 paint_change_letter(ui, rect.left(), rect.center().y, letter);

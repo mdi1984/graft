@@ -4,7 +4,7 @@
 use anyhow::Result;
 
 use crate::cli::Git;
-use crate::status::Change;
+use crate::model::Change;
 
 /// git's id of the empty tree: what a root commit is compared with.
 pub(crate) const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";

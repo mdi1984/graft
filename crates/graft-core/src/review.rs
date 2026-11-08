@@ -8,8 +8,9 @@ use anyhow::{Context, Result};
 
 use crate::changes::{FileChange, between, is_binary};
 use crate::cli::Git;
+use crate::model::Change;
 use crate::model::{Oid, RepoSnapshot};
-use crate::status::Change;
+use crate::remote::ORIGIN;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReviewFile {
@@ -56,7 +57,7 @@ pub fn default_base(snap: &RepoSnapshot, current: Option<&str>) -> Option<String
         .or_else(|| {
             snap.remote_default
                 .as_ref()
-                .map(|branch| format!("origin/{branch}"))
+                .map(|branch| format!("{ORIGIN}/{branch}"))
         })
 }
 

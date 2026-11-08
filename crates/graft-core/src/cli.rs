@@ -401,7 +401,7 @@ impl Git {
         // Never block on a terminal prompt; Git Credential Manager still shows its own window.
         cmd.env("GIT_TERMINAL_PROMPT", "0")
             // Stable, parseable English output: Graft reads git's messages
-            // (see `refs` for the ones it tells apart).
+            // (see `refusal` for the ones it tells apart).
             .env("LC_ALL", "C")
             .env("LANG", "C")
             // Reads like `status` must not rewrite the index: that would wake the

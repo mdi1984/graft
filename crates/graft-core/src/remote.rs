@@ -33,8 +33,22 @@ pub enum PushPlan {
     Publish { remote: String },
 }
 
+/// The remote `git clone` sets up: the one to use when there is a choice.
+pub const ORIGIN: &str = "origin";
+
+/// The remote to push to when nothing else says which: [`ORIGIN`], or the
+/// only remote. `None` when there is none or several others.
+pub fn default_remote<'a>(remotes: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    let remotes: Vec<&str> = remotes.into_iter().filter(|r| !r.is_empty()).collect();
+    match remotes[..] {
+        _ if remotes.contains(&ORIGIN) => Some(ORIGIN),
+        [only] => Some(only),
+        _ => None,
+    }
+}
+
 /// Where pushing a branch with this upstream goes, given the repository's
-/// remotes: a branch without upstream goes to `origin`, or the only remote.
+/// remotes: a branch without upstream goes to the [`default_remote`].
 pub fn push_plan<'a>(
     upstream: &Upstream,
     remotes: impl IntoIterator<Item = &'a str>,
@@ -42,21 +56,18 @@ pub fn push_plan<'a>(
     if matches!(upstream, Upstream::Tracking { .. }) {
         return Ok(PushPlan::Upstream);
     }
-    let remotes: Vec<&str> = remotes.into_iter().filter(|r| !r.is_empty()).collect();
-    let remote = if remotes.contains(&"origin") {
-        "origin"
-    } else if let [only] = remotes[..] {
-        only
-    } else if remotes.is_empty() {
+    let mut remotes = remotes.into_iter().filter(|r| !r.is_empty()).peekable();
+    if remotes.peek().is_none() {
         return Err("There is no remote to push to. Add one first (e.g. origin).");
-    } else {
-        return Err(
+    }
+    match default_remote(remotes) {
+        Some(remote) => Ok(PushPlan::Publish {
+            remote: remote.to_owned(),
+        }),
+        None => Err(
             "This branch has no upstream and there is no 'origin' remote. Pick a remote to push to.",
-        );
-    };
-    Ok(PushPlan::Publish {
-        remote: remote.to_owned(),
-    })
+        ),
+    }
 }
 
 /// The upstream a pull of `branch` takes from, or why there is none.
@@ -136,13 +147,6 @@ pub fn push_tag(
 ) -> Result<()> {
     let refspec = format!("refs/tags/{tag}");
     git.run_progress(&["push", "--progress", remote, &refspec], cancel, progress)
-}
-
-/// Whether a push failed because the remote has commits we don't.
-pub fn is_rejected_push(error: &str) -> bool {
-    error.contains("[rejected]")
-        || error.contains("non-fast-forward")
-        || error.contains("fetch first")
 }
 
 fn current_branch(git: &Git) -> Result<String> {
@@ -234,6 +238,9 @@ mod tests {
         assert_eq!(push_plan(&gone, ["fork"]), publish("fork"));
         assert!(push_plan(&Upstream::None, []).is_err());
         assert!(push_plan(&Upstream::None, ["a", "b"]).is_err());
+        assert_eq!(default_remote(["fork", "origin"]), Some("origin"));
+        assert_eq!(default_remote(["fork"]), Some("fork"));
+        assert_eq!(default_remote(["a", "b"]), None);
         assert_eq!(pull_check("x", &tracking), Ok("origin/x"));
         assert!(pull_check("x", &gone).is_err());
     }

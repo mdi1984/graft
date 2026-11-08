@@ -20,8 +20,8 @@ use notify_debouncer_full::notify::{self, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, Debouncer, NoCache, new_debouncer_opt};
 
 use crate::cli::Git;
-use crate::conflicts::MARKERS;
 use crate::console::Console;
+use crate::model::OPERATION_MARKERS;
 use crate::wsl::Wsl;
 
 const DEBOUNCE: Duration = Duration::from_millis(300);
@@ -250,7 +250,7 @@ fn git_file_matters(inside: &Path) -> bool {
         Some(rest) => rest.split_once('/').map_or("", |(_, r)| r).to_owned(),
         None => text,
     };
-    let in_progress = MARKERS.iter().any(|(marker, _)| {
+    let in_progress = OPERATION_MARKERS.iter().any(|(marker, _)| {
         text.strip_prefix(marker)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
     });

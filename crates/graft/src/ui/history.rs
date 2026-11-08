@@ -11,7 +11,6 @@ use graft_core::diff::Source;
 use graft_core::history::{Commit, GraphRow, History, LineKind};
 use graft_core::refs::ResetMode;
 use graft_core::short;
-use graft_core::status::Change;
 
 use super::file_row::{self, file_row, paint_file};
 use super::icons::Icon;
@@ -818,13 +817,7 @@ fn uncommitted(ui: &mut Ui, project: &Project, actions: &mut Actions) {
         .show(ui, |ui| {
             for entry in &status.entries {
                 let (rect, _) = file_row::allocate(ui, false, Sense::hover());
-                let change = if entry.is_conflicted() {
-                    Change::Unmerged
-                } else if entry.is_staged() {
-                    entry.index
-                } else {
-                    entry.unstaged_change()
-                };
+                let change = entry.shown_change();
                 let y = rect.center().y;
                 paint_file(
                     ui,

@@ -7,9 +7,10 @@ use egui::{
     Align, Frame, Key, Layout, Margin, Panel, Rect, RichText, ScrollArea, Sense, Stroke,
     StrokeKind, TextEdit, Ui, pos2, vec2,
 };
+use graft_core::Change;
+use graft_core::paths::same_path;
 use graft_core::review::{Review, ReviewFile};
-use graft_core::status::Change;
-use graft_core::{RepoSnapshot, Worktree, same_path};
+use graft_core::{RepoSnapshot, Worktree};
 
 use super::can;
 use super::diff_view::{self, Marks};
@@ -29,11 +30,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
     let Some(snap) = project.snapshot.clone() else {
         return;
     };
-    let Some(wt) = snap
-        .worktrees
-        .iter()
-        .find(|wt| same_path(&wt.path, &project.nav.worktree))
-    else {
+    let Some(wt) = snap.worktree_at(&project.nav.worktree) else {
         return;
     };
     let Some(view) = &project.review else {

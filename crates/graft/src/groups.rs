@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use graft_core::same_path;
+use graft_core::paths::same_path;
 use serde::{Deserialize, Serialize};
 
 pub type GroupId = u64;

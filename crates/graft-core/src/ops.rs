@@ -7,7 +7,10 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 use crate::cli::Git;
-use crate::diff::{Direction, FileDiff, Kind, Source, build_patch};
+use crate::diff::{
+    Chosen, Direction, FileDiff, Kind, Source, build_patch, chosen, new_file_header,
+};
+use crate::paths::display;
 
 /// Stage whole files (including deletions).
 pub fn stage_paths(git: &Git, paths: &[String]) -> Result<()> {
@@ -72,24 +75,11 @@ pub fn apply_lines(
     op: LineOp,
     selected: impl Fn(usize, usize) -> bool,
 ) -> Result<()> {
-    let total = diff.changed_lines();
-    let chosen = diff
-        .hunks
-        .iter()
-        .enumerate()
-        .flat_map(|(h, hunk)| {
-            hunk.lines
-                .iter()
-                .enumerate()
-                .filter(move |(_, l)| l.is_change())
-                .map(move |(l, _)| (h, l))
-        })
-        .filter(|&(h, l)| selected(h, l))
-        .count();
-    if chosen == 0 {
+    let chosen = chosen(diff, &selected);
+    if chosen == Chosen::Nothing {
         return Ok(());
     }
-    let everything = chosen == total;
+    let everything = chosen == Chosen::All;
     match (source, op) {
         (Source::Unstaged, LineOp::Stage) => {
             let patch = build_patch(diff, Direction::Forward, &selected).expect("lines chosen");
@@ -129,11 +119,6 @@ pub fn apply_lines(
     }
 }
 
-fn new_file_header(path: &str) -> Vec<u8> {
-    format!("diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n")
-        .into_bytes()
-}
-
 /// Whether git turns CRLF into LF when adding files (core.autocrlf).
 fn strips_cr(git: &Git) -> Result<bool> {
     // Exit code 1: not set.
@@ -151,10 +136,7 @@ fn remove_lines(
     selected: impl Fn(usize, usize) -> bool,
 ) -> Result<()> {
     if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
-        bail!(
-            "{} is a link; Graft only edits plain files.",
-            path.display()
-        );
+        bail!("{} is a link; Graft only edits plain files.", display(path));
     }
     let mut out = Vec::new();
     for (h, hunk) in diff.hunks.iter().enumerate() {
@@ -168,7 +150,7 @@ fn remove_lines(
             }
         }
     }
-    std::fs::write(path, out).with_context(|| format!("write {}", path.display()))
+    std::fs::write(path, out).with_context(|| format!("Could not write {}", display(path)))
 }
 
 /// `git apply` a patch to the index (`cached`) or the working tree.

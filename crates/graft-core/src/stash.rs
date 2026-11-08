@@ -4,8 +4,8 @@
 use anyhow::{Result, bail};
 
 use crate::changes::{FileChange, between};
-use crate::status::Change;
-use crate::{Git, Oid};
+use crate::cli::Git;
+use crate::model::{Change, Oid};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Stash {
@@ -30,7 +30,8 @@ pub struct Options {
     pub message: String,
     /// Also stash untracked files (`-u`).
     pub include_untracked: bool,
-    /// Leave staged changes in place (`--keep-index`).
+    /// Leave staged changes in place (`--keep-index`). Not with
+    /// `staged_only`, which stashes just the staged changes.
     pub keep_index: bool,
     /// Stash only what is staged (`--staged`).
     pub staged_only: bool,
@@ -52,7 +53,9 @@ impl StashFile {
 }
 
 pub fn list(git: &Git) -> Result<Vec<Stash>> {
-    let out = stash_git(git).read(["stash", "list", "--format=%H%x1f%gs%x1f%ct"])?;
+    let out =
+        git.without_literal_pathspecs()
+            .read(["stash", "list", "--format=%H%x1f%gs%x1f%ct"])?;
     Ok(out
         .lines()
         .enumerate()
@@ -94,18 +97,12 @@ fn parse_subject(subject: &str) -> (Option<String>, String) {
     (branch, message)
 }
 
-/// `git` for stash commands, which need pathspecs as patterns (see
-/// [`Git::without_literal_pathspecs`]). Graft never passes paths to stash.
-fn stash_git(git: &Git) -> Git {
-    git.without_literal_pathspecs()
-}
-
 pub fn push(git: &Git, options: &Options) -> Result<()> {
     let mut args = vec!["stash", "push"];
     if options.include_untracked {
         args.push("--include-untracked");
     }
-    if options.keep_index {
+    if options.keep_index && !options.staged_only {
         args.push("--keep-index");
     }
     if options.staged_only {
@@ -115,7 +112,7 @@ pub fn push(git: &Git, options: &Options) -> Result<()> {
     if !message.is_empty() {
         args.extend(["--message", message]);
     }
-    let out = stash_git(git).run(args)?;
+    let out = git.without_literal_pathspecs().run(args)?;
     if out.stdout_str().contains("No local changes to save") {
         bail!("There are no changes to stash.");
     }
@@ -134,13 +131,15 @@ fn reference(git: &Git, id: Oid) -> Result<String> {
 /// Apply a stash to the worktree `git` points at; `pop` also drops it.
 pub fn apply(git: &Git, id: Oid, pop: bool) -> Result<()> {
     let name = reference(git, id)?;
-    stash_git(git).run(["stash", if pop { "pop" } else { "apply" }, &name])?;
+    git.without_literal_pathspecs()
+        .run(["stash", if pop { "pop" } else { "apply" }, &name])?;
     Ok(())
 }
 
 pub fn drop(git: &Git, id: Oid) -> Result<()> {
     let name = reference(git, id)?;
-    stash_git(git).run(["stash", "drop", &name])?;
+    git.without_literal_pathspecs()
+        .run(["stash", "drop", &name])?;
     Ok(())
 }
 
@@ -149,12 +148,12 @@ pub fn drop(git: &Git, id: Oid) -> Result<()> {
 pub fn branch(git: &Git, branch: &str, id: Oid) -> Result<()> {
     crate::refs::check_branch_name(git, branch)?;
     let name = reference(git, id)?;
-    stash_git(git).run(["stash", "branch", branch, &name])?;
+    git.without_literal_pathspecs()
+        .run(["stash", "branch", branch, &name])?;
     Ok(())
 }
 
 pub fn files(git: &Git, id: Oid) -> Result<Vec<StashFile>> {
-    // The stash commit against the commit it was made on.
     let mut files: Vec<StashFile> = between(git, &format!("{id}^1"), Some(&id.to_string()))?
         .into_iter()
         .map(|change| StashFile { change, commit: id })

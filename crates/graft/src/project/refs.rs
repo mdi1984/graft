@@ -1,11 +1,9 @@
 //! Branches, tags and commit actions: the small dialogs that ask for a name,
 //! and what happens when git says no (unmerged branch, changes in the way).
 
-use graft_core::refs::{
-    self, NOT_MERGED, RefKind, ResetMode, blocked_by_changes, blocked_by_untracked, check_ref_name,
-    files_in_the_way,
-};
-use graft_core::{Git, Oid, remote, stash};
+use graft_core::refs::{self, RefKind, ResetMode, check_ref_name};
+use graft_core::refusal::{NOT_MERGED, blocked_by_changes, blocked_by_untracked, files_in_the_way};
+use graft_core::{Git, Oid, conflicts, remote, stash};
 
 use super::conflicts::{after_conflicts, merge_messages};
 use super::ops::{At, say};
@@ -413,7 +411,7 @@ impl Project {
         if self.nav.tab != Tab::Review
             && !self.commit_form.is_drafted()
             && let Some(main) = self.main_worktree()
-            && !graft_core::same_path(&main.path, &self.nav.worktree)
+            && !graft_core::paths::same_path(&main.path, &self.nav.worktree)
         {
             let main = main.path.clone();
             self.open_worktree(main);
@@ -521,7 +519,7 @@ impl Project {
         self.run_op(
             At::Selected,
             "Cherry-picking",
-            move |git| refs::cherry_pick(&git, &id.to_string()),
+            move |git| conflicts::cherry_pick(&git, &id.to_string()),
             after_conflicts(done, stopped, None),
         );
     }
@@ -535,7 +533,7 @@ impl Project {
         self.run_op(
             At::Selected,
             "Reverting",
-            move |git| refs::revert(&git, &id.to_string()),
+            move |git| conflicts::revert(&git, &id.to_string()),
             after_conflicts(done, stopped, None),
         );
     }
@@ -560,8 +558,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use graft_core::Console;
-    use graft_core::jobs::JobPool;
+    use graft_core::JobPool;
+    use graft_core::console::Console;
 
     use super::*;
     use crate::project::RepoMemory;
@@ -598,14 +596,7 @@ mod tests {
     }
 
     fn branch_at(project: &Project, path: &Path) -> Option<String> {
-        project
-            .snapshot
-            .as_ref()?
-            .worktrees
-            .iter()
-            .find(|wt| graft_core::same_path(&wt.path, path))?
-            .branch
-            .clone()
+        project.snapshot.as_ref()?.worktree_at(path)?.branch.clone()
     }
 
     struct Setup {
@@ -673,7 +664,7 @@ mod tests {
             linked,
         } = setup(|_| {});
         project.apply(Action::Checkout("other".to_owned()));
-        assert!(graft_core::same_path(&project.nav.worktree, &main));
+        assert!(graft_core::paths::same_path(&project.nav.worktree, &main));
         wait(&mut project, "main never switched", |p| {
             !p.is_operating() && branch_at(p, &main).as_deref() == Some("other")
         });
@@ -755,7 +746,7 @@ mod tests {
         wait(&mut project, "main never switched", |p| {
             !p.is_operating() && branch_at(p, &main).as_deref() == Some("other")
         });
-        assert!(graft_core::same_path(&project.nav.worktree, &linked));
+        assert!(graft_core::paths::same_path(&project.nav.worktree, &linked));
         assert_eq!(project.commit_form.summary, "half-written");
     }
 
@@ -800,15 +791,5 @@ mod tests {
         project.apply(Action::SubmitDialog);
         assert!(!project.dialog.as_ref().unwrap().submitting);
         wait(&mut project, "checkout never ended", |p| !p.is_operating());
-    }
-
-    #[test]
-    fn lists_files_in_the_way() {
-        let error = "error: Your local changes to the following files would be overwritten \
-                     by checkout:\n\tsrc/a.rs\n\tb.txt\nPlease commit your changes or stash \
-                     them before you switch branches.\nAborting";
-        assert!(blocked_by_changes(error));
-        assert_eq!(files_in_the_way(error), "src/a.rs, b.txt");
-        assert_eq!(files_in_the_way("fatal: something else"), "some files");
     }
 }

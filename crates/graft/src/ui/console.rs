@@ -29,7 +29,7 @@ pub struct ConsoleView {
 }
 
 impl ConsoleView {
-    pub fn sync(&mut self, console: &graft_core::Console) {
+    pub fn sync(&mut self, console: &graft_core::console::Console) {
         let next_seq = console.next_seq();
         if next_seq != self.next_seq {
             self.next_seq = next_seq;

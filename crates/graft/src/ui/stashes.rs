@@ -216,7 +216,7 @@ fn details(
         let others: Vec<_> = snap
             .worktrees
             .iter()
-            .filter(|wt| !wt.prunable && !graft_core::same_path(&wt.path, &here_path))
+            .filter(|wt| !wt.prunable && !graft_core::paths::same_path(&wt.path, &here_path))
             .collect();
         ui.add_enabled_ui(!busy && !others.is_empty(), |ui| {
             ui.menu_button("Apply to…", |ui| {

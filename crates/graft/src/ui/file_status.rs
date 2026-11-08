@@ -4,7 +4,7 @@
 use egui::{
     Color32, Frame, Margin, Panel, Rect, RichText, ScrollArea, Sense, Stroke, Ui, pos2, vec2,
 };
-use graft_core::status::{Change, StatusEntry, WorktreeStatus};
+use graft_core::{FileList, StatusEntry, WorktreeStatus};
 
 use super::file_row;
 use super::icons::Icon;
@@ -64,8 +64,6 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
 fn keyboard(ui: &Ui, project: &Project, status: &WorktreeStatus, actions: &mut Actions) {
     let keys = &project.settings().keys;
     let ctx = ui.ctx();
-    // Top to bottom as listed; `Some(true)` can be staged, `Some(false)`
-    // unstaged.
     // Nothing to do on the many frames without a key press.
     let any_key = ui.input(|i| {
         i.events
@@ -75,15 +73,9 @@ fn keyboard(ui: &Ui, project: &Project, status: &WorktreeStatus, actions: &mut A
     if !any_key {
         return;
     }
-    let rows: Vec<(FileKey, Option<bool>)> = status
-        .conflicted()
-        .map(|e| (FileKey::of(e, false), None))
-        .chain(status.staged().map(|e| (FileKey::of(e, true), Some(false))))
-        .chain(
-            status
-                .unstaged()
-                .map(|e| (FileKey::of(e, false), Some(true))),
-        )
+    let rows: Vec<(FileKey, FileList)> = status
+        .listed()
+        .map(|(list, e)| (FileKey::of(e, list == FileList::Staged), list))
         .collect();
     if rows.is_empty() {
         return;
@@ -102,13 +94,13 @@ fn keyboard(ui: &Ui, project: &Project, status: &WorktreeStatus, actions: &mut A
         return;
     }
     if keys.pressed(ctx, Command::StageFile)
-        && let Some((key, stage)) = current.map(|i| &rows[i])
+        && let Some((key, list)) = current.map(|i| &rows[i])
     {
         let paths = vec![key.path.clone()];
-        match stage {
-            Some(true) => actions.push(Action::StageFiles(paths)),
-            Some(false) => actions.push(Action::UnstageFiles(paths)),
-            None => {}
+        match list {
+            FileList::Unstaged => actions.push(Action::StageFiles(paths)),
+            FileList::Staged => actions.push(Action::UnstageFiles(paths)),
+            FileList::Conflicts => {}
         }
     }
     if keys.pressed(ctx, Command::StageAll) {
@@ -124,7 +116,7 @@ fn keyboard(ui: &Ui, project: &Project, status: &WorktreeStatus, actions: &mut A
         }
     }
     if keys.pressed(ctx, Command::DiscardFile)
-        && let Some((key, Some(true))) = current.map(|i| &rows[i])
+        && let Some((key, FileList::Unstaged)) = current.map(|i| &rows[i])
     {
         actions.push(diff_view::discard_file(&key.source, key.path.clone()));
     }
@@ -134,91 +126,49 @@ fn file_lists(ui: &mut Ui, project: &Project, status: &WorktreeStatus, actions: 
     let keys = &project.settings().keys;
     let busy = project.is_operating();
     let selected = project.diff_view.as_ref().map(|v| &v.key);
-    let staged: Vec<&StatusEntry> = status.staged().collect();
-    let unstaged: Vec<&StatusEntry> = status.unstaged().collect();
-    let conflicted: Vec<&StatusEntry> = status.conflicted().collect();
 
     ScrollArea::vertical()
         .id_salt("file-lists-scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
-            if !conflicted.is_empty() {
-                section(ui, "CONFLICTS", conflicted.len(), None, busy);
-                for entry in &conflicted {
-                    let key = FileKey::of(entry, false);
-                    file_row(
-                        ui,
-                        entry,
-                        Change::Unmerged,
-                        &key,
-                        selected == Some(&key),
-                        None,
-                        busy,
-                        keys,
-                        actions,
-                    );
+            for list in FileList::ALL {
+                let entries: Vec<&StatusEntry> = status.in_list(list).collect();
+                let paths = || entries.iter().map(|e| e.path.clone()).collect();
+                match list {
+                    FileList::Conflicts if entries.is_empty() => continue,
+                    FileList::Conflicts => {
+                        section(ui, "CONFLICTS", entries.len(), None, busy);
+                    }
+                    FileList::Staged => {
+                        let tip = keys.tip("Unstage every staged file", Command::UnstageAll);
+                        let link = Some(("Unstage all", tip.as_str()));
+                        if section(ui, "STAGED", entries.len(), link, busy) {
+                            actions.push(Action::UnstageFiles(paths()));
+                        }
+                        if entries.is_empty() {
+                            list_hint(ui, "Stage files, hunks or lines to commit them.");
+                        }
+                    }
+                    FileList::Unstaged => {
+                        let tip = keys.tip("Stage every changed file", Command::StageAll);
+                        let link = Some(("Stage all", tip.as_str()));
+                        if section(ui, "UNSTAGED", entries.len(), link, busy) {
+                            actions.push(Action::StageFiles(paths()));
+                        }
+                        if entries.is_empty() {
+                            list_hint(ui, "No unstaged changes.");
+                        }
+                    }
                 }
-                ui.add_space(10.0);
-            }
-
-            let all_staged: Vec<String> = staged.iter().map(|e| e.path.clone()).collect();
-            let tip = keys.tip("Unstage every staged file", Command::UnstageAll);
-            if section(
-                ui,
-                "STAGED",
-                staged.len(),
-                Some(("Unstage all", &tip)),
-                busy,
-            ) {
-                actions.push(Action::UnstageFiles(all_staged));
-            }
-            if staged.is_empty() {
-                list_hint(ui, "Stage files, hunks or lines to commit them.");
-            }
-            for entry in &staged {
-                let key = FileKey::of(entry, true);
-                file_row(
-                    ui,
-                    entry,
-                    entry.index,
-                    &key,
-                    selected == Some(&key),
-                    Some(false),
-                    busy,
-                    keys,
-                    actions,
-                );
-            }
-            ui.add_space(10.0);
-
-            let all_unstaged: Vec<String> = unstaged.iter().map(|e| e.path.clone()).collect();
-            let tip = keys.tip("Stage every changed file", Command::StageAll);
-            if section(
-                ui,
-                "UNSTAGED",
-                unstaged.len(),
-                Some(("Stage all", &tip)),
-                busy,
-            ) {
-                actions.push(Action::StageFiles(all_unstaged));
-            }
-            if unstaged.is_empty() {
-                list_hint(ui, "No unstaged changes.");
-            }
-            for entry in &unstaged {
-                let key = FileKey::of(entry, false);
-                file_row(
-                    ui,
-                    entry,
-                    entry.unstaged_change(),
-                    &key,
-                    selected == Some(&key),
-                    Some(true),
-                    busy,
-                    keys,
-                    actions,
-                );
+                for entry in &entries {
+                    let key = FileKey::of(entry, list == FileList::Staged);
+                    let selected = selected == Some(&key);
+                    file_row(ui, entry, list, &key, selected, busy, keys, actions);
+                }
+                if list != FileList::Unstaged {
+                    ui.add_space(10.0);
+                }
             }
         });
 }
@@ -271,19 +221,24 @@ fn list_hint(ui: &mut Ui, text: &str) {
     ui.add_space(2.0);
 }
 
-/// One file. `stage`: `Some(true)` offers staging, `Some(false)` unstaging.
+/// One file of `list`: staged files offer unstaging, unstaged ones staging.
 #[allow(clippy::too_many_arguments)]
 fn file_row(
     ui: &mut Ui,
     entry: &StatusEntry,
-    change: Change,
+    list: FileList,
     key: &FileKey,
     selected: bool,
-    stage: Option<bool>,
     busy: bool,
     keys: &Keymap,
     actions: &mut Actions,
 ) {
+    let change = list.change(entry);
+    let stage = match list {
+        FileList::Unstaged => Some(true),
+        FileList::Staged => Some(false),
+        FileList::Conflicts => None,
+    };
     let (rect, response) = file_row::allocate(ui, selected, Sense::click());
     let y = rect.center().y;
     let button_rect = Rect::from_center_size(pos2(rect.right() - 14.0, y), vec2(20.0, 20.0));

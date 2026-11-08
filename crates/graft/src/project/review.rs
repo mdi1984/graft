@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use graft_core::diff::Source;
+use graft_core::paths::same_path;
 use graft_core::review::{self, Review, ReviewFile};
-use graft_core::same_path;
 use serde::{Deserialize, Serialize};
 
 use super::changes::{SideLines, Slot};

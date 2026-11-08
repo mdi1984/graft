@@ -9,10 +9,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use graft_core::console::Console;
 use graft_core::watch::Watcher;
 use graft_core::worktree::{self, Start};
 use graft_core::wsl::Wsl;
-use graft_core::{CancelToken, Console, Git, conflicts, history, ops, preview, repo, snapshot};
+use graft_core::{CancelToken, Git, conflicts, history, ops, preview, repo, snapshot};
 
 /// A temporary folder inside the distro, removed on drop.
 struct Distro {
@@ -140,7 +141,7 @@ fn open_status_worktrees_and_history() {
         .unwrap()
         .entries
         .into_iter()
-        .filter(|e| e.kind == graft_core::status::EntryKind::Tracked)
+        .filter(|e| e.kind == graft_core::EntryKind::Tracked)
         .map(|e| e.path)
         .collect();
     assert_eq!(staged, ["x[ab].txt"]);
@@ -150,7 +151,7 @@ fn open_status_worktrees_and_history() {
     // History through gix, also when opened at the linked worktree.
     let tips = [snap.worktrees[1].head.unwrap()];
     let commits = history::walk(&feature, &tips, 100, &CancelToken::default()).unwrap();
-    assert_eq!(commits.list.len(), 1);
+    assert_eq!(commits.len(), 1);
 }
 
 #[test]
@@ -207,7 +208,7 @@ fn worktrees_clone_and_conflicts() {
     let wt = Git::new(&feature, console.clone());
     let file = conflicts::load(&wt, "readme.md").unwrap();
     conflicts::take_side(&wt, &file, true).unwrap();
-    let stopped_again = conflicts::continue_op(&wt, conflicts::Kind::Merge).unwrap();
+    let stopped_again = conflicts::continue_op(&wt, graft_core::Operation::Merge).unwrap();
     assert!(!stopped_again);
     assert!(conflicts::in_progress(&feature).is_none());
 

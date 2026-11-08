@@ -58,15 +58,9 @@ fn preview_banner(ui: &mut Ui, project: &Project, actions: &mut Actions) {
         return;
     };
     let Some(preview) = &snap.preview else { return };
-    let source = snap
-        .worktrees
-        .iter()
-        .find(|wt| graft_core::same_path(&wt.path, &preview.source));
+    let source = snap.worktree_at(&preview.source);
     let name = source.map_or_else(|| paths::display(&preview.source), |wt| wt.label());
-    let back = match &preview.restore {
-        graft_core::model::Restore::Branch(b) => b.clone(),
-        graft_core::model::Restore::Detached(id) => graft_core::short(id),
-    };
+    let back = preview.restore.label();
     let busy = project.is_operating();
     Panel::top("preview-banner")
         .frame(

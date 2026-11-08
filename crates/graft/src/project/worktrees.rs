@@ -3,11 +3,12 @@
 
 use std::path::{Path, PathBuf};
 
+use graft_core::RepoSnapshot;
 use graft_core::paths::folder_name;
+use graft_core::paths::same_path;
 use graft_core::refs::{RefKind, check_ref_name};
 use graft_core::watch::Watcher;
 use graft_core::worktree::{self, Start};
-use graft_core::{RepoSnapshot, same_path};
 
 use super::ops::{At, quietly, say};
 use super::{Done, Project};
@@ -268,8 +269,7 @@ impl Project {
         let path = if empty || branch.is_empty() {
             folder
         } else {
-            let name = worktree::default_path(Path::new("x"), &branch);
-            folder.join(name.file_name().unwrap_or_default())
+            folder.join(worktree::folder_for(&branch))
         };
         form.path = path.display().to_string();
         form.path_edited = true;

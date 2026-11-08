@@ -3,7 +3,8 @@
 
 use egui::{Id, Rect, Response, ScrollArea, Sense, Stroke, Ui, pos2, vec2};
 use graft_core::console::redact;
-use graft_core::{Branch, RemoteBranch, RepoSnapshot, Upstream, Worktree, paths, same_path};
+use graft_core::paths::same_path;
+use graft_core::{Branch, RemoteBranch, RepoSnapshot, Upstream, Worktree, paths, remote};
 
 use super::branch_menu;
 use super::icons::Icon;
@@ -614,19 +615,14 @@ fn remote_branch_menu(
 }
 
 fn tag_menu(ui: &mut Ui, repo: &RepoSnapshot, tag: &str, busy: bool, actions: &mut Actions) {
-    let remote = repo
-        .remotes
-        .iter()
-        .find(|r| r.name == "origin")
-        .or(repo.remotes.first());
-    if let Some(remote) = remote {
+    if let Some(remote) = remote::default_remote(repo.remotes.iter().map(|r| r.name.as_str())) {
         menu_item(
             ui,
-            &format!("Push to {}", remote.name),
+            &format!("Push to {remote}"),
             !busy,
             actions,
             Action::Remote(RemoteOp::PushTag {
-                remote: remote.name.clone(),
+                remote: remote.to_owned(),
                 tag: tag.to_owned(),
             }),
         );

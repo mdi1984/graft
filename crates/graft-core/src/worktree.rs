@@ -85,6 +85,15 @@ pub fn default_path(main: &Path, branch: &str) -> PathBuf {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "repo".to_owned());
+    let parent = main.parent().unwrap_or(main);
+    parent
+        .join(format!("{repo}.worktrees"))
+        .join(folder_for(branch))
+}
+
+/// The folder name for a worktree of `branch`: the name with characters a
+/// folder name cannot have (and spaces) as `-`.
+pub fn folder_for(branch: &str) -> String {
     let folder: String = branch
         .chars()
         .map(|c| match c {
@@ -92,10 +101,7 @@ pub fn default_path(main: &Path, branch: &str) -> PathBuf {
             c => c,
         })
         .collect();
-    let parent = main.parent().unwrap_or(main);
-    parent
-        .join(format!("{repo}.worktrees"))
-        .join(folder.trim_matches('-'))
+    folder.trim_matches('-').to_owned()
 }
 
 /// Copy ignored files of `from` whose names match one of `patterns` (see
@@ -149,6 +155,7 @@ mod tests {
 
     #[test]
     fn default_paths() {
+        assert_eq!(folder_for("/feature/x:y/"), "feature-x-y");
         let p = default_path(Path::new(r"C:\dev\graft"), "feature/login page");
         assert_eq!(
             p,

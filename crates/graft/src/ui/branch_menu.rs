@@ -3,7 +3,8 @@
 //! labels that say which branch an entry is about.
 
 use egui::Ui;
-use graft_core::{RemoteBranch, RepoSnapshot, same_path};
+use graft_core::paths::same_path;
+use graft_core::{RemoteBranch, RepoSnapshot};
 
 use super::widgets::menu_item;
 use crate::project::{Action, Project};

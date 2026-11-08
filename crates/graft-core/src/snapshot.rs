@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::cli::Git;
-use crate::conflicts;
 use crate::model::{Branch, Oid, Remote, RemoteBranch, RepoSnapshot, Tag, Upstream, Worktree};
 use crate::paths::{folder_name, same_path};
-use crate::status;
+use crate::remote::ORIGIN;
+use crate::{conflicts, stash, status};
 
 /// Read the whole snapshot. `git` must point at the main worktree. The git
 /// calls run side by side: each one costs tens of milliseconds just to start
@@ -18,7 +18,7 @@ pub fn load(git: &Git) -> Result<RepoSnapshot> {
     std::thread::scope(|s| {
         let refs = s.spawn(|| load_refs(git));
         let remotes = s.spawn(|| load_remotes(git));
-        let stash_count = s.spawn(|| load_stash_count(git));
+        let stash_count = s.spawn(|| stash::list(git).map(|list| list.len()));
         let mut worktrees = load_worktrees(git, &root)?;
         let statuses: Vec<_> = worktrees
             .iter()
@@ -71,6 +71,7 @@ fn load_refs(git: &Git) -> Result<Refs> {
 
 fn parse_refs(text: &str) -> Refs {
     let mut refs = Refs::default();
+    let origin = format!("refs/remotes/{ORIGIN}/");
     for line in text.lines() {
         let f: Vec<&str> = line.split('\0').collect();
         let [name, oid, peeled, upstream, track, symref, ref types @ ..] = f[..] else {
@@ -78,10 +79,8 @@ fn parse_refs(text: &str) -> Refs {
         };
         if !symref.is_empty() {
             // refs/remotes/origin/HEAD -> refs/remotes/origin/<default branch>
-            if name == "refs/remotes/origin/HEAD" {
-                refs.remote_default = symref
-                    .strip_prefix("refs/remotes/origin/")
-                    .map(str::to_owned);
+            if name.strip_prefix(&origin) == Some("HEAD") {
+                refs.remote_default = symref.strip_prefix(&origin).map(str::to_owned);
             }
             continue;
         }
@@ -242,11 +241,6 @@ fn load_remotes(git: &Git) -> Result<Vec<Remote>> {
         }
     }
     Ok(remotes)
-}
-
-fn load_stash_count(git: &Git) -> Result<usize> {
-    let out = git.read(["stash", "list", "--format=%H"])?;
-    Ok(out.lines().filter(|l| !l.is_empty()).count())
 }
 
 #[cfg(test)]

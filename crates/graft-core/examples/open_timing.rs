@@ -1,8 +1,9 @@
 //! Time the steps of opening a repository: `cargo run --release -p graft-core --example open_timing -- <repo>`.
 use std::time::Instant;
 
+use graft_core::console::Console;
 use graft_core::history::{self, History};
-use graft_core::{CancelToken, Console, Git, snapshot};
+use graft_core::{CancelToken, Git, snapshot};
 
 fn main() {
     let root = std::path::PathBuf::from(std::env::args().nth(1).expect("repo path"));
@@ -13,7 +14,7 @@ fn main() {
     let tips = snap.tips();
     let t = Instant::now();
     let commits = history::walk(&root, &tips, 100_000, &CancelToken::default()).unwrap();
-    println!("walk: {:?} ({} commits)", t.elapsed(), commits.list.len());
+    println!("walk: {:?} ({} commits)", t.elapsed(), commits.len());
     let t = Instant::now();
     let h = History::build(&commits, None);
     println!("build: {:?} ({} rows)", t.elapsed(), h.commits.len());

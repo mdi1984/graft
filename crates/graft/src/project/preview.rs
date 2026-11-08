@@ -13,11 +13,7 @@ impl Project {
     fn worktree_label(&self, path: &Path) -> String {
         self.snapshot
             .as_ref()
-            .and_then(|s| {
-                s.worktrees
-                    .iter()
-                    .find(|wt| graft_core::same_path(&wt.path, path))
-            })
+            .and_then(|s| s.worktree_at(path))
             .map(|wt| wt.label())
             .unwrap_or_else(|| graft_core::paths::folder_name(path))
     }

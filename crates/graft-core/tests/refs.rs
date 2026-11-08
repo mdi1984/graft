@@ -4,7 +4,7 @@ mod common;
 
 use common::{commit, rev, sh};
 use graft_core::refs::{self, ResetMode};
-use graft_core::snapshot;
+use graft_core::{conflicts, refusal, snapshot};
 
 #[test]
 fn branches_tags_and_commit_ops() {
@@ -36,7 +36,7 @@ fn branches_tags_and_commit_ops() {
         "{:#}",
         refs::delete_branch(&git, "topic", false).unwrap_err()
     );
-    assert!(err.contains(refs::NOT_MERGED), "{err}");
+    assert!(err.contains(refusal::NOT_MERGED), "{err}");
     let topic = rev(&dir, "topic");
     refs::rename_branch(&git, "topic", "topic2").unwrap();
     assert_eq!(branches(), ["main", "topic2"]);
@@ -44,10 +44,10 @@ fn branches_tags_and_commit_ops() {
 
     // Cherry-pick brings the commit's change; revert takes it away again,
     // both as new commits on main.
-    assert!(!refs::cherry_pick(&git, "topic2").unwrap());
+    assert!(!conflicts::cherry_pick(&git, "topic2").unwrap());
     assert!(dir.join("t.txt").exists());
     assert_eq!(sh(&dir, &["log", "-1", "--format=%s"]), "topic work");
-    assert!(!refs::revert(&git, "HEAD").unwrap());
+    assert!(!conflicts::revert(&git, "HEAD").unwrap());
     assert!(!dir.join("t.txt").exists());
     assert_eq!(sh(&dir, &["rev-list", "--count", "HEAD"]), "4");
     refs::delete_branch(&git, "topic2", true).unwrap();

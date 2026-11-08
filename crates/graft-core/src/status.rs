@@ -4,115 +4,7 @@
 use anyhow::Result;
 
 use crate::cli::Git;
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct WorktreeStatus {
-    pub ahead: usize,
-    pub behind: usize,
-    pub entries: Vec<StatusEntry>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StatusEntry {
-    pub path: String,
-    /// Source path of a rename or copy.
-    pub orig_path: Option<String>,
-    /// Change between HEAD and the index (the "staged" side).
-    pub index: Change,
-    /// Change between the index and the working tree (the "unstaged" side).
-    pub worktree: Change,
-    pub kind: EntryKind,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EntryKind {
-    Tracked,
-    Untracked,
-    /// Merge conflict.
-    Conflicted,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Change {
-    None,
-    Modified,
-    TypeChanged,
-    Added,
-    Deleted,
-    Renamed,
-    Copied,
-    Unmerged,
-}
-
-impl Change {
-    /// A status letter as git prints it (porcelain `XY`, `--name-status`).
-    pub(crate) fn from_code(c: u8) -> Self {
-        match c {
-            b'M' => Self::Modified,
-            b'T' => Self::TypeChanged,
-            b'A' => Self::Added,
-            b'D' => Self::Deleted,
-            b'R' => Self::Renamed,
-            b'C' => Self::Copied,
-            b'U' => Self::Unmerged,
-            _ => Self::None,
-        }
-    }
-
-    /// One-letter badge as shown in the file lists.
-    pub fn letter(self) -> &'static str {
-        match self {
-            Self::None => "",
-            Self::Modified => "M",
-            Self::TypeChanged => "T",
-            Self::Added => "A",
-            Self::Deleted => "D",
-            Self::Renamed => "R",
-            Self::Copied => "C",
-            Self::Unmerged => "U",
-        }
-    }
-}
-
-impl StatusEntry {
-    pub fn is_staged(&self) -> bool {
-        self.kind == EntryKind::Tracked && self.index != Change::None
-    }
-
-    pub fn is_unstaged(&self) -> bool {
-        match self.kind {
-            EntryKind::Untracked => true,
-            EntryKind::Tracked => self.worktree != Change::None,
-            EntryKind::Conflicted => false,
-        }
-    }
-
-    pub fn is_conflicted(&self) -> bool {
-        self.kind == EntryKind::Conflicted
-    }
-
-    /// Badge for the unstaged list ("?" counts as added).
-    pub fn unstaged_change(&self) -> Change {
-        match self.kind {
-            EntryKind::Untracked => Change::Added,
-            _ => self.worktree,
-        }
-    }
-}
-
-impl WorktreeStatus {
-    pub fn staged(&self) -> impl Iterator<Item = &StatusEntry> {
-        self.entries.iter().filter(|e| e.is_staged())
-    }
-
-    pub fn unstaged(&self) -> impl Iterator<Item = &StatusEntry> {
-        self.entries.iter().filter(|e| e.is_unstaged())
-    }
-
-    pub fn conflicted(&self) -> impl Iterator<Item = &StatusEntry> {
-        self.entries.iter().filter(|e| e.is_conflicted())
-    }
-}
+use crate::model::{Change, EntryKind, StatusEntry, WorktreeStatus};
 
 /// Read the status of the worktree `git` points at.
 pub fn load(git: &Git) -> Result<WorktreeStatus> {
@@ -202,6 +94,7 @@ fn parse_header(line: &str, status: &mut WorktreeStatus) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::FileList;
 
     #[test]
     fn parses_all_record_kinds() {
@@ -224,5 +117,27 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
         assert_eq!(s.entries[4].kind, EntryKind::Untracked);
         assert_eq!(s.staged().count(), 2);
         assert_eq!(s.unstaged().count(), 2);
+        assert_eq!(s.entries[3].shown_change(), Change::Unmerged);
+        assert_eq!(s.entries[1].shown_change(), Change::Added);
+    }
+
+    /// Conflicts first, then staged, then unstaged; a file changed on both
+    /// sides is listed twice.
+    #[test]
+    fn listed_in_display_order() {
+        let raw = b"1 MM N... 100644 100644 100644 aaaa bbbb both.rs\0\
+? new.txt\0\
+u UU N... 100644 100644 100644 100644 a b c conflict.rs\0";
+        let s = parse(raw);
+        let rows: Vec<(FileList, &str)> = s.listed().map(|(l, e)| (l, e.path.as_str())).collect();
+        assert_eq!(
+            rows,
+            [
+                (FileList::Conflicts, "conflict.rs"),
+                (FileList::Staged, "both.rs"),
+                (FileList::Unstaged, "both.rs"),
+                (FileList::Unstaged, "new.txt"),
+            ]
+        );
     }
 }

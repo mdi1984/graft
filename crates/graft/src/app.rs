@@ -7,9 +7,11 @@ use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, Sender};
 use egui::{CentralPanel, Frame, Margin, Panel};
-use graft_core::jobs::{JobPool, Waker};
+use graft_core::console::Console;
+use graft_core::paths::same_path;
 use graft_core::repo::{self, Location};
-use graft_core::{Console, Panicked, is_cancelled, same_path};
+use graft_core::{JobPool, Waker};
+use graft_core::{Panicked, is_cancelled};
 use serde::{Deserialize, Serialize};
 
 use crate::groups::{self, GroupId, TabGroup};

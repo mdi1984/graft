@@ -5,8 +5,9 @@ mod common;
 use std::path::Path;
 
 use common::{commit, sh};
+use graft_core::console::Console;
 use graft_core::history::{self, History};
-use graft_core::{CancelToken, Console, Git, details, is_cancelled, repo, snapshot};
+use graft_core::{CancelToken, Git, details, is_cancelled, repo, snapshot};
 
 fn fixture() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
@@ -58,7 +59,7 @@ fn locate_snapshot_history_details() {
     // History over all branches: 5 commits, merge on top, two lanes.
     let tips: Vec<_> = snap.branches.iter().map(|b| b.target).collect();
     let commits = history::walk(&loc.root, &tips, 1000, &CancelToken::default()).unwrap();
-    assert_eq!(commits.list.len(), 5);
+    assert_eq!(commits.len(), 5);
     let head = snap.worktrees[0].head.unwrap();
     let h = History::build(&commits, Some(head));
     assert!(h.commits[0].is_worktree());
@@ -181,5 +182,5 @@ fn tags_on_files_and_folders_do_not_break_history() {
 
     let tips: Vec<_> = snap.tags.iter().map(|t| t.target).collect();
     let commits = history::walk(&dir, &tips, 1000, &CancelToken::default()).unwrap();
-    assert_eq!(commits.list.len(), 5);
+    assert_eq!(commits.len(), 5);
 }

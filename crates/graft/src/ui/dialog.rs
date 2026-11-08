@@ -86,9 +86,6 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Actions) {
                     ui.checkbox(keep_index, "Keep staged changes in place too");
                 });
                 ui.checkbox(staged_only, "Only stash what is staged");
-                if *staged_only {
-                    *keep_index = false;
-                }
                 "Stash"
             }
             DialogKind::StashBranch { label, name, .. } => {

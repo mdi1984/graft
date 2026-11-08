@@ -41,7 +41,7 @@ impl Entry {
         Self {
             seq: 0,
             at: SystemTime::now(),
-            cwd: cwd.display().to_string(),
+            cwd: crate::paths::display(cwd),
             command,
             status,
             expected: status == 0,

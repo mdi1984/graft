@@ -486,8 +486,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use graft_core::Console;
-    use graft_core::jobs::JobPool;
+    use graft_core::JobPool;
+    use graft_core::console::Console;
 
     use super::*;
 

@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-use graft_core::{Console, Git};
+use graft_core::Git;
+use graft_core::console::Console;
 
 /// An empty folder and an empty file outside any repository, shared by all
 /// tests of a run: the global config and hooks path git gets.

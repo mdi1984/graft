@@ -122,7 +122,8 @@ pub mod color {
         syn_type: 0xf5d76e / 0x953800,
     }
 
-    const DARK_LANES: [Color32; 8] = [
+    const LANES: usize = graft_core::history::LANE_COLORS as usize;
+    const DARK_LANES: [Color32; LANES] = [
         hex(0x8fd19e),
         hex(0x8cc2ff),
         hex(0xf2b77a),
@@ -132,7 +133,7 @@ pub mod color {
         hex(0xf5d76e),
         hex(0xf39ac7),
     ];
-    const LIGHT_LANES: [Color32; 8] = [
+    const LIGHT_LANES: [Color32; LANES] = [
         hex(0x1a7f37),
         hex(0x0b62c9),
         hex(0xbc5400),

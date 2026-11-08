@@ -9,20 +9,11 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-use crate::Git;
 use crate::changes::is_binary;
-pub use crate::model::{InProgress, Kind};
+use crate::cli::{Git, Output};
+use crate::model::{InProgress, OPERATION_MARKERS, Operation};
+use crate::refusal::stopped_with_conflicts;
 use crate::repo::git_dir;
-
-/// The files and folders in a git dir that mark an operation in progress,
-/// checked in this order.
-pub(crate) const MARKERS: [(&str, Kind); 5] = [
-    ("rebase-merge", Kind::Rebase),
-    ("rebase-apply", Kind::Rebase),
-    ("MERGE_HEAD", Kind::Merge),
-    ("CHERRY_PICK_HEAD", Kind::CherryPick),
-    ("REVERT_HEAD", Kind::Revert),
-];
 
 /// What is in progress in this worktree, judged by git's marker files.
 pub fn in_progress(worktree: &Path) -> Option<InProgress> {
@@ -33,7 +24,7 @@ pub fn in_progress(worktree: &Path) -> Option<InProgress> {
             .and_then(|t| t.lines().next().map(str::to_owned))
             .unwrap_or_default()
     };
-    let (marker, kind) = MARKERS
+    let (marker, kind) = OPERATION_MARKERS
         .into_iter()
         .find(|(marker, _)| dir.join(marker).exists())?;
     let or = |text: String, empty: &str| {
@@ -44,30 +35,60 @@ pub fn in_progress(worktree: &Path) -> Option<InProgress> {
         }
     };
     let title = match kind {
-        Kind::Rebase => {
+        Operation::Rebase => {
             let head = first_line(&format!("{marker}/head-name"));
             match head.trim_start_matches("refs/heads/") {
                 "" => "Rebasing".to_owned(),
                 head => format!("Rebasing {head}"),
             }
         }
-        Kind::Merge => or(first_line("MERGE_MSG"), "Merging"),
-        Kind::CherryPick => format!("Cherry-picking: {}", first_line("MERGE_MSG")),
-        Kind::Revert => or(first_line("MERGE_MSG"), "Reverting"),
+        Operation::Merge => or(first_line("MERGE_MSG"), "Merging"),
+        Operation::CherryPick => format!("Cherry-picking: {}", first_line("MERGE_MSG")),
+        Operation::Revert => or(first_line("MERGE_MSG"), "Reverting"),
     };
     Some(InProgress { kind, title })
 }
 
-/// Names for the two sides of a conflict, ours first. In a rebase, "ours"
-/// is the branch being rebased onto and "theirs" is your commit being
-/// replayed.
-pub fn side_names(kind: Option<Kind>, branch: Option<&str>) -> (String, String) {
-    let current = format!("Current ({})", branch.unwrap_or("HEAD"));
-    match kind {
-        Some(Kind::Rebase) => ("Upstream".to_owned(), "Your commit".to_owned()),
-        Some(Kind::CherryPick) => (current, "Picked commit".to_owned()),
-        Some(Kind::Revert) => (current, "Reverted commit".to_owned()),
-        Some(Kind::Merge) | None => (current, "Incoming".to_owned()),
+/// What one side of a conflict is called.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SideName {
+    /// As a heading, e.g. "Current (main)".
+    pub long: String,
+    /// Inside a sentence, e.g. "current".
+    pub short: String,
+}
+
+impl SideName {
+    fn new(name: &str, detail: Option<&str>) -> Self {
+        Self {
+            long: match detail {
+                Some(detail) => format!("{name} ({detail})"),
+                None => name.to_owned(),
+            },
+            short: name.to_lowercase(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SideNames {
+    pub ours: SideName,
+    pub theirs: SideName,
+}
+
+/// Names for the two sides of a conflict. In a rebase, "ours" is the branch
+/// being rebased onto and "theirs" is your commit being replayed.
+pub fn side_names(kind: Option<Operation>, branch: Option<&str>) -> SideNames {
+    let current = SideName::new("Current", Some(branch.unwrap_or("HEAD")));
+    let (ours, theirs) = match kind {
+        Some(Operation::Rebase) => (SideName::new("Upstream", None), "Your commit"),
+        Some(Operation::CherryPick) => (current, "Picked commit"),
+        Some(Operation::Revert) => (current, "Reverted commit"),
+        Some(Operation::Merge) | None => (current, "Incoming"),
+    };
+    SideNames {
+        ours,
+        theirs: SideName::new(theirs, None),
     }
 }
 
@@ -79,14 +100,13 @@ fn run_may_conflict(git: &Git, args: &[&str]) -> Result<bool> {
 }
 
 /// Git stopped because of conflicts (rather than failing).
-fn stopped(out: &crate::cli::Output) -> bool {
-    let text = format!("{}\n{}", out.stdout_str(), out.stderr_str());
-    text.contains("CONFLICT") || text.contains("could not apply")
+fn stopped(out: &Output) -> bool {
+    stopped_with_conflicts(&format!("{}\n{}", out.stdout_str(), out.stderr_str()))
 }
 
 /// Merge `rev` into the current branch. Ok(true): stopped with conflicts.
 pub fn merge(git: &Git, rev: &str, no_ff: bool) -> Result<bool> {
-    let mut args = vec![Kind::Merge.command(), "--no-edit"];
+    let mut args = vec![Operation::Merge.command(), "--no-edit"];
     if no_ff {
         args.push("--no-ff");
     }
@@ -96,32 +116,43 @@ pub fn merge(git: &Git, rev: &str, no_ff: bool) -> Result<bool> {
 
 /// Rebase the current branch onto `onto`. Ok(true): stopped with conflicts.
 pub fn rebase(git: &Git, onto: &str) -> Result<bool> {
-    run_may_conflict(git, &[Kind::Rebase.command(), "--end-of-options", onto])
+    run_may_conflict(
+        git,
+        &[Operation::Rebase.command(), "--end-of-options", onto],
+    )
 }
 
 /// Apply the commit `rev` on top of HEAD. Ok(true): stopped with conflicts.
 pub fn cherry_pick(git: &Git, rev: &str) -> Result<bool> {
-    run_may_conflict(git, &[Kind::CherryPick.command(), "--end-of-options", rev])
+    run_may_conflict(
+        git,
+        &[Operation::CherryPick.command(), "--end-of-options", rev],
+    )
 }
 
 /// Commit the opposite of `rev`. Ok(true): stopped with conflicts.
 pub fn revert(git: &Git, rev: &str) -> Result<bool> {
     run_may_conflict(
         git,
-        &[Kind::Revert.command(), "--no-edit", "--end-of-options", rev],
+        &[
+            Operation::Revert.command(),
+            "--no-edit",
+            "--end-of-options",
+            rev,
+        ],
     )
 }
 
 /// Continue after all conflicts are resolved, without opening an editor.
 /// Ok(true): the next step (a rebase's next commit) stopped with conflicts.
-pub fn continue_op(git: &Git, kind: Kind) -> Result<bool> {
+pub fn continue_op(git: &Git, kind: Operation) -> Result<bool> {
     run_may_conflict(
         git,
         &["-c", "core.editor=true", kind.command(), "--continue"],
     )
 }
 
-pub fn abort(git: &Git, kind: Kind) -> Result<()> {
+pub fn abort(git: &Git, kind: Operation) -> Result<()> {
     git.run([kind.command(), "--abort"])?;
     Ok(())
 }
@@ -370,13 +401,17 @@ pub fn take_side(git: &Git, file: &ConflictFile, ours: bool) -> Result<()> {
     Ok(())
 }
 
-/// The user fixed the file by hand: stage it as it is.
+/// The user fixed the file by hand: stage it as it is (deleting it
+/// resolves the conflict with a deletion).
 pub fn mark_resolved(git: &Git, path: &str) -> Result<()> {
-    let full = git.cwd().join(path);
-    if let Ok(bytes) = std::fs::read(&full)
-        && bytes
-            .split(|b| *b == b'\n')
-            .any(|l| l.starts_with(b"<<<<<<< ") || l.starts_with(b">>>>>>> "))
+    let bytes = match std::fs::read(git.cwd().join(path)) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e).with_context(|| format!("Could not read {path}")),
+    };
+    if bytes
+        .split(|b| *b == b'\n')
+        .any(|l| l.starts_with(b"<<<<<<< ") || l.starts_with(b">>>>>>> "))
     {
         bail!("{path} still contains conflict markers (<<<<<<< / >>>>>>>).");
     }
@@ -436,6 +471,17 @@ mod tests {
             assemble(&segments, &[Some(Resolution::Custom(b"X\n".to_vec()))]).unwrap(),
             b"a\nX\nc\n"
         );
+    }
+
+    #[test]
+    fn side_names_per_operation() {
+        let merge = side_names(Some(Operation::Merge), Some("main"));
+        assert_eq!(merge.ours.long, "Current (main)");
+        assert_eq!(merge.ours.short, "current");
+        assert_eq!(merge.theirs.short, "incoming");
+        let rebase = side_names(Some(Operation::Rebase), Some("main"));
+        assert_eq!(rebase.ours.long, "Upstream");
+        assert_eq!(rebase.theirs.short, "your commit");
     }
 
     #[test]

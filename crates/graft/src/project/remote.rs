@@ -1,7 +1,8 @@
 //! Fetch, pull and push, with progress and cancel, and what to offer when the
 //! remote rejects a push.
 
-use graft_core::remote::{self, is_rejected_push};
+use graft_core::refusal::rejected_push;
+use graft_core::remote;
 use graft_core::{CancelToken, Git, Progress};
 
 use super::ops::{At, quietly, say};
@@ -85,7 +86,7 @@ impl Project {
     fn pushed(&mut self, result: anyhow::Result<()>) {
         match result {
             Ok(()) => self.infos.push("Pushed".to_owned()),
-            Err(e) if is_rejected_push(&format!("{e:#}")) => {
+            Err(e) if rejected_push(&format!("{e:#}")) => {
                 self.confirm = Some(Confirm {
                     title: "The remote has commits you don't have".to_owned(),
                     body: "Pull first to combine them with yours. Or force push to replace \

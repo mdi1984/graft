@@ -11,8 +11,7 @@ use anyhow::{Result, bail};
 
 use crate::cli::Git;
 use crate::conflicts;
-use crate::model::{Oid, RepoSnapshot, Worktree};
-pub use crate::model::{Preview, Restore};
+use crate::model::{Oid, Preview, RepoSnapshot, Restore, Worktree};
 use crate::paths::{display, same_path};
 use crate::repo::git_dir;
 

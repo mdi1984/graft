@@ -8,7 +8,7 @@ use std::ops::Range;
 use graft_core::Git;
 use graft_core::diff::{self, FileDiff, Gap, Source};
 use graft_core::ops::{self, LineOp};
-use graft_core::status::{EntryKind, StatusEntry};
+use graft_core::{EntryKind, FileList, StatusEntry};
 
 use super::comments::{Pick, Side};
 use super::ops::{At, quietly};
@@ -445,10 +445,8 @@ impl Project {
             return;
         };
         let keys: Vec<FileKey> = status
-            .staged()
-            .map(|e| FileKey::of(e, true))
-            .chain(status.unstaged().map(|e| FileKey::of(e, false)))
-            .chain(status.conflicted().map(|e| FileKey::of(e, false)))
+            .listed()
+            .map(|(list, e)| FileKey::of(e, list == FileList::Staged))
             .collect();
         let current = self.diff_view.as_ref().map(|v| v.key.clone());
         let next = match &current {

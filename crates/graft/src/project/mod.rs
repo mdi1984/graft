@@ -27,17 +27,17 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
+use graft_core::Operation;
+use graft_core::console::Console;
 use graft_core::details::{self, CommitDetails};
-use graft_core::history::{self, Commits, History};
-use graft_core::jobs::{JobPool, Waker};
-use graft_core::model::Kind;
+use graft_core::history::{self, Commit, History};
 use graft_core::ops::LineOp;
 use graft_core::stash::{Stash, StashFile};
 use graft_core::watch::Watcher;
 use graft_core::{
-    CancelToken, Console, Git, Oid, Panicked, RepoSnapshot, Worktree, is_cancelled, null_oid,
-    same_path, snapshot,
+    CancelToken, Git, Oid, Panicked, RepoSnapshot, Worktree, is_cancelled, null_oid, snapshot,
 };
+use graft_core::{JobPool, Waker};
 
 pub use changes::{CommitForm, DiffView, FileKey};
 pub use conflicts::{ConflictView, merge_dialog};
@@ -226,9 +226,9 @@ pub enum Action {
     },
     /// The user fixed the file in an editor: stage it.
     MarkResolved(String),
-    ContinueOp(Kind),
+    ContinueOp(Operation),
     AbortOp {
-        kind: Kind,
+        kind: Operation,
         confirmed: bool,
     },
 
@@ -399,7 +399,7 @@ pub struct Project {
     /// same view started is dropped.
     tickets: u64,
 
-    commits: Option<Arc<Commits>>,
+    commits: Option<Arc<Vec<Commit>>>,
     tips: Vec<Oid>,
     pub history: Option<History>,
     pub history_loading: bool,
@@ -637,10 +637,7 @@ impl Project {
 
     /// The selected worktree.
     pub fn worktree(&self) -> Option<&Worktree> {
-        let snap = self.snapshot.as_ref()?;
-        snap.worktrees
-            .iter()
-            .find(|wt| same_path(&wt.path, &self.nav.worktree))
+        self.snapshot.as_ref()?.worktree_at(&self.nav.worktree)
     }
 
     fn on_snapshot(&mut self, result: Result<RepoSnapshot, String>) {
@@ -709,7 +706,7 @@ impl Project {
             let there = self
                 .snapshot
                 .as_ref()
-                .is_some_and(|s| s.worktrees.iter().any(|wt| same_path(&wt.path, &path)));
+                .is_some_and(|s| s.worktree_at(&path).is_some());
             if there {
                 self.open_worktree(path);
             } else {
@@ -751,7 +748,7 @@ impl Project {
         );
     }
 
-    fn on_history(&mut self, generation: u64, result: anyhow::Result<(Arc<Commits>, History)>) {
+    fn on_history(&mut self, generation: u64, result: anyhow::Result<(Arc<Vec<Commit>>, History)>) {
         if generation != self.history_generation {
             return;
         }
@@ -1017,13 +1014,11 @@ impl Drop for Project {
     }
 }
 
-/// Every commit a ref or worktree points at: the starting points of the walk.
+/// The ref chips of each commit; the branch of the `selected` worktree is
+/// its HEAD.
 fn build_labels(snap: &RepoSnapshot, selected: &Path) -> HashMap<Oid, Vec<RefLabel>> {
     let mut labels: HashMap<Oid, Vec<RefLabel>> = HashMap::new();
-    let current = snap
-        .worktrees
-        .iter()
-        .find(|wt| same_path(&wt.path, selected));
+    let current = snap.worktree_at(selected);
     let current_branch = current.and_then(|wt| wt.branch.as_deref());
     for branch in &snap.branches {
         let head = current_branch == Some(branch.name.as_str());

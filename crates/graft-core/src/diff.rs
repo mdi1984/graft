@@ -8,8 +8,8 @@ use anyhow::Result;
 
 use crate::changes::EMPTY_TREE;
 use crate::cli::{Git, Output};
+use crate::model::Change;
 use crate::model::Oid;
-use crate::status::Change;
 
 /// Which pair of trees a diff compares.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -24,6 +24,17 @@ pub enum Source {
     Commit(Oid),
     /// A commit (a review's merge-base) → working tree.
     Base(Oid),
+}
+
+impl Source {
+    /// What happened to a file, as far as the source alone tells (before
+    /// its diff is loaded).
+    pub fn change(&self) -> Change {
+        match self {
+            Source::Untracked => Change::Added,
+            _ => Change::Modified,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -112,11 +123,12 @@ impl FileDiff {
 
     /// What happened to the file, as far as this diff of `source` tells.
     pub fn change(&self, source: &Source) -> Change {
-        match source {
-            Source::Untracked => Change::Added,
-            _ if self.new_file => Change::Added,
-            _ if self.deleted_file => Change::Deleted,
-            _ => Change::Modified,
+        if self.new_file {
+            Change::Added
+        } else if self.deleted_file {
+            Change::Deleted
+        } else {
+            source.change()
         }
     }
 
@@ -147,7 +159,6 @@ pub fn load(git: &Git, source: &Source, path: &str) -> Result<FileDiff> {
         Source::Staged => args.push("--cached".into()),
         Source::Untracked => args.push("--no-index".into()),
         Source::Commit(id) => {
-            // Against the first parent; a root commit against the empty tree.
             args.push(parent(git, id)?.map_or_else(|| EMPTY_TREE.to_owned(), |p| p.to_string()));
             args.push(id.to_string());
         }
@@ -412,7 +423,6 @@ pub fn relocate(from: &FileDiff, to: &FileDiff, at: (usize, usize)) -> Option<(u
 pub fn parse(bytes: &[u8]) -> FileDiff {
     let mut diff = FileDiff::default();
     let mut lines = split_lines(bytes).peekable();
-    // Header.
     while let Some(line) = lines.peek() {
         if line.starts_with(b"@@") {
             break;
@@ -437,7 +447,6 @@ pub fn parse(bytes: &[u8]) -> FileDiff {
         diff.header.extend_from_slice(line);
         diff.header.push(b'\n');
     }
-    // Hunks.
     let (mut old_no, mut new_no) = (0, 0);
     for line in lines {
         if line.starts_with(b"@@") {
@@ -527,6 +536,35 @@ pub(crate) enum Direction {
     Reverse,
 }
 
+/// How much of a diff's changed lines a selection takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Chosen {
+    Nothing,
+    Part,
+    All,
+}
+
+/// How much `selected(hunk, line)` takes of the changed lines of `diff`.
+pub(crate) fn chosen(diff: &FileDiff, selected: impl Fn(usize, usize) -> bool) -> Chosen {
+    let (mut any, mut all) = (false, true);
+    for (h, hunk) in diff.hunks.iter().enumerate() {
+        for (l, line) in hunk.lines.iter().enumerate() {
+            if line.is_change() {
+                if selected(h, l) {
+                    any = true;
+                } else {
+                    all = false;
+                }
+            }
+        }
+    }
+    match (any, all) {
+        (false, _) => Chosen::Nothing,
+        (true, true) => Chosen::All,
+        (true, false) => Chosen::Part,
+    }
+}
+
 /// A patch containing only the selected lines, or `None` if nothing is
 /// selected. `selected(hunk, line)` says whether a changed line is included.
 pub(crate) fn build_patch(
@@ -534,17 +572,16 @@ pub(crate) fn build_patch(
     direction: Direction,
     selected: impl Fn(usize, usize) -> bool,
 ) -> Option<Vec<u8>> {
+    let chosen = chosen(diff, &selected);
+    if chosen == Chosen::Nothing {
+        return None;
+    }
     let mut body = Vec::new();
-    let mut all = true;
-    let mut any = false;
     for (h, hunk) in diff.hunks.iter().enumerate() {
         let mut lines: Vec<(u8, &Line)> = Vec::new();
         let mut hunk_any = false;
         for (l, line) in hunk.lines.iter().enumerate() {
             let take = line.is_change() && selected(h, l);
-            if line.is_change() && !take {
-                all = false;
-            }
             hunk_any |= take;
             let marker = match (line.kind, take, direction) {
                 (Kind::Context, ..) => Some(b' '),
@@ -562,7 +599,6 @@ pub(crate) fn build_patch(
         if !hunk_any {
             continue;
         }
-        any = true;
         let old_count = lines.iter().filter(|(m, _)| *m != b'+').count();
         let new_count = lines.iter().filter(|(m, _)| *m != b'-').count();
         body.extend_from_slice(
@@ -581,10 +617,7 @@ pub(crate) fn build_patch(
             }
         }
     }
-    if !any {
-        return None;
-    }
-    let mut patch = if all {
+    let mut patch = if chosen == Chosen::All {
         diff.header.clone()
     } else {
         partial_header(diff, direction)
@@ -603,6 +636,12 @@ fn partial_header(diff: &FileDiff, direction: Direction) -> Vec<u8> {
         return diff.header.clone();
     }
     format!("diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n").into_bytes()
+}
+
+/// The header of a diff that adds `path` as a new file.
+pub(crate) fn new_file_header(path: &str) -> Vec<u8> {
+    format!("diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n")
+        .into_bytes()
 }
 
 /// Character ranges that differ between a removed and an added line, for

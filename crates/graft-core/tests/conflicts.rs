@@ -5,8 +5,9 @@ mod common;
 use std::path::Path;
 
 use common::sh;
-use graft_core::conflicts::{self, Kind, Resolution};
-use graft_core::{refs, status};
+use graft_core::Operation;
+use graft_core::conflicts::{self, Resolution};
+use graft_core::status;
 
 /// main and topic both change line 2 of f.txt; topic also deletes gone.txt
 /// which main changes.
@@ -39,7 +40,7 @@ fn merge_resolve_and_continue() {
     assert_eq!(conflicts::in_progress(dir), None);
     assert!(conflicts::merge(&git, "topic", false).unwrap());
     let progress = conflicts::in_progress(dir).expect("merge in progress");
-    assert_eq!(progress.kind, Kind::Merge);
+    assert_eq!(progress.kind, Operation::Merge);
     assert!(progress.title.contains("topic"), "{}", progress.title);
     let st = status::load(&git).unwrap();
     assert_eq!(st.conflicted().count(), 3);
@@ -72,7 +73,7 @@ fn merge_resolve_and_continue() {
     );
 
     assert_eq!(status::load(&git).unwrap().conflicted().count(), 0);
-    assert!(!conflicts::continue_op(&git, Kind::Merge).unwrap());
+    assert!(!conflicts::continue_op(&git, Operation::Merge).unwrap());
     assert_eq!(conflicts::in_progress(dir), None);
     let parents = git.read(["rev-list", "--parents", "-n1", "HEAD"]).unwrap();
     assert_eq!(parents.split_whitespace().count(), 3, "a merge commit");
@@ -92,7 +93,7 @@ fn markers_block_mark_resolved_and_abort_restores() {
     std::fs::write(dir.join("f.txt"), "a\nhand\nc\n").unwrap();
     conflicts::mark_resolved(&git, "f.txt").unwrap();
 
-    conflicts::abort(&git, Kind::Merge).unwrap();
+    conflicts::abort(&git, Operation::Merge).unwrap();
     assert_eq!(conflicts::in_progress(dir), None);
     assert_eq!(git.read(["rev-parse", "HEAD"]).unwrap(), before);
     assert_eq!(
@@ -108,11 +109,11 @@ fn cherry_pick_stops_on_conflict() {
     diverged_repo(dir);
     let git = common::git(dir);
 
-    assert!(refs::cherry_pick(&git, "topic").unwrap());
+    assert!(conflicts::cherry_pick(&git, "topic").unwrap());
     let progress = conflicts::in_progress(dir).unwrap();
-    assert_eq!(progress.kind, Kind::CherryPick);
+    assert_eq!(progress.kind, Operation::CherryPick);
     assert_eq!(progress.title, "Cherry-picking: topic work");
-    conflicts::abort(&git, Kind::CherryPick).unwrap();
+    conflicts::abort(&git, Operation::CherryPick).unwrap();
     assert_eq!(conflicts::in_progress(dir), None);
 
     // A merge that has nothing to do is not an error.
@@ -134,10 +135,10 @@ fn rebase_stops_resolve_and_continue() {
 
     assert!(conflicts::rebase(&git, "main").unwrap());
     let progress = conflicts::in_progress(dir).expect("rebase in progress");
-    assert_eq!(progress.kind, Kind::Rebase);
+    assert_eq!(progress.kind, Operation::Rebase);
     assert_eq!(progress.title, "Rebasing topic");
     // Continuing with conflicts left is refused and the rebase stays.
-    assert!(conflicts::continue_op(&git, Kind::Rebase).is_err());
+    assert!(conflicts::continue_op(&git, Operation::Rebase).is_err());
     assert!(conflicts::in_progress(dir).is_some());
 
     for path in ["f.txt", "gone.txt", "lock.json"] {
@@ -145,7 +146,7 @@ fn rebase_stops_resolve_and_continue() {
         // In a rebase "theirs" is the commit being replayed (topic's).
         conflicts::take_side(&git, &file, false).unwrap();
     }
-    assert!(!conflicts::continue_op(&git, Kind::Rebase).unwrap());
+    assert!(!conflicts::continue_op(&git, Operation::Rebase).unwrap());
     assert_eq!(conflicts::in_progress(dir), None);
     assert_eq!(sh(dir, &["symbolic-ref", "--short", "HEAD"]), "topic");
     assert_eq!(common::rev(dir, "HEAD~1"), main);
@@ -166,7 +167,7 @@ fn rebase_abort_puts_the_branch_back() {
     let before = common::rev(dir, "HEAD");
 
     assert!(conflicts::rebase(&git, "main").unwrap());
-    conflicts::abort(&git, Kind::Rebase).unwrap();
+    conflicts::abort(&git, Operation::Rebase).unwrap();
     assert_eq!(conflicts::in_progress(dir), None);
     assert_eq!(sh(dir, &["symbolic-ref", "--short", "HEAD"]), "topic");
     assert_eq!(common::rev(dir, "HEAD"), before);

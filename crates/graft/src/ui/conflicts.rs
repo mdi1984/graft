@@ -5,11 +5,10 @@
 
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, Frame, Margin, Panel, RichText, ScrollArea, Stroke, TextEdit, Ui, vec2};
-use graft_core::Worktree;
 use graft_core::conflicts::{
-    self, ConflictFile, Resolution, Segment, count_lines, first_lines, last_lines,
+    self, ConflictFile, Resolution, Segment, SideNames, count_lines, first_lines, last_lines,
 };
-use graft_core::model::{InProgress, Kind};
+use graft_core::{InProgress, Operation, Worktree};
 
 use super::widgets::{ButtonKind, button, empty_state, waiting};
 use crate::project::{Action, ConflictView, Project};
@@ -20,7 +19,7 @@ use crate::ui::Actions;
 /// Lines of clean context shown around each conflict.
 const CONTEXT: usize = 3;
 
-fn side_names(wt: &Worktree) -> (String, String) {
+fn side_names(wt: &Worktree) -> SideNames {
     conflicts::side_names(
         wt.in_progress.as_ref().map(|p| p.kind),
         wt.branch.as_deref(),
@@ -56,7 +55,7 @@ pub fn banner(ui: &mut Ui, project: &Project, wt: &Worktree, actions: &mut Actio
                         r.on_hover_text("Resolve every conflict first")
                     } else {
                         r.on_hover_text(match kind {
-                            Kind::Rebase => "Commit this step and replay the next commit",
+                            Operation::Rebase => "Commit this step and replay the next commit",
                             _ => "Commit the result",
                         })
                     };
@@ -86,10 +85,9 @@ pub fn banner(ui: &mut Ui, project: &Project, wt: &Worktree, actions: &mut Actio
 /// The resolver for `project.conflict`, in place of the diff.
 pub fn resolver(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
     let busy = project.is_operating();
-    let (ours_name, theirs_name) = project
+    let names = project
         .worktree()
-        .map(side_names)
-        .unwrap_or_else(|| ("Ours".to_owned(), "Theirs".to_owned()));
+        .map_or_else(|| conflicts::side_names(None, None), side_names);
     let Some(view) = &mut project.conflict else {
         return;
     };
@@ -108,7 +106,7 @@ pub fn resolver(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
     header(ui, view, &file, busy, actions);
 
     if file.segments.is_empty() {
-        whole_file(ui, &file, &ours_name, &theirs_name, busy, actions);
+        whole_file(ui, &file, &names, busy, actions);
         return;
     }
 
@@ -130,9 +128,7 @@ pub fn resolver(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
         .show(ui, |ui| {
             Frame::new()
                 .inner_margin(Margin::symmetric(12, 10))
-                .show(ui, |ui| {
-                    cards(ui, view, &file, &ours_name, &theirs_name, busy, actions)
-                });
+                .show(ui, |ui| cards(ui, view, &file, &names, busy, actions));
         });
 }
 
@@ -223,11 +219,11 @@ fn header(
 fn whole_file(
     ui: &mut Ui,
     file: &ConflictFile,
-    ours_name: &str,
-    theirs_name: &str,
+    names: &SideNames,
     busy: bool,
     actions: &mut Actions,
 ) {
+    let (ours_name, theirs_name) = (&names.ours.long, &names.theirs.long);
     let describe = |side: &Option<graft_core::conflicts::Side>| match side {
         None => "deleted the file",
         Some(_) if file.base.is_none() => "added the file",
@@ -293,11 +289,11 @@ fn cards(
     ui: &mut Ui,
     view: &mut ConflictView,
     file: &ConflictFile,
-    ours_name: &str,
-    theirs_name: &str,
+    names: &SideNames,
     busy: bool,
     actions: &mut Actions,
 ) {
+    let (ours_name, theirs_name) = (&names.ours.long, &names.theirs.long);
     let total = view.resolutions.len();
     let mut index = 0;
     // Line in the "ours" version where each conflict starts.
@@ -347,7 +343,7 @@ fn cards(
                     );
                     if let Some(r) = &resolution {
                         ui.label(
-                            RichText::new(format!("✓ {}", describe(r, ours_name, theirs_name)))
+                            RichText::new(format!("✓ {}", describe(r, names)))
                                 .color(color::added())
                                 .size(theme::SMALL_SIZE),
                         );
@@ -392,19 +388,19 @@ fn cards(
                             });
                         }
                     };
+                    let (ours, theirs) = (&names.ours.short, &names.theirs.short);
+                    pick(ui, &format!("Use {ours}"), Resolution::Ours);
+                    pick(ui, &format!("Use {theirs}"), Resolution::Theirs);
                     pick(
                         ui,
-                        &format!("Use {}", short_name(ours_name)),
-                        Resolution::Ours,
+                        &format!("Both ({ours} first)"),
+                        Resolution::OursThenTheirs,
                     );
                     pick(
                         ui,
-                        &format!("Use {}", short_name(theirs_name)),
-                        Resolution::Theirs,
+                        &format!("Both ({theirs} first)"),
+                        Resolution::TheirsThenOurs,
                     );
-                    let both = |first: &str| format!("Both ({} first)", short_name(first));
-                    pick(ui, &both(ours_name), Resolution::OursThenTheirs);
-                    pick(ui, &both(theirs_name), Resolution::TheirsThenOurs);
                     let editing = view.edits[i].is_some();
                     if ui
                         .add_enabled(!busy, egui::Button::selectable(editing, "Edit…"))
@@ -436,17 +432,13 @@ fn cards(
     }
 }
 
-/// "Current (main)" → "current"; "Incoming" → "incoming".
-fn short_name(name: &str) -> String {
-    name.split(" (").next().unwrap_or(name).to_lowercase()
-}
-
-fn describe(r: &Resolution, ours: &str, theirs: &str) -> String {
+fn describe(r: &Resolution, names: &SideNames) -> String {
+    let (ours, theirs) = (&names.ours.short, &names.theirs.short);
     match r {
-        Resolution::Ours => format!("using {}", short_name(ours)),
-        Resolution::Theirs => format!("using {}", short_name(theirs)),
-        Resolution::OursThenTheirs => format!("both, {} first", short_name(ours)),
-        Resolution::TheirsThenOurs => format!("both, {} first", short_name(theirs)),
+        Resolution::Ours => format!("using {ours}"),
+        Resolution::Theirs => format!("using {theirs}"),
+        Resolution::OursThenTheirs => format!("both, {ours} first"),
+        Resolution::TheirsThenOurs => format!("both, {theirs} first"),
         Resolution::Custom(_) => "edited".to_owned(),
     }
 }

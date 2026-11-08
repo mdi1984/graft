@@ -31,17 +31,11 @@ impl Commit {
     }
 }
 
-/// Walked commits, newest first, before ordering and layout.
-#[derive(Clone, Debug, Default)]
-pub struct Commits {
-    pub list: Vec<Commit>,
-}
-
 /// Walk all commits reachable from `tips`, newest first, up to `limit`.
-pub fn walk(root: &Path, tips: &[Oid], limit: usize, cancel: &CancelToken) -> Result<Commits> {
+pub fn walk(root: &Path, tips: &[Oid], limit: usize, cancel: &CancelToken) -> Result<Vec<Commit>> {
     let mut repo = gix::open(root)?;
     repo.object_cache_size_if_unset(64 * 1024 * 1024);
-    let mut commits = Commits::default();
+    let mut commits = Vec::new();
     if tips.is_empty() {
         return Ok(commits);
     }
@@ -53,7 +47,7 @@ pub fn walk(root: &Path, tips: &[Oid], limit: usize, cancel: &CancelToken) -> Re
         .all()?;
     for info in walk {
         cancel.check()?;
-        if commits.list.len() >= limit {
+        if commits.len() >= limit {
             break;
         }
         let info = info?;
@@ -61,7 +55,7 @@ pub fn walk(root: &Path, tips: &[Oid], limit: usize, cancel: &CancelToken) -> Re
         let author = commit.author()?;
         let time = author.time().map(|t| t.seconds).unwrap_or(0);
         let summary = summary_line(commit.message_raw_sloppy());
-        commits.list.push(Commit {
+        commits.push(Commit {
             id: info.id,
             parents: info.parent_ids.iter().copied().collect(),
             author: author.name.to_string(),
@@ -95,8 +89,8 @@ pub struct History {
 impl History {
     /// Order and lay out `commits`. With `worktree_parent`, a pseudo commit for
     /// uncommitted changes is shown on top of that commit.
-    pub fn build(commits: &Commits, worktree_parent: Option<Oid>) -> Self {
-        let mut list = commits.list.clone();
+    pub fn build(commits: &[Commit], worktree_parent: Option<Oid>) -> Self {
+        let mut list = commits.to_vec();
         if let Some(parent) = worktree_parent {
             list.push(Commit {
                 id: null_oid(),
@@ -191,7 +185,7 @@ pub enum LineKind {
     Out,
 }
 
-/// Number of distinct lane colors the UI provides.
+/// Number of distinct lane colors; the UI's palette has exactly this many.
 pub const LANE_COLORS: u8 = 8;
 
 /// Assign every commit a lane. Lanes keep their column for their whole life,
@@ -312,9 +306,7 @@ mod tests {
 
     #[test]
     fn linear_history_uses_one_lane() {
-        let commits = Commits {
-            list: vec![commit(3, &[2], 30), commit(2, &[1], 20), commit(1, &[], 10)],
-        };
+        let commits = [commit(3, &[2], 30), commit(2, &[1], 20), commit(1, &[], 10)];
         let h = History::build(&commits, None);
         assert_eq!(ids(&h), ["c3", "c2", "c1"]);
         assert_eq!(h.lanes, 1);
@@ -324,14 +316,12 @@ mod tests {
     #[test]
     fn branch_and_merge_get_two_lanes() {
         // 1 <- 2 <- 4 (merge of 2 and 3); 1 <- 3
-        let commits = Commits {
-            list: vec![
-                commit(4, &[2, 3], 40),
-                commit(3, &[1], 30),
-                commit(2, &[1], 20),
-                commit(1, &[], 10),
-            ],
-        };
+        let commits = [
+            commit(4, &[2, 3], 40),
+            commit(3, &[1], 30),
+            commit(2, &[1], 20),
+            commit(1, &[], 10),
+        ];
         let h = History::build(&commits, None);
         assert_eq!(ids(&h), ["c4", "c3", "c2", "c1"]);
         assert_eq!(h.lanes, 2);
@@ -358,18 +348,14 @@ mod tests {
     #[test]
     fn children_come_before_parents_despite_clock_skew() {
         // Child 2 has an older timestamp than its parent 1.
-        let commits = Commits {
-            list: vec![commit(1, &[], 50), commit(2, &[1], 10)],
-        };
+        let commits = [commit(1, &[], 50), commit(2, &[1], 10)];
         let h = History::build(&commits, None);
         assert_eq!(ids(&h), ["c2", "c1"]);
     }
 
     #[test]
     fn worktree_row_sits_on_top_of_head() {
-        let commits = Commits {
-            list: vec![commit(2, &[1], 20), commit(1, &[], 10)],
-        };
+        let commits = [commit(2, &[1], 20), commit(1, &[], 10)];
         let h = History::build(&commits, Some(oid(2)));
         assert!(h.commits[0].is_worktree());
         assert_eq!(h.commits[1].id, oid(2));

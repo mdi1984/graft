@@ -3,8 +3,8 @@
 
 use std::path::PathBuf;
 
+use graft_core::Operation;
 use graft_core::conflicts::{self, ConflictFile, Resolution, Segment};
-use graft_core::model::Kind;
 
 use super::ops::{At, say};
 use super::{Action, Confirm, DialogKind, Project, Tab, WorkspaceView, readable};
@@ -263,7 +263,7 @@ impl Project {
         );
     }
 
-    pub(super) fn continue_op(&mut self, kind: Kind) {
+    pub(super) fn continue_op(&mut self, kind: Operation) {
         let done = format!("{} finished", kind.noun());
         let stopped = "The next commit has conflicts too. Resolve them, then Continue.".to_owned();
         self.run_op(
@@ -274,7 +274,7 @@ impl Project {
         );
     }
 
-    pub(super) fn abort_op(&mut self, kind: Kind, confirmed: bool) {
+    pub(super) fn abort_op(&mut self, kind: Operation, confirmed: bool) {
         let noun = kind.noun().to_lowercase();
         if !confirmed {
             self.confirm = Some(Confirm {

@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use graft_core::refs::{no_identity, no_remote};
+use graft_core::refusal::{no_identity, no_remote};
 use graft_core::{CancelToken, Git, Progress, is_cancelled};
 
 use super::Project;

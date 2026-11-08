@@ -1,10 +1,9 @@
 //! Branches, tags and commit-level operations: create, switch, rename, delete,
-//! reset; and telling git's refusals apart.
+//! reset.
 
 use anyhow::{Result, bail};
 
-use crate::Git;
-pub use crate::conflicts::{cherry_pick, revert};
+use crate::cli::Git;
 
 /// How far `git reset` goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,12 +61,25 @@ pub fn check_ref_name(kind: RefKind, name: &str) -> Result<(), String> {
 
 /// Whether git accepts `name` as a branch name; the error says why not.
 pub fn check_branch_name(git: &Git, name: &str) -> Result<()> {
-    if let Err(why) = check_ref_name(RefKind::Branch, name) {
+    check_name(git, RefKind::Branch, name)
+}
+
+/// [`check_ref_name`], then git's own rules for a branch or tag name.
+fn check_name(git: &Git, kind: RefKind, name: &str) -> Result<()> {
+    if let Err(why) = check_ref_name(kind, name) {
         bail!(why);
     }
-    let out = git.run_raw(["check-ref-format", "--branch", name])?;
-    if !out.success() {
-        bail!("{name} is not a valid branch name.");
+    let full = match kind {
+        RefKind::Branch => None,
+        RefKind::Tag => Some(format!("refs/tags/{name}")),
+        RefKind::Remote => Some(format!("refs/remotes/{name}")),
+    };
+    let args = match &full {
+        None => vec!["check-ref-format", "--branch", name],
+        Some(full) => vec!["check-ref-format", full],
+    };
+    if !git.run_raw(args)?.success() {
+        bail!("{name} is not a valid {} name.", kind.noun());
     }
     Ok(())
 }
@@ -121,13 +133,7 @@ pub fn delete_branch(git: &Git, name: &str, force: bool) -> Result<()> {
 
 /// Create a tag at `target`; with a message it is an annotated tag.
 pub fn create_tag(git: &Git, name: &str, target: &str, message: Option<&str>) -> Result<()> {
-    if let Err(why) = check_ref_name(RefKind::Tag, name) {
-        bail!(why);
-    }
-    let out = git.run_raw(["check-ref-format", &format!("refs/tags/{name}")])?;
-    if !out.success() {
-        bail!("{name} is not a valid tag name.");
-    }
+    check_name(git, RefKind::Tag, name)?;
     match message.map(str::trim).filter(|m| !m.is_empty()) {
         Some(message) => git.run(["tag", "-a", name, "-m", message, target])?,
         None => git.run(["tag", name, target])?,
@@ -155,52 +161,6 @@ pub fn undo_last_commit(git: &Git) -> Result<()> {
     reset(git, "HEAD~1", ResetMode::Soft)
 }
 
-// Telling git's refusals apart by their message. The wording is stable
-// because every command runs with LC_ALL=C (see `cli`).
-
-/// Part of git's message when `branch -d` refuses an unmerged branch.
-pub const NOT_MERGED: &str = "not fully merged";
-
-/// Git refused to switch branches because local changes would be lost.
-pub fn blocked_by_changes(error: &str) -> bool {
-    error.contains("would be overwritten by checkout")
-        || error.contains("Please commit your changes or stash them")
-}
-
-/// Among the changes in the way ([`blocked_by_changes`]) are untracked files.
-pub fn blocked_by_untracked(error: &str) -> bool {
-    error.contains("untracked working tree files")
-}
-
-/// The files git lists between "…would be overwritten by checkout:" and
-/// "Please …", joined for a sentence.
-pub fn files_in_the_way(error: &str) -> String {
-    let files: Vec<&str> = error
-        .lines()
-        .skip_while(|l| !l.contains("would be overwritten"))
-        .skip(1)
-        .map(str::trim)
-        .take_while(|l| !l.starts_with("Please") && !l.starts_with("Aborting"))
-        .filter(|l| !l.is_empty())
-        .collect();
-    match files.len() {
-        0 => "some files".to_owned(),
-        1..=5 => files.join(", "),
-        n => format!("{} and {} more", files[..4].join(", "), n - 4),
-    }
-}
-
-/// A push or pull failed because the repository has no remote to use.
-pub fn no_remote(error: &str) -> bool {
-    error.contains("No configured push destination")
-        || error.contains("No remote repository specified")
-}
-
-/// A commit failed because git does not know the user's name and email.
-pub fn no_identity(error: &str) -> bool {
-    error.contains("Please tell me who you are") || error.contains("Author identity unknown")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,14 +176,5 @@ mod tests {
             check_ref_name(RefKind::Tag, "v 1"),
             Err("Tag names cannot contain spaces.".to_owned())
         );
-    }
-
-    #[test]
-    fn files_in_the_way_of_a_checkout() {
-        let error = "Your local changes to the following files would be overwritten by checkout:\n\
-                     \ta.txt\n\tb.txt\nPlease commit your changes or stash them before you switch branches.\nAborting";
-        assert!(blocked_by_changes(error));
-        assert!(!blocked_by_untracked(error));
-        assert_eq!(files_in_the_way(error), "a.txt, b.txt");
     }
 }
