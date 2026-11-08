@@ -11,6 +11,7 @@ use graft_core::paths::{self, native};
 use graft_core::repo::clone_folder_name;
 use graft_core::wsl::Wsl;
 
+use super::confirm;
 use super::icons::{self, Icon};
 use super::widgets::{
     ButtonKind, button, elided, elided_path, error_label, field_label, hint, paint_galley_left,
@@ -74,6 +75,8 @@ pub struct StartPage {
     /// The clone folder Graft started with, kept while the field does not
     /// resolve (e.g. `~` before the home folder is known).
     saved_clone_parent: PathBuf,
+    /// The group whose Delete waits for the user's OK, with its name.
+    delete_group: Option<(GroupId, String)>,
 }
 
 /// The installed WSL distros, listed in the background once.
@@ -142,6 +145,7 @@ impl StartPage {
             homes: HashMap::new(),
             other_fields: HashMap::new(),
             saved_clone_parent: clone_parent.clone(),
+            delete_group: None,
         };
         page.clone_parent = page.show_path(&clone_parent);
         page
@@ -394,7 +398,8 @@ impl StartPage {
                         }
                         ui.add_space(24.0);
                         if !groups.is_empty() {
-                            group_list(ui, groups, width, &mut action);
+                            let ask = &mut self.delete_group;
+                            group_list(ui, groups, width, ask, &mut action);
                             ui.add_space(16.0);
                         }
                         self.recent_list(ui, recent, width, &mut action);
@@ -403,6 +408,19 @@ impl StartPage {
                     });
                 });
             });
+        if let Some((id, name)) = &self.delete_group {
+            let body = "Only the group goes away: its repositories are not touched, and \
+                        open tabs stay open.";
+            let title = format!("Delete group {name}?");
+            match confirm::ask(ui.ctx(), &title, body, "Delete group") {
+                Some(true) => {
+                    action = Some(StartAction::DeleteGroup(*id));
+                    self.delete_group = None;
+                }
+                Some(false) => self.delete_group = None,
+                None => {}
+            }
+        }
         action
     }
 
@@ -822,7 +840,14 @@ impl StartPage {
 }
 
 /// Tab groups: click one to open all of its repositories.
-fn group_list(ui: &mut Ui, groups: &[TabGroup], width: f32, action: &mut Option<StartAction>) {
+/// "Delete group…" puts the group into `ask`, to confirm first.
+fn group_list(
+    ui: &mut Ui,
+    groups: &[TabGroup],
+    width: f32,
+    ask: &mut Option<(GroupId, String)>,
+    action: &mut Option<StartAction>,
+) {
     let (rect, _) = ui.allocate_exact_size(vec2(width, 20.0), Sense::hover());
     section_heading(ui, ui.painter(), rect.left(), rect.center().y, "GROUPS");
     for group in groups {
@@ -880,8 +905,8 @@ fn group_list(ui: &mut Ui, groups: &[TabGroup], width: f32, action: &mut Option<
                 ui.close();
             }
             ui.separator();
-            if ui.button("Delete group").clicked() {
-                *action = Some(StartAction::DeleteGroup(group.id));
+            if ui.button("Delete group…").clicked() {
+                *ask = Some((group.id, group.name.clone()));
                 ui.close();
             }
         });
