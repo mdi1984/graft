@@ -195,21 +195,13 @@ fn with_everything_added<T>(worktree: &Git, then: impl FnOnce(&Git) -> Result<T>
 /// ones (reset) and the ones the preview `added` (deleted). Other new files
 /// stay, so they are left out (and never read: one may be locked).
 fn discarded_tree(main: &Git, added: &[String]) -> Result<Oid> {
-    let mut paths = Vec::new();
-    for path in added {
-        if std::fs::symlink_metadata(main.cwd().join(path)).is_ok() {
-            paths.extend_from_slice(path.as_bytes());
-            paths.push(0);
-        }
-    }
+    let present = added
+        .iter()
+        .filter(|path| std::fs::symlink_metadata(main.cwd().join(path)).is_ok());
     with_index_copy(main, |git| {
         // Any line endings: this only compares, nothing is committed.
-        let add = ["-c", "core.safecrlf=false", "add"];
-        git.run(add.iter().chain(&["-u"]))?;
-        if !paths.is_empty() {
-            let from_stdin = ["-f", "--pathspec-from-file=-", "--pathspec-file-nul"];
-            git.run_input(add.iter().chain(&from_stdin), &paths)?;
-        }
+        git.run(["-c", "core.safecrlf=false", "add", "-u"])?;
+        git.run_paths(&["-c", "core.safecrlf=false", "add", "-f"], present)?;
         let id = git.read(["write-tree"])?;
         Ok(Oid::from_hex(id.trim().as_bytes())?)
     })

@@ -10,34 +10,19 @@ use crate::paths::{display, has_recycle_bin};
 
 /// Stage whole files (including deletions).
 pub fn stage_paths(git: &Git, paths: &[String]) -> Result<()> {
-    if paths.is_empty() {
-        return Ok(());
-    }
-    let mut args = vec!["add", "-A", "--"];
-    args.extend(paths.iter().map(String::as_str));
-    git.run(args)?;
-    Ok(())
+    git.run_paths(&["add", "-A"], paths)
 }
 
-/// Move staged changes of whole files back to the working tree. A staged
-/// rename is a deletion and an addition: unstaging its new path puts both
-/// back, or the old file would stay staged as deleted.
+/// Move staged changes of whole files back to the working tree (before the
+/// first commit too). A staged rename is a deletion and an addition:
+/// unstaging its new path puts both back, or the old file would stay staged
+/// as deleted.
 pub fn unstage_paths(git: &Git, paths: &[String]) -> Result<()> {
     if paths.is_empty() {
         return Ok(());
     }
-    if !has_head(git)? {
-        // Before the first commit there is nothing to restore from.
-        let mut args = vec!["rm", "--cached", "-r", "-q", "--"];
-        args.extend(paths.iter().map(String::as_str));
-        git.run(args)?;
-        return Ok(());
-    }
     let sources = renamed_from(git, paths)?;
-    let mut args = vec!["restore", "--staged", "--"];
-    args.extend(paths.iter().chain(&sources).map(String::as_str));
-    git.run(args)?;
-    Ok(())
+    git.run_paths(&["reset", "-q"], paths.iter().chain(&sources))
 }
 
 /// The old paths of the staged renames whose new path is in `paths`, as
@@ -74,17 +59,11 @@ fn has_head(git: &Git) -> Result<bool> {
 /// with intent (`add -N`), then go to the Recycle Bin, not oblivion. Where
 /// Windows has none (see [`has_recycle_bin`]) they are deleted for good.
 pub fn discard_paths(git: &Git, tracked: &[String], untracked: &[String]) -> Result<()> {
-    if !tracked.is_empty() {
-        let mut args = vec!["restore", "--worktree", "--"];
-        args.extend(tracked.iter().map(String::as_str));
-        git.run(args)?;
-    }
+    git.run_paths(&["restore", "--worktree"], tracked)?;
     if !untracked.is_empty() {
         // Out of the index first: if that fails, the files are still there
         // (never an intent-to-add entry for a missing file).
-        let mut args = vec!["rm", "--cached", "--ignore-unmatch", "-q", "--"];
-        args.extend(untracked.iter().map(String::as_str));
-        git.run(args)?;
+        git.run_paths(&["rm", "--cached", "--ignore-unmatch", "-q"], untracked)?;
         let files: Vec<_> = untracked.iter().map(|p| git.cwd().join(p)).collect();
         if has_recycle_bin(git.cwd()) {
             trash::delete_all(&files).context("move untracked files to the Recycle Bin")?;

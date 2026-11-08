@@ -639,3 +639,51 @@ fn unstaging_lines_of_a_renamed_file() {
     assert_eq!(sh(&dir, &["ls-files", "--", "a.txt"]), "");
     assert_eq!(short_status(), "RM a.txt -> b.txt");
 }
+
+/// Before the first commit, unstaging a file staged and then edited again
+/// takes it out of the index and leaves the edit alone, with the rest of
+/// the batch.
+#[test]
+fn unstaging_before_the_first_commit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = common::init(&tmp.path().join("r"));
+    let git = common::git(&dir);
+    std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+    std::fs::write(dir.join("b.txt"), "b\n").unwrap();
+    ops::stage_paths(&git, &["a.txt".into(), "b.txt".into()]).unwrap();
+    std::fs::write(dir.join("a.txt"), "two\n").unwrap();
+
+    ops::unstage_paths(&git, &["a.txt".into(), "b.txt".into()]).unwrap();
+    let status = sh(&dir, &["status", "--porcelain", "--untracked-files=all"]);
+    assert_eq!(status, "?? a.txt\n?? b.txt");
+    assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "two\n");
+}
+
+/// Stage all, unstage all and discard with more paths than fit on a
+/// Windows command line (32,767 characters).
+#[test]
+fn whole_files_beyond_the_command_line_limit() {
+    let (_tmp, git) = repo();
+    let dir = git.cwd().to_path_buf();
+    let names: Vec<String> = (0..300)
+        .map(|i| format!("{i:03}-{}.txt", "x".repeat(120)))
+        .collect();
+    assert!(names.iter().map(|n| n.len() + 1).sum::<usize>() > 32_767);
+    for name in &names {
+        std::fs::write(dir.join(name), "new\n").unwrap();
+    }
+    let staged = || sh(&dir, &["diff", "--cached", "--name-only"]);
+
+    ops::stage_paths(&git, &names).unwrap();
+    assert_eq!(staged().lines().count(), names.len());
+    ops::unstage_paths(&git, &names).unwrap();
+    assert_eq!(staged(), "");
+
+    ops::stage_paths(&git, &names).unwrap();
+    sh(&dir, &["commit", "-q", "-m", "many"]);
+    for name in &names {
+        std::fs::write(dir.join(name), "changed\n").unwrap();
+    }
+    ops::discard_paths(&git, &names, &[]).unwrap();
+    assert_eq!(sh(&dir, &["status", "--porcelain"]), "");
+}

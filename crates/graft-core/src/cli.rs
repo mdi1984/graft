@@ -252,6 +252,27 @@ impl Git {
         self.run_accepting(args, Some(input), Output::success)
     }
 
+    /// Run git on `paths`, fed as pathspecs on stdin: a long list does not
+    /// fit on the command line (32,767 characters on Windows and for
+    /// wsl.exe). Does nothing without paths, which would mean every file.
+    pub(crate) fn run_paths<'a>(
+        &self,
+        args: &[&str],
+        paths: impl IntoIterator<Item = &'a String>,
+    ) -> Result<()> {
+        let mut input = Vec::new();
+        for path in paths {
+            input.extend_from_slice(path.as_bytes());
+            input.push(0);
+        }
+        if input.is_empty() {
+            return Ok(());
+        }
+        let from_stdin = ["--pathspec-from-file=-", "--pathspec-file-nul"];
+        self.run_input(args.iter().chain(&from_stdin), &input)?;
+        Ok(())
+    }
+
     /// Run git and return stdout as (lossy) UTF-8.
     pub fn read<I, S>(&self, args: I) -> Result<String>
     where
