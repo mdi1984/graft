@@ -17,6 +17,17 @@ pub(crate) fn is_binary(content: &[u8]) -> bool {
     content.iter().take(BINARY_PROBE).any(|b| *b == 0)
 }
 
+/// Number of lines in a file or a piece of one, blank lines included (a
+/// last line without `\n` counts), the way git counts added lines.
+pub fn count_lines(text: &[u8]) -> usize {
+    let n = text.iter().filter(|b| **b == b'\n').count();
+    if text.last().is_some_and(|b| *b != b'\n') {
+        n + 1
+    } else {
+        n
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileChange {
     pub path: String,
@@ -117,6 +128,13 @@ fn apply_numstat(files: &mut [FileChange], bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_lines_like_git() {
+        assert_eq!(count_lines(b"a\nb"), 2);
+        assert_eq!(count_lines(b"a\n\nb\n"), 3);
+        assert_eq!(count_lines(b""), 0);
+    }
 
     #[test]
     fn name_status_and_numstat() {

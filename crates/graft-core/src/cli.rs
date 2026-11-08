@@ -490,7 +490,10 @@ fn inherited_config(count: usize) -> Vec<String> {
 /// Settings every git command Graft runs gets, added after any the user
 /// passes in the environment (`GIT_CONFIG_COUNT`), without touching their
 /// config files.
-const CONFIG: [(&str, &str); 2] = [
+///
+/// Most of them undo user settings that change the output Graft reads, so every
+/// command (and every caller) gets git's plain machine-readable form.
+const CONFIG: [(&str, &str); 8] = [
     // Paths past Windows' old 260-character limit (deep node_modules or
     // target folders), e.g. when removing a worktree. Off by default in Git
     // for Windows.
@@ -498,6 +501,18 @@ const CONFIG: [(&str, &str); 2] = [
     // Paths in git's output as they are (UTF-8), not with non-ASCII bytes
     // escaped as octal: Graft shows and passes them back as they come.
     ("core.quotepath", "false"),
+    // No "gpg: Signature made ..." lines in `show`/`log` output (commit
+    // messages, details, file history).
+    ("log.showSignature", "false"),
+    // Patches keep their `a/` and `b/` prefixes: Graft parses the headers
+    // and `git apply` (staging lines, Preview in main) expects them.
+    ("diff.noprefix", "false"),
+    ("diff.mnemonicPrefix", "false"),
+    ("diff.srcPrefix", "a/"),
+    ("diff.dstPrefix", "b/"),
+    // Empty context lines keep their leading space, as `git apply` and
+    // Graft's diff parser read them.
+    ("diff.suppressBlankEmpty", "false"),
 ];
 
 fn extra_config(start: usize) -> Vec<(String, String)> {
@@ -588,6 +603,10 @@ mod tests {
         assert_eq!(config_value(cmd, "core.longpaths"), "true");
         let cmd = git.command("git").unwrap();
         assert_eq!(config_value(cmd, "core.quotepath"), "false");
+        let cmd = git.command("git").unwrap();
+        assert_eq!(config_value(cmd, "log.showsignature"), "false");
+        let cmd = git.command("git").unwrap();
+        assert_eq!(config_value(cmd, "diff.noprefix"), "false");
     }
 
     /// Settings the user passes in the environment (`GIT_CONFIG_COUNT`)

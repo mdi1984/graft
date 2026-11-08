@@ -149,17 +149,10 @@ impl FileDiff {
 
 /// Load the diff of one file.
 pub fn load(git: &Git, source: &Source, path: &str) -> Result<FileDiff> {
-    let mut args: Vec<String> = [
-        "diff",
-        "--no-color",
-        "--no-ext-diff",
-        "--histogram",
-        "--src-prefix=a/",
-        "--dst-prefix=b/",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
+    let mut args: Vec<String> = ["diff", "--no-color", "--no-ext-diff", "--histogram"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     match source {
         Source::Unstaged => {}
         Source::Staged => args.push("--cached".into()),

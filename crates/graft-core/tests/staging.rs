@@ -287,3 +287,32 @@ fn expanded_diffs_stage_unstage_and_discard() {
     .unwrap();
     assert_eq!(gaps, None);
 }
+
+/// A user with `log.showSignature` on still amends just the message: the
+/// signature check git prints is not read as part of it.
+#[test]
+fn amend_message_of_a_signed_commit_has_no_signature_lines() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = common::init(&tmp.path().join("r"));
+    let key = tmp.path().join("key");
+    let made = std::process::Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-C", "test", "-f"])
+        .arg(&key)
+        .status();
+    if !made.is_ok_and(|s| s.success()) {
+        eprintln!("ssh-keygen is not available; skipping");
+        return;
+    }
+    sh(&dir, &["config", "gpg.format", "ssh"]);
+    sh(&dir, &["config", "user.signingkey", key.to_str().unwrap()]);
+    sh(
+        &dir,
+        &["commit", "-q", "-S", "--allow-empty", "-m", "Signed"],
+    );
+    sh(&dir, &["config", "log.showSignature", "true"]);
+    let git = common::git(&dir);
+    assert_eq!(
+        ops::last_commit_message(&git).unwrap().as_deref(),
+        Some("Signed")
+    );
+}

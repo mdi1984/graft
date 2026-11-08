@@ -100,3 +100,45 @@ fn review_base_follows_the_remote_default_branch() {
     sh(dir, &["branch", "-q", "-D", "main", "feature"]);
     assert_eq!(base("development").as_deref(), Some("origin/development"));
 }
+
+/// Blank lines of an untracked file count as added lines, as git counts
+/// them for a committed file.
+#[test]
+fn untracked_blank_lines_count() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = &common::init(&tmp.path().join("r"));
+    common::commit(dir, "a.txt", "a\n", "base");
+    sh(dir, &["switch", "-q", "-c", "feature"]);
+    std::fs::write(dir.join("new.txt"), "one\n\ntwo\n\n").unwrap();
+    common::commit(dir, "committed.txt", "one\n\ntwo\n\n", "same text");
+
+    let r = review::load(&common::git(dir), "main").unwrap();
+    let get = |p: &str| r.files.iter().find(|f| f.change.path == p).unwrap();
+    assert_eq!(get("committed.txt").change.added, Some(4));
+    assert_eq!(get("new.txt").change.added, Some(4));
+}
+
+/// A submodule (a folder in the list) and an untracked repository inside
+/// the worktree do not break the review.
+#[test]
+fn folders_do_not_break_the_review() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = &common::init(&tmp.path().join("r"));
+    common::commit(dir, "a.txt", "a\n", "base");
+    sh(dir, &["switch", "-q", "-c", "feature"]);
+    // A nested repository committed as a gitlink, like a submodule.
+    let sub = common::init(&dir.join("sub"));
+    common::commit(&sub, "s.txt", "s\n", "sub");
+    sh(dir, &["add", "sub"]);
+    sh(dir, &["commit", "-q", "-m", "add sub"]);
+    // An untracked repository: git lists it as `nested/`.
+    let nested = common::init(&dir.join("nested"));
+    common::commit(&nested, "n.txt", "n\n", "nested");
+    std::fs::write(dir.join("b.txt"), "b\n").unwrap();
+
+    let r = review::load(&common::git(dir), "main").unwrap();
+    let paths: Vec<&str> = r.files.iter().map(|f| f.change.path.as_str()).collect();
+    assert_eq!(paths, ["b.txt", "sub"]);
+    let b = r.files.iter().find(|f| f.change.path == "b.txt").unwrap();
+    assert!(!b.content.is_empty(), "files still get their content hash");
+}

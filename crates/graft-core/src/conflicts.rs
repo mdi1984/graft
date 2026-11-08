@@ -408,16 +408,6 @@ pub fn mark_resolved(git: &Git, path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Number of lines in a piece of a file (a last line without `\n` counts).
-pub fn count_lines(text: &[u8]) -> usize {
-    let n = text.iter().filter(|b| **b == b'\n').count();
-    if text.last().is_some_and(|b| *b != b'\n') {
-        n + 1
-    } else {
-        n
-    }
-}
-
 /// The last `n` lines of `text`, for context above a conflict.
 pub fn last_lines(text: &[u8], n: usize) -> String {
     let text = String::from_utf8_lossy(text);
@@ -477,8 +467,6 @@ mod tests {
 
     #[test]
     fn context_lines() {
-        assert_eq!(count_lines(b"a\nb"), 2);
-        assert_eq!(count_lines(b"a\nb\n"), 2);
         assert_eq!(last_lines(b"1\n2\n3\n", 2), "2\n3");
         assert_eq!(first_lines(b"1\n2\n3\n", 2), "1\n2");
     }

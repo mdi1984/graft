@@ -39,8 +39,6 @@ impl CommitDetails {
 pub fn load(git: &Git, id: Oid) -> Result<CommitDetails> {
     let hex = id.to_string();
     let out = git.run([
-        "-c",
-        "log.showSignature=false",
         "show",
         "-s",
         "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%cn%x00%ce%x00%ct%x00%B",

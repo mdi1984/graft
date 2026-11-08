@@ -5,8 +5,9 @@
 
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, Frame, Margin, Panel, RichText, ScrollArea, Stroke, TextEdit, Ui, vec2};
+use graft_core::changes::count_lines;
 use graft_core::conflicts::{
-    self, ConflictFile, Piece, Resolution, Segment, SideNames, count_lines, first_lines, last_lines,
+    self, ConflictFile, Piece, Resolution, Segment, SideNames, first_lines, last_lines,
 };
 use graft_core::{InProgress, Operation, Worktree};
 

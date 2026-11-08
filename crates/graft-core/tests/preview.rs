@@ -161,3 +161,35 @@ fn a_failed_apply_keeps_main_files() {
         Some("mine\n")
     );
 }
+
+/// A user with `diff.noprefix` (or `diff.mnemonicPrefix`) still gets a
+/// preview: the patch Graft makes keeps the prefixes `git apply` expects.
+#[test]
+fn preview_works_with_diff_prefix_settings() {
+    for (key, value) in [("diff.noprefix", "true"), ("diff.mnemonicPrefix", "true")] {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = common::init(&tmp.path().join("app"));
+        sh(&main, &["config", key, value]);
+        common::commit(&main, "a.txt", "one\n", "a");
+        let git = common::git(&main);
+        let agent = tmp.path().join("agent");
+        worktree::add(
+            &git,
+            &agent,
+            &Start::NewBranch {
+                name: "agent/x".into(),
+                base: "main".into(),
+            },
+        )
+        .unwrap();
+        std::fs::write(agent.join("a.txt"), "one\ntwo\n").unwrap();
+
+        preview::start(&git, &git.at(&agent)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(main.join("a.txt")).unwrap(),
+            "one\ntwo\n",
+            "{key}"
+        );
+        preview::restore_main(&git).unwrap();
+    }
+}

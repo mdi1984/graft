@@ -7,7 +7,7 @@ use std::io::Read;
 
 use anyhow::{Context, Result};
 
-use crate::changes::{FileChange, between, is_binary};
+use crate::changes::{FileChange, between, count_lines, is_binary};
 use crate::cli::Git;
 use crate::model::{Change, ORIGIN, Oid, RepoSnapshot};
 
@@ -104,10 +104,12 @@ pub fn load(git: &Git, base: &str) -> Result<Review> {
         })
         .collect();
 
+    // A trailing `/` is an untracked repository inside the worktree: a
+    // folder, not a file to show or hash.
     for path in untracked?
         .stdout
         .split(|b| *b == 0)
-        .filter(|p| !p.is_empty())
+        .filter(|p| !p.is_empty() && !p.ends_with(b"/"))
     {
         let path = String::from_utf8_lossy(path).into_owned();
         // Only the start of a huge file (a stray dump or build output): its
@@ -116,10 +118,7 @@ pub fn load(git: &Git, base: &str) -> Result<Review> {
         let complete = std::fs::File::open(git.cwd().join(&path))
             .and_then(|f| f.take(MAX_COUNTED + 1).read_to_end(&mut bytes))
             .is_ok_and(|n| n as u64 <= MAX_COUNTED);
-        let lines = bytes
-            .split(|b| *b == b'\n')
-            .filter(|l| !l.is_empty())
-            .count();
+        let lines = count_lines(&bytes);
         let counted = complete && !is_binary(&bytes);
         files.push(ReviewFile {
             change: FileChange {
@@ -136,9 +135,14 @@ pub fn load(git: &Git, base: &str) -> Result<Review> {
     }
     files.sort_by(|a, b| a.change.path.cmp(&b.change.path));
 
-    // Content hashes of everything that still exists, in one call.
+    // Content hashes of every file that still exists, in one call. A
+    // folder (a submodule) has no content to hash; its mark stays keyed by
+    // path alone.
     let present: Vec<usize> = (0..files.len())
-        .filter(|&i| files[i].change.change != Change::Deleted)
+        .filter(|&i| {
+            files[i].change.change != Change::Deleted
+                && !git.cwd().join(&files[i].change.path).is_dir()
+        })
         .collect();
     if !present.is_empty() {
         let mut input = Vec::new();
