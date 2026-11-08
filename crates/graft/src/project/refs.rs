@@ -237,6 +237,11 @@ impl Project {
         }
         let snap = self.snapshot.as_deref();
         match kind {
+            DialogKind::RenameBranch { old, .. }
+                if let Some(reason) = snap.and_then(|s| s.rename_blocked(old)) =>
+            {
+                Some(reason.to_owned())
+            }
             DialogKind::NewBranch { name, .. }
             | DialogKind::RenameBranch { name, .. }
             | DialogKind::StashBranch { name, .. } => {

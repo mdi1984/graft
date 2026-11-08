@@ -14,6 +14,9 @@ pub(crate) const DEFAULT_BRANCHES: [&str; 4] = ["main", "master", "trunk", "deve
 /// The remote `git clone` sets up: the one to use when there is a choice.
 pub const ORIGIN: &str = "origin";
 
+/// Why main must stay as it is while it shows a preview.
+const PREVIEW_SHOWN: &str = "The main folder shows a preview. Restore main first.";
+
 /// Everything the sidebar, toolbar and tabs need to know about one repository.
 #[derive(Clone, Debug, Default)]
 pub struct RepoSnapshot {
@@ -51,8 +54,13 @@ impl RepoSnapshot {
     /// Restore main would leave what that made behind.
     pub fn head_blocked(&self, path: &Path) -> Option<&'static str> {
         let main = self.main_worktree()?;
-        (self.preview.is_some() && same_path(&main.path, path))
-            .then_some("The main folder shows a preview. Restore main first.")
+        (self.preview.is_some() && same_path(&main.path, path)).then_some(PREVIEW_SHOWN)
+    }
+
+    /// Why the branch `name` must not be renamed now: Restore main goes
+    /// back to it by name.
+    pub fn rename_blocked(&self, name: &str) -> Option<&'static str> {
+        (self.preview.is_some() && self.main_branch() == Some(name)).then_some(PREVIEW_SHOWN)
     }
 
     /// The branch the main worktree is on. During a preview git sees main

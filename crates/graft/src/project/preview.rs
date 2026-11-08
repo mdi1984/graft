@@ -148,6 +148,30 @@ mod tests {
         assert_eq!(tip(&main, "HEAD"), before);
     }
 
+    /// Renaming the branch Restore main goes back to is refused during a
+    /// preview (Restore would find no branch); other branches rename.
+    #[test]
+    fn main_branch_keeps_its_name_during_a_preview() {
+        let (_dir, main, mut project) = previewing();
+        let snap = project.snapshot.clone().unwrap();
+        assert!(snap.rename_blocked("main").is_some());
+        assert!(snap.rename_blocked("agent").is_none());
+        project.apply(Action::OpenDialog(
+            crate::project::DialogKind::RenameBranch {
+                old: "main".to_owned(),
+                name: "renamed".to_owned(),
+            },
+        ));
+        project.apply(Action::SubmitDialog);
+        assert!(!project.is_operating());
+        let error = project.dialog.as_ref().and_then(|d| d.error.as_deref());
+        assert_eq!(
+            error,
+            Some("The main folder shows a preview. Restore main first.")
+        );
+        assert!(!tip(&main, "refs/heads/main").is_empty());
+    }
+
     /// A commit made in main during the preview by other means (git itself)
     /// is not left behind without asking.
     #[test]

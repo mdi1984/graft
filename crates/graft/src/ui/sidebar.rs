@@ -486,10 +486,11 @@ fn branch_menu(
         actions,
         Action::OpenDialog(DialogKind::new_branch(name, name)),
     );
+    let rename = act.clone().unless(repo.rename_blocked(name));
     can_item(
         ui,
         "Rename…",
-        &act,
+        &rename,
         actions,
         Action::OpenDialog(DialogKind::RenameBranch {
             old: name.to_owned(),
