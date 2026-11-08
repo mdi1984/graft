@@ -313,19 +313,35 @@ impl Git {
         &self,
         args: &[&str],
         cancel: &CancelToken,
-        mut on_progress: impl FnMut(Progress),
+        on_progress: impl FnMut(Progress),
     ) -> Result<()> {
-        let out = self.run_with_progress(args, cancel, |line| on_progress(parse_progress(line)))?;
-        if !out.success() {
+        self.run_progress_accepting(args, cancel, on_progress, Output::success)?;
+        Ok(())
+    }
+
+    /// [`Git::run_progress`], but `accept` says which outcomes are not
+    /// failures (e.g. a pull that stopped with conflicts).
+    pub(crate) fn run_progress_accepting(
+        &self,
+        args: &[&str],
+        cancel: &CancelToken,
+        mut on_progress: impl FnMut(Progress),
+        accept: impl Fn(&Output) -> bool,
+    ) -> Result<Output> {
+        let out = self.run_with_progress(args, cancel, &accept, |line| {
+            on_progress(parse_progress(line))
+        })?;
+        if !accept(&out) {
             bail!("{}", failure_message(&out));
         }
-        Ok(())
+        Ok(out)
     }
 
     fn run_with_progress(
         &self,
         args: &[&str],
         cancel: &CancelToken,
+        expected: impl Fn(&Output) -> bool,
         mut on_progress: impl FnMut(&str),
     ) -> Result<Output> {
         let args = collect(args);
@@ -386,14 +402,16 @@ impl Git {
             stdout: stdout_reader.join().expect("stdout reader"),
             stderr: keep_final_progress(&stderr),
         };
-        self.console.push(Entry::finished(
+        let mut entry = Entry::finished(
             &self.cwd,
             &args,
             output.status,
             started.elapsed(),
             &output.stdout,
             &output.stderr,
-        ));
+        );
+        entry.expected = expected(&output);
+        self.console.push(entry);
         if cancel.is_cancelled() {
             return Err(Cancelled.into());
         }

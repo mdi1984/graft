@@ -63,7 +63,7 @@ fn run_may_conflict(git: &Git, args: &[&str]) -> Result<bool> {
 }
 
 /// Git stopped because of conflicts (rather than failing).
-fn stopped(out: &Output) -> bool {
+pub(crate) fn stopped(out: &Output) -> bool {
     stopped_with_conflicts(&format!("{}\n{}", out.stdout_str(), out.stderr_str()))
 }
 

@@ -124,3 +124,44 @@ fn force_push_from_a_fresh_clone() {
     remote::force_push(&git, &CancelToken::default(), |_| {}).unwrap();
     assert_eq!(common::rev(&server, "x"), common::rev(&clone, "HEAD"));
 }
+
+/// A pull that stops with conflicts (merging or rebasing, as pull.rebase
+/// says) reports them, rather than failing with fetch's progress lines.
+#[test]
+fn a_pull_that_conflicts_stops_for_resolving() {
+    for rebase in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = common::init_bare(&tmp.path().join("server.git"));
+        let dir = common::init(&tmp.path().join("app"));
+        common::commit(&dir, "a.txt", "a\n", "a");
+        sh(&dir, &["push", "-q", server.to_str().unwrap(), "main"]);
+        let mine = common::clone(&server, &tmp.path().join("mine"));
+        let theirs = common::clone(&server, &tmp.path().join("theirs"));
+        common::commit(&theirs, "a.txt", "theirs\n", "theirs");
+        sh(&theirs, &["push", "-q"]);
+        common::commit(&mine, "a.txt", "mine\n", "mine");
+        sh(&mine, &["config", "pull.rebase", &rebase.to_string()]);
+
+        let git = common::git(&mine);
+        let stopped = remote::pull(&git, &CancelToken::default(), |_| {}).unwrap();
+        assert!(stopped, "rebase: {rebase}");
+        let marker = if rebase { "rebase-merge" } else { "MERGE_HEAD" };
+        assert!(mine.join(".git").join(marker).exists(), "rebase: {rebase}");
+        let status = sh(&mine, &["status", "--porcelain"]);
+        assert_eq!(status, "UU a.txt", "rebase: {rebase}");
+    }
+    // A pull git refuses (local changes in the way) still fails.
+    let tmp = tempfile::tempdir().unwrap();
+    let server = common::init_bare(&tmp.path().join("server.git"));
+    let dir = common::init(&tmp.path().join("app"));
+    common::commit(&dir, "a.txt", "a\n", "a");
+    sh(&dir, &["remote", "add", "origin", server.to_str().unwrap()]);
+    sh(&dir, &["push", "-q", "-u", "origin", "main"]);
+    let other = common::clone(&server, &tmp.path().join("other"));
+    common::commit(&other, "a.txt", "other\n", "other");
+    sh(&other, &["push", "-q"]);
+    std::fs::write(dir.join("a.txt"), "edited\n").unwrap();
+    let git = common::git(&dir);
+    let error = remote::pull(&git, &CancelToken::default(), |_| {}).unwrap_err();
+    assert!(format!("{error:#}").contains("overwritten"), "{error:#}");
+}

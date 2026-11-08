@@ -3,7 +3,8 @@
 
 use anyhow::{Result, bail};
 
-use crate::cli::{Git, Progress};
+use crate::cli::{Git, Output, Progress};
+use crate::conflicts;
 use crate::jobs::CancelToken;
 use crate::model::{ORIGIN, Upstream, branch_name, local_ref};
 use crate::refs::{self, RefKind};
@@ -79,13 +80,16 @@ pub fn pull_check<'a>(branch: &str, upstream: &'a Upstream) -> Result<&'a str, S
     }
 }
 
-/// Pull the current branch from its upstream (merge or rebase, as configured).
-pub fn pull(git: &Git, cancel: &CancelToken, on_progress: impl FnMut(Progress)) -> Result<()> {
+/// Pull the current branch from its upstream (merge or rebase, as
+/// configured). Ok(true): stopped with conflicts.
+pub fn pull(git: &Git, cancel: &CancelToken, on_progress: impl FnMut(Progress)) -> Result<bool> {
     let branch = current_branch(git)?;
     if let Err(why) = pull_check(&branch, &upstream(git)?) {
         bail!(why);
     }
-    git.run_progress(&["pull", "--progress"], cancel, on_progress)
+    let accept = |o: &Output| o.success() || conflicts::stopped(o);
+    let out = git.run_progress_accepting(&["pull", "--progress"], cancel, on_progress, accept)?;
+    Ok(!out.success())
 }
 
 /// Push the current branch (see [`push_plan`]).

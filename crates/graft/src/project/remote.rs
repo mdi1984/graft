@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use graft_core::refusal::rejected_push;
 use graft_core::{CancelToken, Git, Progress, remote};
 
+use super::conflicts::after_conflicts;
 use super::ops::{At, quietly, say};
 use super::{Action, Confirm, Project};
 
@@ -44,8 +45,14 @@ impl RemoteOp {
     }
 }
 
-/// How a remote operation ends: what it says, or offers.
-type Ending = Box<dyn FnOnce(&mut Project, PathBuf, anyhow::Result<()>) + Send>;
+/// How a remote operation ends: what it says, or offers. Ok(true): a pull
+/// stopped with conflicts.
+type Ending = Box<dyn FnOnce(&mut Project, PathBuf, anyhow::Result<bool>) + Send>;
+
+/// The ending of an operation that cannot stop with conflicts.
+fn plain(end: impl FnOnce(&mut Project, PathBuf, anyhow::Result<()>) + Send + 'static) -> Ending {
+    Box::new(move |p, ran_in, result| end(p, ran_in, result.map(|_| ())))
+}
 
 impl Project {
     /// Talk to the remote from the selected worktree (a force push: from
@@ -63,28 +70,35 @@ impl Project {
     pub(super) fn remote_in(&mut self, worktree: PathBuf, op: RemoteOp) {
         let label = op.label();
         let done: Ending = match &op {
-            RemoteOp::Fetch => Box::new(quietly),
-            RemoteOp::Pull => Box::new(say("Pulled".to_owned())),
-            RemoteOp::Push => Box::new(|p: &mut Project, ran_in, result| p.pushed(ran_in, result)),
-            RemoteOp::ForcePush { .. } => Box::new(say("Force pushed".to_owned())),
+            RemoteOp::Fetch => plain(quietly),
+            RemoteOp::Pull => Box::new(after_conflicts(
+                "Pulled".to_owned(),
+                "Pulling".to_owned(),
+                None,
+            )),
+            RemoteOp::Push => plain(|p: &mut Project, ran_in, result| p.pushed(ran_in, result)),
+            RemoteOp::ForcePush { .. } => plain(say("Force pushed".to_owned())),
             RemoteOp::PushTag { remote, tag } => {
-                Box::new(say(format!("Pushed tag {tag} to {remote}")))
+                plain(say(format!("Pushed tag {tag} to {remote}")))
             }
             RemoteOp::DeleteRemoteBranch { remote, branch } => {
-                Box::new(say(format!("Deleted {remote}/{branch}")))
+                plain(say(format!("Deleted {remote}/{branch}")))
             }
         };
-        let job = move |git: Git, cancel: &CancelToken, report: &dyn Fn(Progress)| match op {
-            RemoteOp::Fetch => remote::fetch(&git, false, cancel, report),
-            RemoteOp::Pull => remote::pull(&git, cancel, report),
-            RemoteOp::Push => remote::push(&git, cancel, report),
-            RemoteOp::ForcePush { .. } => remote::force_push(&git, cancel, report),
-            RemoteOp::PushTag { remote, tag } => {
-                remote::push_tag(&git, &remote, &tag, cancel, report)
-            }
-            RemoteOp::DeleteRemoteBranch { remote, branch } => {
-                remote::delete_remote_branch(&git, &remote, &branch, cancel, report)
-            }
+        let job = move |git: Git, cancel: &CancelToken, report: &dyn Fn(Progress)| {
+            let ran = match op {
+                RemoteOp::Pull => return remote::pull(&git, cancel, report),
+                RemoteOp::Fetch => remote::fetch(&git, false, cancel, report),
+                RemoteOp::Push => remote::push(&git, cancel, report),
+                RemoteOp::ForcePush { .. } => remote::force_push(&git, cancel, report),
+                RemoteOp::PushTag { remote, tag } => {
+                    remote::push_tag(&git, &remote, &tag, cancel, report)
+                }
+                RemoteOp::DeleteRemoteBranch { remote, branch } => {
+                    remote::delete_remote_branch(&git, &remote, &branch, cancel, report)
+                }
+            };
+            ran.map(|()| false)
         };
         self.run_long(At::Path(worktree), &label, job, done);
     }
@@ -278,5 +292,35 @@ mod tests {
         });
         assert_eq!(project.notices.len(), 1, "{:?}", project.notices);
         assert_eq!(tip(&origin, "a"), theirs);
+    }
+
+    /// A pull of a that stops with conflicts says so and opens them in a's
+    /// File status, even with b selected by then.
+    #[test]
+    fn a_pull_with_conflicts_opens_them() {
+        let Setup {
+            _dir: dir,
+            mut project,
+            origin,
+            a,
+            b,
+        } = setup();
+        git(&a, &["push", "-q", "-u", "origin", "a"]);
+        let colleague = dir.path().join("colleague");
+        let url = origin.to_str().unwrap();
+        git(dir.path(), &["clone", "-q", "-b", "a", url, "colleague"]);
+        std::fs::write(colleague.join("a.txt"), "theirs\n").unwrap();
+        git(&colleague, &["commit", "-q", "-am", "theirs"]);
+        git(&colleague, &["push", "-q", "origin", "a"]);
+        std::fs::write(a.join("a.txt"), "mine\n").unwrap();
+        git(&a, &["commit", "-q", "-am", "mine"]);
+        project.apply(Action::Remote(RemoteOp::Pull));
+        project.apply(Action::OpenWorktree(b));
+        wait(&mut project, "the pull never ended", |p| !p.is_operating());
+        assert!(project.notices.is_empty(), "{:?}", project.notices);
+        let said = project.infos.last().unwrap();
+        assert!(said.contains("Pulling stopped with conflicts"), "{said}");
+        assert!(same_path(&project.nav.worktree, &a));
+        assert_eq!(project.nav.view, crate::project::WorkspaceView::FileStatus);
     }
 }
