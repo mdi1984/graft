@@ -235,11 +235,20 @@ fn a_line_like_a_marker_is_content() {
     assert_eq!(sh(dir, &["show", ":doc.md"]), "theirs text");
 
     // Marker lines that still reach a result are refused, never staged.
-    let marker = format!("{}\n", "=".repeat(41));
+    let marker = format!("{} theirs\n", ">".repeat(41));
     let error = conflicts::resolve_with(&git, &file, marker.as_bytes()).unwrap_err();
     assert!(
         format!("{error:#}").contains("conflict markers"),
         "{error:#}"
     );
     assert_eq!(sh(dir, &["show", ":doc.md"]), "theirs text");
+
+    // A line as long as the separator, but without a label (a banner, an
+    // underline), is content.
+    let banner = format!("Heading\n{}\n", "=".repeat(41));
+    conflicts::resolve_with(&git, &file, banner.as_bytes()).unwrap();
+    assert_eq!(
+        sh(dir, &["show", ":doc.md"]),
+        format!("Heading\n{}", "=".repeat(41))
+    );
 }

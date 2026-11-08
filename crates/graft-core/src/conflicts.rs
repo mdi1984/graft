@@ -407,7 +407,10 @@ pub fn assemble(segments: &[Segment], resolutions: &[Option<Resolution>]) -> Opt
 /// Resolve `path` with this content (in repository form, LF line endings):
 /// stage it and write it to the worktree.
 pub fn resolve_with(git: &Git, file: &ConflictFile, content: &[u8]) -> Result<()> {
-    if lines(content).any(|(_, bare)| MARKERS.iter().any(|m| bare == m.as_slice())) {
+    // Only the labelled markers: a bare line of `=` is a heading underline
+    // or a banner just as well.
+    let labelled = [&MARKERS[0], &MARKERS[1], &MARKERS[3]];
+    if lines(content).any(|(_, bare)| labelled.iter().any(|m| bare == m.as_slice())) {
         bail!(
             "The result for {} still contains conflict markers. Edit them out first.",
             file.path
