@@ -324,8 +324,7 @@ impl StartPage {
         self.busy = Some(running);
     }
 
-    /// The clone or init ended without a repository: cancelled, or with
-    /// `error` to show.
+    /// The clone or init ended (or none runs); `error` is shown.
     pub fn stop(&mut self, error: Option<String>) {
         self.busy = None;
         self.error = error;
@@ -341,14 +340,17 @@ impl StartPage {
         self.busy.as_ref().map(Running::status)
     }
 
-    /// Forget the forms after a repository was opened.
-    pub fn reset(&mut self) {
+    /// A repository was opened: forget the forms, unless a clone or init
+    /// runs. That one ends with [`StartPage::stop`] and opens its own.
+    pub fn opened(&mut self) {
+        if self.busy.is_some() {
+            return;
+        }
         self.mode = Mode::Home;
         self.url.clear();
         self.folder_name.clear();
         self.folder_name_edited = false;
         self.init_path.clear();
-        self.busy = None;
         self.error = None;
     }
 
@@ -999,6 +1001,27 @@ mod tests {
         assert_eq!(problem(&page, "/srv/x"), "");
         // While a stopped repo's place is unknown, the saved folder is kept.
         assert_eq!(page.clone_parent_path(), PathBuf::from(PROJECTS));
+    }
+
+    /// Opening another repository while a clone runs leaves the clone (its
+    /// progress, Cancel and form) alone; once it ends, an open clears the form.
+    #[test]
+    fn an_open_during_a_clone_leaves_the_clone_alone() {
+        let mut page = StartPage::new(PathBuf::from(r"C:\dev"));
+        page.mode = Mode::Clone;
+        page.url = "https://example.com/x.git".into();
+        page.begin(Running::new("Cloning"));
+        page.opened();
+        assert!(page.is_busy());
+        assert_eq!(page.mode, Mode::Clone);
+        assert_eq!(page.url, "https://example.com/x.git");
+
+        page.stop(Some("failed".into()));
+        assert!(!page.is_busy());
+        assert_eq!(page.error.as_deref(), Some("failed"));
+        page.opened();
+        assert_eq!(page.mode, Mode::Home);
+        assert!(page.url.is_empty() && page.error.is_none());
     }
 
     #[test]

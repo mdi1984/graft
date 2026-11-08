@@ -277,11 +277,22 @@ impl GraftApp {
     fn opened(&mut self, result: anyhow::Result<Location>) {
         match result {
             Ok(location) => self.add_project(location),
-            Err(e) => match shown_error(&e) {
-                Some(error) => self.open_failed(error),
-                None => self.start.stop(None),
-            },
+            Err(e) => {
+                if let Some(error) = shown_error(&e) {
+                    self.open_failed(error);
+                }
+            }
         }
+    }
+
+    /// The start page's clone or init ended.
+    fn created(&mut self, result: anyhow::Result<Location>) {
+        self.start.stop(None);
+        if let Ok(location) = &result {
+            self.toasts
+                .info(format!("Ready: {}", location.root.display()));
+        }
+        self.opened(result);
     }
 
     /// Say why something failed (see [`shown_error`]), as a toast.
@@ -291,23 +302,18 @@ impl GraftApp {
         }
     }
 
-    /// Say why opening failed: on the start page while it shows, else as a
-    /// toast.
+    /// Say why opening failed: on the start page while it shows and no
+    /// clone or init runs there, else as a toast.
     fn open_failed(&mut self, error: String) {
-        if self.active.is_none() {
+        if self.active.is_none() && !self.start.is_busy() {
             self.start.stop(Some(error));
         } else {
-            self.start.stop(None);
             self.toasts.error(error);
         }
     }
 
     fn add_project(&mut self, location: Location) {
-        if self.start.is_busy() {
-            self.toasts
-                .info(format!("Ready: {}", location.root.display()));
-        }
-        self.start.reset();
+        self.start.opened();
         self.remember(&location.root);
         if let Some(i) = self
             .projects
@@ -685,7 +691,7 @@ impl GraftApp {
                 let console = self.console.clone();
                 self.jobs.spawn_long(
                     move |_| repo::clone(&url, &dest, &console, &cancel, report),
-                    Self::opened,
+                    Self::created,
                 );
             }
             StartAction::Init(path) => {
@@ -693,7 +699,7 @@ impl GraftApp {
                 self.start.begin(Running::new(label));
                 let console = self.console.clone();
                 self.jobs
-                    .spawn(move || repo::init(&path, &console), Self::opened);
+                    .spawn(move || repo::init(&path, &console), Self::created);
             }
             StartAction::Cancel => self.start.cancel(),
             StartAction::OpenRecent(path) => self.open_folder(path),
