@@ -156,7 +156,7 @@ pub fn load(git: &Git, source: &Source, path: &str) -> Result<FileDiff> {
     match source {
         Source::Unstaged => {}
         Source::Staged => args.push("--cached".into()),
-        Source::Untracked => args.push("--no-index".into()),
+        Source::Untracked => args.extend(["--no-index".into(), "--no-textconv".into()]),
         Source::Commit(id) => {
             args.push(parent(git, id)?.map_or_else(|| EMPTY_TREE.to_owned(), |p| p.to_string()));
             args.push(id.to_string());

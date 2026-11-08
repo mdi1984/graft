@@ -148,20 +148,73 @@ fn untracked_partial_stage_follows_gitattributes() {
     let entry = sh(&dir, &["ls-files", "--stage", "--", "new.txt"]);
     assert!(entry.starts_with("100644 "), "{entry}");
 
+    // A file whose filter fails has no diff to pick lines from.
     std::fs::write(dir.join("x.bad"), "x1\nx2\n").unwrap();
-    let d = diff::load(&git, &Source::Untracked, "x.bad").unwrap();
     sh(&dir, &["config", "filter.bad.clean", "false"]);
     sh(&dir, &["config", "filter.bad.required", "true"]);
-    let before = sh(&dir, &["ls-files", "--stage"]);
-    let result = ops::apply_lines(
-        &git,
-        &d,
-        &Source::Untracked,
-        LineOp::Stage,
-        pick(&d, &["x1"]),
-    );
-    assert!(result.is_err());
-    assert_eq!(sh(&dir, &["ls-files", "--stage"]), before);
+    assert!(diff::load(&git, &Source::Untracked, "x.bad").is_err());
+}
+
+/// Picking lines of a new file works on git's form of it (here LF, and
+/// UTF-8 for a UTF-16 file): staging stores exactly the picked lines, and
+/// discarding writes the rest back as the file was on disk.
+#[test]
+fn untracked_lines_keep_the_files_form_on_disk() {
+    let (_tmp, git) = repo();
+    let dir = git.cwd().to_path_buf();
+    std::fs::write(
+        dir.join(".gitattributes"),
+        "*.u16 working-tree-encoding=UTF-16LE-BOM\n",
+    )
+    .unwrap();
+    let utf16 = |text: &str| -> Vec<u8> {
+        let mut bytes = vec![0xFF, 0xFE];
+        bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+        bytes
+    };
+
+    for (file, on_disk, staged, left) in [
+        (
+            "crlf.txt",
+            b"l1\r\nl2\r\nl3\r\n".to_vec(),
+            "l1\nl3",
+            b"l1\r\nl3\r\n".to_vec(),
+        ),
+        (
+            "text.u16",
+            utf16("l1\r\nl2\r\nl3\r\n"),
+            "l1\nl3",
+            utf16("l1\r\nl3\r\n"),
+        ),
+    ] {
+        std::fs::write(dir.join(file), &on_disk).unwrap();
+        let d = diff::load(&git, &Source::Untracked, file).unwrap();
+        assert_eq!(d.added(), 3, "{file}");
+        ops::apply_lines(
+            &git,
+            &d,
+            &Source::Untracked,
+            LineOp::Stage,
+            pick(&d, &["l1", "l3"]),
+        )
+        .unwrap();
+        assert_eq!(
+            sh(&dir, &["cat-file", "-p", &format!(":{file}")]),
+            staged,
+            "{file}"
+        );
+        sh(&dir, &["rm", "-q", "-f", "--cached", "--", file]);
+
+        ops::apply_lines(
+            &git,
+            &d,
+            &Source::Untracked,
+            LineOp::Discard,
+            pick(&d, &["l2"]),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(dir.join(file)).unwrap(), left, "{file}");
+    }
 }
 
 #[test]

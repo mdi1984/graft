@@ -2,8 +2,6 @@
 //! files or selected lines, and commit. Every change goes through git.exe so
 //! hooks, filters and config apply.
 
-use std::path::Path;
-
 use anyhow::{Context, Result, bail};
 
 use crate::cli::Git;
@@ -102,9 +100,7 @@ pub fn apply_lines(
         (Source::Untracked, LineOp::Discard) if everything => {
             discard_paths(git, &[], std::slice::from_ref(&diff.path))
         }
-        (Source::Untracked, LineOp::Discard) => {
-            remove_lines(&git.cwd().join(&diff.path), diff, &selected)
-        }
+        (Source::Untracked, LineOp::Discard) => remove_lines(git, diff, &selected),
         _ => bail!("That change cannot be applied here"),
     }
 }
@@ -116,8 +112,9 @@ enum Kept {
     Unselected,
 }
 
-/// The content of a new file's diff, as on disk, with only the selected
-/// (or only the unselected) added lines.
+/// The content of a new file's diff with only the selected (or only the
+/// unselected) added lines. Like the diff, it is in git's form (line endings,
+/// encoding and filters as stored), not as on disk.
 fn kept_lines(diff: &FileDiff, keep: Kept, selected: impl Fn(usize, usize) -> bool) -> Vec<u8> {
     let mut out = Vec::new();
     for (h, hunk) in diff.hunks.iter().enumerate() {
@@ -135,13 +132,17 @@ fn kept_lines(diff: &FileDiff, keep: Kept, selected: impl Fn(usize, usize) -> bo
     out
 }
 
-/// Stage an untracked file with only `content` (worktree form). git cleans
-/// it as `git add` would (line endings, .gitattributes, filters) and picks
-/// the mode from the file (core.fileMode). A failure leaves the index as
-/// it was.
+/// Store `content` (git's form) as a blob as it is, and return its id.
+fn write_blob(git: &Git, content: &[u8]) -> Result<String> {
+    let out = git.run_input(["hash-object", "-w", "--stdin", "--no-filters"], content)?;
+    Ok(out.stdout_str().trim().to_owned())
+}
+
+/// Stage an untracked file with only `content` (git's form), with the mode
+/// git sees on the file (core.fileMode). A failure leaves the index as it
+/// was.
 fn stage_new_file_lines(git: &Git, path: &str, content: &[u8]) -> Result<()> {
-    let out = git.run_input(["hash-object", "-w", "--stdin", "--path", path], content)?;
-    let id = out.stdout_str().trim().to_owned();
+    let id = write_blob(git, content)?;
     // An intent-to-add entry carries the mode git sees on the file.
     git.run(["add", "--intent-to-add", "--", path])?;
     let staged = replace_entry_content(git, path, &id);
@@ -163,17 +164,25 @@ fn replace_entry_content(git: &Git, path: &str, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Rewrite an untracked file without the selected lines.
-fn remove_lines(
-    path: &Path,
-    diff: &FileDiff,
-    selected: impl Fn(usize, usize) -> bool,
-) -> Result<()> {
-    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
-        bail!("{} is a link; Graft only edits plain files.", display(path));
+/// Rewrite an untracked file without the selected lines, converted back to
+/// its form on disk as checkout would (line endings, encoding, filters).
+fn remove_lines(git: &Git, diff: &FileDiff, selected: impl Fn(usize, usize) -> bool) -> Result<()> {
+    let path = git.cwd().join(&diff.path);
+    if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+        bail!(
+            "{} is a link; Graft only edits plain files.",
+            display(&path)
+        );
     }
-    let out = kept_lines(diff, Kept::Unselected, selected);
-    std::fs::write(path, out).with_context(|| format!("Could not write {}", display(path)))
+    let id = write_blob(git, &kept_lines(diff, Kept::Unselected, selected))?;
+    let on_disk = git.run([
+        "cat-file",
+        "--filters",
+        &format!("--path={}", diff.path),
+        &id,
+    ])?;
+    std::fs::write(&path, on_disk.stdout)
+        .with_context(|| format!("Could not write {}", display(&path)))
 }
 
 /// `git apply` a patch to the index (`cached`) or the working tree.
