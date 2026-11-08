@@ -36,6 +36,7 @@ use graft_core::{CancelToken, Git, JobPool, Oid, Operation, RepoSnapshot, Worktr
 pub use changes::{CommitForm, DiffOwner, DiffView, FileKey, LineChange, Staging};
 pub use conflicts::{ConflictView, merge_dialog};
 pub use file_history::{FileHistoryMode, FileHistoryView};
+pub use preview::LeavePreview;
 pub use refs::{Dialog, DialogKind};
 pub use remote::RemoteOp;
 pub use review::{ReviewState, ReviewView};
@@ -293,6 +294,9 @@ pub enum Action {
     /// Show the previewed worktree's current state again.
     UpdatePreview,
     RestoreMain,
+    /// Update or restore although main changed since the preview: the user
+    /// agreed to lose those changes.
+    LeavePreviewAnyway(LeavePreview),
 
     // File history
     /// Show the history of this file (path in the selected worktree).
@@ -1085,8 +1089,9 @@ impl Project {
             Action::RestoreSlashed(i) => self.restore_slashed(i),
 
             Action::PreviewInMain(worktree) => self.preview_in_main(worktree),
-            Action::UpdatePreview => self.update_preview(),
-            Action::RestoreMain => self.restore_main(),
+            Action::UpdatePreview => self.leave_preview(LeavePreview::Update, false),
+            Action::RestoreMain => self.leave_preview(LeavePreview::Restore, false),
+            Action::LeavePreviewAnyway(leave) => self.leave_preview(leave, true),
 
             Action::OpenFileHistory(path) => self.open_file_history(path),
             Action::CloseFileHistory => self.close_file_history(),

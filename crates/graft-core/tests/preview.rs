@@ -193,3 +193,49 @@ fn preview_works_with_diff_prefix_settings() {
         preview::restore_main(&git).unwrap();
     }
 }
+
+/// Main as the preview left it can be restored without asking; an edit, a
+/// new or a deleted file in main since is noticed, and so is a marker from
+/// an older Graft, which never recorded what the preview left.
+#[test]
+fn changes_in_main_since_the_preview_are_noticed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (git, agent) = main_and_agent(tmp.path(), "build/\n");
+    let main = git.cwd().to_path_buf();
+    std::fs::write(agent.join("a.txt"), "agent\n").unwrap();
+    std::fs::write(agent.join("new.txt"), "agent's new file\n").unwrap();
+    preview::start(&git, &git.at(&agent)).unwrap();
+    assert!(!preview::main_changed(&git).unwrap());
+
+    // Ignored files (build output) are not changes.
+    std::fs::create_dir(main.join("build")).unwrap();
+    std::fs::write(main.join("build").join("app.exe"), "binary").unwrap();
+    assert!(!preview::main_changed(&git).unwrap());
+
+    std::fs::write(main.join("a.txt"), "edited in main\n").unwrap();
+    assert!(preview::main_changed(&git).unwrap());
+    std::fs::write(main.join("a.txt"), "agent\n").unwrap();
+    assert!(!preview::main_changed(&git).unwrap());
+    std::fs::write(main.join("mine.txt"), "new in main\n").unwrap();
+    assert!(preview::main_changed(&git).unwrap());
+    std::fs::remove_file(main.join("mine.txt")).unwrap();
+    std::fs::remove_file(main.join("new.txt")).unwrap();
+    assert!(preview::main_changed(&git).unwrap());
+
+    // Update shows the agent's state again: unchanged from there.
+    preview::update(&git).unwrap();
+    assert!(!preview::main_changed(&git).unwrap());
+
+    let marker = main.join(".git").join("graft-preview");
+    let text = std::fs::read_to_string(&marker).unwrap();
+    let old: String = text
+        .lines()
+        .filter(|l| !l.starts_with("shown "))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    assert_ne!(old, text);
+    std::fs::write(&marker, old).unwrap();
+    assert!(preview::main_changed(&git).unwrap());
+    preview::restore_main(&git).unwrap();
+    assert!(preview::main_changed(&git).is_err(), "no preview");
+}

@@ -217,6 +217,9 @@ pub struct Preview {
     pub head: Oid,
     /// Files the preview created in main, removed again on restore.
     pub added: Vec<String>,
+    /// The tree of main's files as the preview left them (untracked files
+    /// included): whether main changed since. `None` if unknown.
+    pub shown: Option<Oid>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

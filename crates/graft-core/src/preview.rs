@@ -98,6 +98,7 @@ pub fn active(main: &Path) -> Option<Preview> {
     let mut restore = None;
     let mut source = None;
     let mut head = None;
+    let mut shown = None;
     let mut added = Vec::new();
     for line in text.lines() {
         let (key, value) = line.split_once(' ')?;
@@ -108,6 +109,7 @@ pub fn active(main: &Path) -> Option<Preview> {
             }
             "source" => source = Some(PathBuf::from(value)),
             "head" => head = Oid::from_hex(value.as_bytes()).ok(),
+            "shown" => shown = Oid::from_hex(value.as_bytes()).ok(),
             // Only paths inside main: this file is in .git, which a
             // repository's tooling can write to.
             "added" if is_inside(value) => added.push(value.to_owned()),
@@ -119,6 +121,7 @@ pub fn active(main: &Path) -> Option<Preview> {
         source: source?,
         head: head?,
         added,
+        shown,
     })
 }
 
@@ -140,6 +143,9 @@ fn write_marker(main: &Path, preview: &Preview) -> Result<()> {
     };
     text.push_str(&format!("source {}\n", preview.source.display()));
     text.push_str(&format!("head {}\n", preview.head));
+    if let Some(shown) = preview.shown {
+        text.push_str(&format!("shown {shown}\n"));
+    }
     for a in &preview.added {
         text.push_str(&format!("added {a}\n"));
     }
@@ -147,10 +153,10 @@ fn write_marker(main: &Path, preview: &Preview) -> Result<()> {
     Ok(())
 }
 
-/// The worktree's uncommitted changes (untracked files included) as a
-/// binary patch against its HEAD, and the files that patch creates. Uses a
-/// copy of the index, so the worktree's own staging is left alone.
-fn uncommitted_patch(source: &Git) -> Result<(Vec<u8>, Vec<String>)> {
+/// Run `then` with every file of the worktree (untracked ones included,
+/// ignored ones not) added to a copy of its index, so the worktree's own
+/// staging is left alone.
+fn with_everything_added<T>(worktree: &Git, then: impl FnOnce(&Git) -> Result<T>) -> Result<T> {
     // Unique per call: the clock alone repeats between threads on Windows.
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let name = format!(
@@ -158,7 +164,7 @@ fn uncommitted_patch(source: &Git) -> Result<(Vec<u8>, Vec<String>)> {
         std::process::id(),
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
-    let git_dir = git_dir(source.cwd());
+    let git_dir = git_dir(worktree.cwd());
     // Git inside WSL reads the copy best from its own disk.
     let tmp = match &git_dir {
         Some(dir) if crate::wsl::Wsl::of(dir).is_some() => dir.join(name),
@@ -166,12 +172,30 @@ fn uncommitted_patch(source: &Git) -> Result<(Vec<u8>, Vec<String>)> {
     };
     let real = git_dir.map(|d| d.join("index"));
     let copied = real.is_some_and(|r| std::fs::copy(r, &tmp).is_ok());
-    let git = source.with_index(&tmp);
+    let git = worktree.with_index(&tmp);
     let result = (|| {
         if !copied {
             git.run(["read-tree", "HEAD"])?;
         }
         git.run(["add", "-A"])?;
+        then(&git)
+    })();
+    let _ = std::fs::remove_file(&tmp);
+    result
+}
+
+/// The tree of the worktree's files as they are now.
+fn files_tree(worktree: &Git) -> Result<Oid> {
+    with_everything_added(worktree, |git| {
+        let id = git.read(["write-tree"])?;
+        Ok(Oid::from_hex(id.trim().as_bytes())?)
+    })
+}
+
+/// The worktree's uncommitted changes (untracked files included) as a
+/// binary patch against its HEAD, and the files that patch creates.
+fn uncommitted_patch(source: &Git) -> Result<(Vec<u8>, Vec<String>)> {
+    with_everything_added(source, |git| {
         let patch = git
             .run([
                 "diff",
@@ -197,9 +221,7 @@ fn uncommitted_patch(source: &Git) -> Result<(Vec<u8>, Vec<String>)> {
             .map(str::to_owned)
             .collect();
         Ok((patch, added))
-    })();
-    let _ = std::fs::remove_file(&tmp);
-    result
+    })
 }
 
 /// Check out `source`'s commit in main and apply its uncommitted changes.
@@ -212,11 +234,12 @@ fn show(main: &Git, source: &Git, restore: Restore) -> Result<Preview> {
     // Only files the preview creates are its to remove later: main may
     // already have one by that name (an ignored local config, say).
     added.retain(|p| std::fs::symlink_metadata(main.cwd().join(p)).is_err());
-    let preview = Preview {
+    let mut preview = Preview {
         restore,
         source: source.cwd().to_path_buf(),
         head,
         added,
+        shown: None,
     };
     write_marker(main.cwd(), &preview)?;
     if !patch.is_empty()
@@ -231,7 +254,23 @@ fn show(main: &Git, source: &Git, restore: Restore) -> Result<Preview> {
         }
         bail!("The worktree's changes could not be applied in main: {error:#}");
     }
+    // Unknown, leaving the preview asks first, as if main had changed.
+    preview.shown = files_tree(main).ok();
+    write_marker(main.cwd(), &preview)?;
     Ok(preview)
+}
+
+/// Whether main's files differ from what the preview left there: leaving
+/// the preview would throw away changes made in main since. True when that
+/// is unknown (a marker from an older Graft).
+pub fn main_changed(main: &Git) -> Result<bool> {
+    let Some(preview) = active(main.cwd()) else {
+        bail!("Main shows no preview.");
+    };
+    Ok(match preview.shown {
+        Some(shown) => files_tree(main)? != shown,
+        None => true,
+    })
 }
 
 /// Show the worktree at `source` in the main worktree (`main`).
@@ -260,7 +299,7 @@ pub fn start(main: &Git, source: &Git) -> Result<Preview> {
 }
 
 /// Throw away what the preview put into main (and anything changed there
-/// since), without going back yet.
+/// since, see [`main_changed`]), without going back yet.
 fn clear(main: &Git, preview: &Preview) -> Result<()> {
     main.run(["reset", "--hard", "-q"])?;
     for path in &preview.added {
@@ -280,7 +319,8 @@ fn clear(main: &Git, preview: &Preview) -> Result<()> {
     Ok(())
 }
 
-/// Show the worktree's current state again (after it changed).
+/// Show the worktree's current state again (after it changed). Discards
+/// changes made in main since the preview showed, see [`main_changed`].
 pub fn update(main: &Git) -> Result<Preview> {
     let Some(preview) = active(main.cwd()) else {
         bail!("Main shows no preview.");
@@ -290,7 +330,8 @@ pub fn update(main: &Git) -> Result<Preview> {
     show(main, &source, preview.restore)
 }
 
-/// Put main back on what it had before the preview.
+/// Put main back on what it had before the preview. Discards changes made
+/// in main since the preview showed, see [`main_changed`].
 pub fn restore_main(main: &Git) -> Result<()> {
     let Some(preview) = active(main.cwd()) else {
         bail!("Main shows no preview.");

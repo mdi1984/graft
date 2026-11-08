@@ -84,7 +84,7 @@ fn preview_banner(ui: &mut Ui, project: &Project, actions: &mut Actions) {
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let can = can::yes(format!(
-                        "Go back to {back}. Changes made in the main folder during the preview are discarded."
+                        "Go back to {back}. If files in the main folder changed during the preview, Graft asks before discarding them."
                     ))
                     .unless(blocked);
                     if button(ui, "Restore main folder", ButtonKind::Primary, can.ok)
