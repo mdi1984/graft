@@ -216,10 +216,15 @@ fn parse_worktrees(bytes: &[u8], root: &Path, to_path: impl Fn(&str) -> PathBuf)
 
 /// The remotes with their URLs as configured (not expanded by `insteadOf`,
 /// so editing a remote writes back what was there). A remote with several
-/// URLs shows its first.
+/// URLs shows its first; one with only a push URL shows that.
 fn load_remotes(git: &Git) -> Result<Vec<Remote>> {
     let out = git.run_accepting(
-        ["config", "-z", "--get-regexp", r"^remote\..*\.url$"],
+        [
+            "config",
+            "-z",
+            "--get-regexp",
+            r"^remote\..*\.(url|pushurl)$",
+        ],
         None,
         |o| o.status <= 1,
     )?;
@@ -228,25 +233,35 @@ fn load_remotes(git: &Git) -> Result<Vec<Remote>> {
 
 /// `git config -z --get-regexp` output: `key\nvalue\0` per entry.
 fn parse_remotes(text: &str) -> Vec<Remote> {
-    let mut remotes: Vec<Remote> = Vec::new();
+    let mut remotes: Vec<(Remote, bool)> = Vec::new();
     for entry in text.split('\0') {
-        let Some((key, url)) = entry.split_once('\n') else {
+        let Some((key, value)) = entry.split_once('\n') else {
             continue;
         };
-        let Some(name) = key
-            .strip_prefix("remote.")
-            .and_then(|k| k.strip_suffix(".url"))
-        else {
+        let Some(rest) = key.strip_prefix("remote.") else {
             continue;
         };
-        if !remotes.iter().any(|r| r.name == name) {
-            remotes.push(Remote {
-                name: name.to_owned(),
-                fetch_url: url.to_owned(),
-            });
+        let (name, is_url) = match (rest.strip_suffix(".url"), rest.strip_suffix(".pushurl")) {
+            (Some(name), _) => (name, true),
+            (None, Some(name)) => (name, false),
+            (None, None) => continue,
+        };
+        match remotes.iter_mut().find(|(r, _)| r.name == name) {
+            Some((remote, has_url)) if is_url && !*has_url => {
+                remote.fetch_url = value.to_owned();
+                *has_url = true;
+            }
+            Some(_) => {}
+            None => remotes.push((
+                Remote {
+                    name: name.to_owned(),
+                    fetch_url: value.to_owned(),
+                },
+                is_url,
+            )),
         }
     }
-    remotes
+    remotes.into_iter().map(|(remote, _)| remote).collect()
 }
 
 #[cfg(test)]

@@ -54,6 +54,10 @@ fn urls_show_as_configured() {
         &dir,
         &["config", "url.https://github.com/.insteadOf", "gh:"],
     );
+    // Only a push URL; and a push URL written before the URL.
+    sh(&dir, &["config", "remote.backup.pushurl", "D:/backup.git"]);
+    sh(&dir, &["config", "remote.both.pushurl", "D:/push.git"]);
+    sh(&dir, &["config", "remote.both.url", "D:/fetch.git"]);
 
     let git = common::git(&dir);
     let snap = snapshot::load(&git).unwrap();
@@ -66,7 +70,9 @@ fn urls_show_as_configured() {
         remotes,
         [
             ("origin", "C:/My Repos/x.git"),
-            ("work.mirror", "gh:me/app")
+            ("work.mirror", "gh:me/app"),
+            ("backup", "D:/backup.git"),
+            ("both", "D:/fetch.git"),
         ]
     );
 
