@@ -10,6 +10,8 @@ use anyhow::{Context, Result, bail};
 use crate::changes::{FileChange, between, count_lines, is_binary};
 use crate::cli::Git;
 use crate::model::{Change, ORIGIN, Oid, RepoSnapshot};
+use crate::paths::display;
+use crate::repo::in_progress;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReviewFile {
@@ -170,14 +172,27 @@ pub fn load(git: &Git, base: &str) -> Result<Review> {
     })
 }
 
-/// Merge the reviewed `branch` into the branch checked out where `git`
-/// points, if it is still at the reviewed `head`: commits made after the
-/// review are never merged unseen. Ok(true): stopped with conflicts.
-pub fn merge(git: &Git, branch: &str, head: Oid) -> Result<bool> {
+/// Merge the reviewed `branch` into `into`, if `into` is still checked out
+/// where `git` points with nothing in progress there (it may have switched
+/// while the user was asked), and `branch` is still at the reviewed `head`:
+/// commits made after the review are never merged unseen. Ok(true):
+/// stopped with conflicts.
+pub fn merge(git: &Git, branch: &str, into: &str, head: Oid) -> Result<bool> {
+    let place = display(git.cwd());
+    if let Some(op) = in_progress(git.cwd()) {
+        bail!(
+            "Nothing was merged: a {} is in progress in {place}. Finish or abort it, then              merge again.",
+            op.kind.noun().to_lowercase()
+        );
+    }
+    if git.current_branch()?.as_deref() != Some(into) {
+        bail!(
+            "Nothing was merged: {into} is no longer checked out in {place}. Check it out              there, then merge again."
+        );
+    }
     if git.rev(&format!("refs/heads/{branch}"))? != Some(head) {
         bail!(
-            "Nothing was merged: {branch} moved since you reviewed it. Look at its new \
-             commits in Review, then merge again."
+            "Nothing was merged: {branch} moved since you reviewed it. Look at its new              commits in Review, then merge again."
         );
     }
     crate::conflicts::merge(git, branch, false)

@@ -165,8 +165,8 @@ impl Project {
         );
     }
 
-    /// Merge a reviewed branch in the worktree that has its base checked
-    /// out, unless it moved on since `head`; conflicts are resolved there.
+    /// Merge a reviewed branch in the worktree that has its base `into`
+    /// checked out, unless either changed since; conflicts are resolved there.
     pub(super) fn merge_reviewed(
         &mut self,
         worktree: PathBuf,
@@ -176,10 +176,11 @@ impl Project {
     ) {
         let done = format!("Merged {branch} into {into}");
         let doing = format!("Merging {branch} into {into}");
+        let target = into.clone();
         self.run_head_op(
             At::Path(worktree),
             "Merging",
-            move |git| review::merge(&git, &branch, head),
+            move |git| review::merge(&git, &branch, &target, head),
             after_conflicts(done, doing, Some(into)),
         );
     }

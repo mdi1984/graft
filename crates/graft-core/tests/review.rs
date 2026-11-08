@@ -160,7 +160,7 @@ fn merge_takes_only_the_reviewed_commits() {
     assert_eq!(r.head.to_string(), common::rev(&agent, "HEAD"));
     common::commit(&agent, "c.txt", "c\n", "after the review");
     let before = common::rev(main, "HEAD");
-    let err = review::merge(&common::git(main), "feature", r.head).unwrap_err();
+    let err = review::merge(&common::git(main), "feature", "main", r.head).unwrap_err();
     assert!(
         format!("{err:#}").contains("moved since you reviewed it"),
         "{err:#}"
@@ -168,7 +168,65 @@ fn merge_takes_only_the_reviewed_commits() {
     assert_eq!(common::rev(main, "HEAD"), before);
 
     let r = review::load(&common::git(&agent), "main").unwrap();
-    let stopped = review::merge(&common::git(main), "feature", r.head).unwrap();
+    let stopped = review::merge(&common::git(main), "feature", "main", r.head).unwrap();
     assert!(!stopped);
     assert_eq!(common::rev(main, "HEAD"), common::rev(&agent, "HEAD"));
+}
+
+/// Merge lands on the base it was asked for: if the worktree switched to
+/// another branch or started a merge while the question was open, nothing
+/// is merged.
+#[test]
+fn merge_refuses_when_the_target_changed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main = &common::init(&tmp.path().join("r"));
+    common::commit(
+        main, "a.txt", "a
+", "base",
+    );
+    let agent = tmp.path().join("agent");
+    sh(
+        main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            agent.to_str().unwrap(),
+        ],
+    );
+    common::commit(
+        &agent, "b.txt", "b
+", "reviewed",
+    );
+    let r = review::load(&common::git(&agent), "main").unwrap();
+    let merge = || review::merge(&common::git(main), "feature", "main", r.head);
+
+    sh(main, &["checkout", "-q", "-b", "other"]);
+    let err = format!("{:#}", merge().unwrap_err());
+    assert!(err.contains("main is no longer checked out"), "{err}");
+    assert_eq!(common::rev(main, "other"), common::rev(main, "main"));
+
+    sh(main, &["checkout", "-q", "main"]);
+    sh(main, &["branch", "-q", "side"]);
+    sh(main, &["checkout", "-q", "side"]);
+    std::fs::write(
+        main.join("a.txt"),
+        "side
+",
+    )
+    .unwrap();
+    sh(main, &["commit", "-q", "-am", "side"]);
+    sh(main, &["checkout", "-q", "main"]);
+    std::fs::write(
+        main.join("a.txt"),
+        "main
+",
+    )
+    .unwrap();
+    sh(main, &["commit", "-q", "-am", "main"]);
+    assert!(graft_core::conflicts::merge(&common::git(main), "side", false).unwrap());
+    let err = format!("{:#}", merge().unwrap_err());
+    assert!(err.contains("a merge is in progress"), "{err}");
 }
