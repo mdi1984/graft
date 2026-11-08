@@ -11,7 +11,6 @@ use anyhow::{Context, Result, bail};
 
 use crate::Git;
 use crate::changes::is_binary;
-use crate::cli::failure_message;
 pub use crate::model::{InProgress, Kind};
 use crate::repo::git_dir;
 
@@ -75,14 +74,8 @@ pub fn side_names(kind: Option<Kind>, branch: Option<&str>) -> (String, String) 
 /// Run a command that may stop with conflicts. Ok(true) means it stopped and
 /// the conflicts are waiting to be resolved.
 fn run_may_conflict(git: &Git, args: &[&str]) -> Result<bool> {
-    let out = git.run_expecting(args, None, |o| o.success() || stopped(o))?;
-    if out.success() {
-        return Ok(false);
-    }
-    if stopped(&out) {
-        return Ok(true);
-    }
-    bail!(failure_message(&out))
+    let out = git.run_accepting(args, None, |o| o.success() || stopped(o))?;
+    Ok(!out.success())
 }
 
 /// Git stopped because of conflicts (rather than failing).
@@ -236,7 +229,7 @@ pub fn load(git: &Git, path: &str) -> Result<ConflictFile> {
                 None => write_blob(git, b"", &[])?,
             };
             // Exit code: the number of conflicts (negative on error).
-            let out = git.run_expecting(
+            let out = git.run_accepting(
                 [
                     "merge-file",
                     "-p",
@@ -255,9 +248,6 @@ pub fn load(git: &Git, path: &str) -> Result<ConflictFile> {
                 None,
                 |o| (0..=127).contains(&o.status),
             )?;
-            if out.status < 0 || out.status > 127 {
-                bail!("git merge-file failed: {}", out.stderr_str());
-            }
             parse_merged(&out.stdout)
         }
         _ => Vec::new(),
@@ -277,10 +267,7 @@ fn write_blob(git: &Git, content: &[u8], flags: &[&str]) -> Result<String> {
     let mut args = vec!["hash-object", "-w"];
     args.extend(flags);
     args.push("--stdin");
-    let out = git.run_with_input(args, Some(content))?;
-    if !out.success() {
-        bail!(failure_message(&out));
-    }
+    let out = git.run_input(args, content)?;
     Ok(out.stdout_str().trim().to_owned())
 }
 

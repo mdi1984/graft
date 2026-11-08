@@ -8,34 +8,10 @@ use graft_core::{remote, snapshot};
 #[test]
 fn add_edit_and_remove() {
     let tmp = tempfile::tempdir().unwrap();
-    let server = tmp.path().join("server.git");
-    let other = tmp.path().join("other.git");
-    let dir = tmp.path().join("app");
-    std::fs::create_dir(&dir).unwrap();
-    sh(
-        tmp.path(),
-        &["init", "-q", "--bare", "-b", "main", "server.git"],
-    );
-    sh(
-        tmp.path(),
-        &["init", "-q", "--bare", "-b", "main", "other.git"],
-    );
-    sh(&dir, &["init", "-q", "-b", "main"]);
-    std::fs::write(dir.join("a.txt"), "a\n").unwrap();
-    sh(&dir, &["add", "."]);
-    sh(
-        &dir,
-        &[
-            "-c",
-            "user.name=Ada",
-            "-c",
-            "user.email=a@example.com",
-            "commit",
-            "-q",
-            "-m",
-            "a",
-        ],
-    );
+    let server = common::init_bare(&tmp.path().join("server.git"));
+    let other = common::init_bare(&tmp.path().join("other.git"));
+    let dir = common::init(&tmp.path().join("app"));
+    common::commit(&dir, "a.txt", "a\n", "a");
     sh(&dir, &["push", "-q", server.to_str().unwrap(), "main"]);
 
     let git = common::git(&dir);

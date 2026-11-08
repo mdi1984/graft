@@ -4,10 +4,10 @@
 
 use std::ops::Range;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 use crate::changes::EMPTY_TREE;
-use crate::cli::{Git, Output, failure_message};
+use crate::cli::{Git, Output};
 use crate::model::Oid;
 use crate::status::Change;
 
@@ -148,7 +148,7 @@ pub fn load(git: &Git, source: &Source, path: &str) -> Result<FileDiff> {
         Source::Untracked => args.push("--no-index".into()),
         Source::Commit(id) => {
             // Against the first parent; a root commit against the empty tree.
-            args.push(parent(git, id)?.unwrap_or_else(|| EMPTY_TREE.to_owned()));
+            args.push(parent(git, id)?.map_or_else(|| EMPTY_TREE.to_owned(), |p| p.to_string()));
             args.push(id.to_string());
         }
         Source::Base(id) => args.push(id.to_string()),
@@ -160,25 +160,21 @@ pub fn load(git: &Git, source: &Source, path: &str) -> Result<FileDiff> {
     args.push(path.to_owned());
 
     // `--no-index` exits with 1 when the files differ, which is the point.
-    let expected = |o: &Output| o.success() || (*source == Source::Untracked && o.status == 1);
-    let out = git.run_expecting(&args, None, expected)?;
-    let ok = expected(&out);
-    if !ok {
-        bail!(failure_message(&out));
-    }
+    let out = git.run_accepting(&args, None, |o: &Output| {
+        o.success() || (*source == Source::Untracked && o.status == 1)
+    })?;
     let mut diff = parse(&out.stdout);
+    // `--no-index` names the file by its path as given; keep it tidy.
     diff.path = path.to_owned();
     if *source == Source::Untracked {
-        // `--no-index` names the file by its path as given; keep it tidy.
         diff.new_file = true;
     }
     Ok(diff)
 }
 
 /// A commit's first parent, or `None` for a root commit.
-fn parent(git: &Git, id: &Oid) -> Result<Option<String>> {
-    let out = git.run_raw(["rev-parse", "-q", "--verify", &format!("{id}^1")])?;
-    Ok(out.success().then(|| out.stdout_str().trim().to_owned()))
+fn parent(git: &Git, id: &Oid) -> Result<Option<Oid>> {
+    git.rev(&format!("{id}^1"))
 }
 
 /// The old version of the file as git stores it (line endings as in the

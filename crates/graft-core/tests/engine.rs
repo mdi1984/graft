@@ -10,9 +10,7 @@ use graft_core::{CancelToken, Console, Git, details, is_cancelled, repo, snapsho
 
 fn fixture() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path().join("demo");
-    std::fs::create_dir(&dir).unwrap();
-    sh(&dir, &["init", "-q", "-b", "main"]);
+    let dir = common::init(&tmp.path().join("demo"));
     commit(&dir, "a.txt", "one\n", "First");
     commit(&dir, "b.txt", "two\n", "Second\n\nWith a body.");
     sh(&dir, &["switch", "-q", "-c", "feature"]);

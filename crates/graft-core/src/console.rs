@@ -6,8 +6,6 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use crate::cli::Output;
-
 const MAX_ENTRIES: usize = 500;
 const MAX_OUTPUT_BYTES: usize = 16 * 1024;
 
@@ -33,7 +31,8 @@ impl Entry {
         args: &[OsString],
         status: i32,
         duration: Duration,
-        out: &Output,
+        stdout: &[u8],
+        stderr: &[u8],
     ) -> Self {
         let command = std::iter::once("git".to_owned())
             .chain(args.iter().map(|a| quote(&a.to_string_lossy())))
@@ -47,8 +46,8 @@ impl Entry {
             status,
             expected: status == 0,
             duration,
-            stdout: clip(&out.stdout),
-            stderr: clip(&out.stderr),
+            stdout: clip(stdout),
+            stderr: clip(stderr),
         }
     }
 
@@ -149,19 +148,18 @@ mod tests {
     #[test]
     fn entries_keep_their_number_when_old_ones_drop_out() {
         let console = Console::default();
-        let out = Output {
-            status: 0,
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-        };
-        for _ in 0..MAX_ENTRIES + 3 {
+        let push = |status: i32, stderr: &[u8]| {
             console.push(Entry::finished(
                 Path::new("."),
                 &[],
-                0,
+                status,
                 Duration::ZERO,
-                &out,
+                &[],
+                stderr,
             ));
+        };
+        for _ in 0..MAX_ENTRIES + 3 {
+            push(0, b"");
         }
         let entries = console.snapshot();
         assert_eq!(entries.len(), MAX_ENTRIES);
@@ -172,18 +170,7 @@ mod tests {
         // A failure after the log is full is still found by the UI's
         // "failed since I last looked" check.
         let seen = console.next_seq();
-        let failed = Output {
-            status: 128,
-            stdout: Vec::new(),
-            stderr: b"fatal: boom".to_vec(),
-        };
-        console.push(Entry::finished(
-            Path::new("."),
-            &[],
-            128,
-            Duration::ZERO,
-            &failed,
-        ));
+        push(128, b"fatal: boom");
         let new_failures: Vec<Entry> = console
             .snapshot()
             .into_iter()

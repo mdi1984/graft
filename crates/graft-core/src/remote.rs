@@ -146,12 +146,12 @@ pub fn is_rejected_push(error: &str) -> bool {
 }
 
 fn current_branch(git: &Git) -> Result<String> {
-    let out = git.run_raw(["symbolic-ref", "--short", "-q", "HEAD"])?;
-    let branch = out.stdout_str().trim().to_owned();
-    if !out.success() || branch.is_empty() {
-        bail!("HEAD is detached, so there is no branch to push or pull. Create a branch first.");
+    match git.current_branch()? {
+        Some(branch) => Ok(branch),
+        None => {
+            bail!("HEAD is detached, so there is no branch to push or pull. Create a branch first.")
+        }
     }
-    Ok(branch)
 }
 
 /// The current branch's upstream as far as git can resolve it: one deleted

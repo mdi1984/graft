@@ -9,9 +9,11 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use crossbeam_channel::RecvTimeoutError;
 
 use crate::console::{Console, Entry};
 use crate::jobs::{CancelToken, Cancelled};
+use crate::model::Oid;
 use crate::paths::no_window;
 use crate::wsl::Wsl;
 
@@ -154,26 +156,19 @@ impl Git {
         }
     }
 
-    /// Run git and return its output whatever the exit code.
+    /// Run git and return its output whatever the exit code. The console
+    /// lists a non-zero exit code as a failure.
     pub(crate) fn run_raw<I, S>(&self, args: I) -> Result<Output>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        self.run_with_input(args, None)
+        self.run_expecting(args, None, Output::success)
     }
 
-    /// Run git, feeding `input` to stdin.
-    pub(crate) fn run_with_input<I, S>(&self, args: I, input: Option<&[u8]>) -> Result<Output>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        self.run_expecting(args, input, |out| out.success())
-    }
-
-    /// Run git; `expected` says which outcomes are normal, so the console
-    /// does not list e.g. "stopped with conflicts" as a failure.
+    /// Run git, feeding `input` (if any) to stdin, and return its output
+    /// whatever the exit code; `expected` says which outcomes are normal, so
+    /// the console does not list e.g. "stopped with conflicts" as a failure.
     pub(crate) fn run_expecting<I, S>(
         &self,
         args: I,
@@ -202,11 +197,37 @@ impl Git {
             stdout: out.stdout,
             stderr: out.stderr,
         };
-        let mut entry =
-            Entry::finished(&self.cwd, &args, output.status, started.elapsed(), &output);
+        let mut entry = Entry::finished(
+            &self.cwd,
+            &args,
+            output.status,
+            started.elapsed(),
+            &output.stdout,
+            &output.stderr,
+        );
         entry.expected = expected(&output);
         self.console.push(entry);
         Ok(output)
+    }
+
+    /// Run git, feeding `input` (if any) to stdin, and fail with git's own
+    /// message unless `accept` takes the outcome (e.g. exit code 1 for
+    /// "not set").
+    pub(crate) fn run_accepting<I, S>(
+        &self,
+        args: I,
+        input: Option<&[u8]>,
+        accept: impl Fn(&Output) -> bool,
+    ) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let out = self.run_expecting(args, input, &accept)?;
+        if !accept(&out) {
+            bail!("{}", failure_message(&out));
+        }
+        Ok(out)
     }
 
     /// Run git and fail with git's own message on a non-zero exit code.
@@ -215,11 +236,16 @@ impl Git {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let out = self.run_raw(args)?;
-        if !out.success() {
-            bail!("{}", failure_message(&out));
-        }
-        Ok(out)
+        self.run_accepting(args, None, Output::success)
+    }
+
+    /// [`Git::run`], feeding `input` to stdin.
+    pub(crate) fn run_input<I, S>(&self, args: I, input: &[u8]) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        self.run_accepting(args, Some(input), Output::success)
     }
 
     /// Run git and return stdout as (lossy) UTF-8.
@@ -229,6 +255,30 @@ impl Git {
         S: AsRef<OsStr>,
     {
         Ok(self.run(args)?.stdout_str())
+    }
+
+    /// The commit `rev` names, or `None` if it names none (e.g. `HEAD`
+    /// before the first commit, `x^1` of a root commit).
+    pub(crate) fn rev(&self, rev: &str) -> Result<Option<Oid>> {
+        let out = self.run_accepting(["rev-parse", "-q", "--verify", rev], None, |o| {
+            o.status <= 1
+        })?;
+        if !out.success() {
+            return Ok(None);
+        }
+        let text = out.stdout_str();
+        let id = Oid::from_hex(text.trim().as_bytes())
+            .with_context(|| format!("unexpected answer from git rev-parse: {text}"))?;
+        Ok(Some(id))
+    }
+
+    /// The branch checked out here, or `None` for a detached HEAD.
+    pub(crate) fn current_branch(&self) -> Result<Option<String>> {
+        let out = self.run_accepting(["symbolic-ref", "-q", "--short", "HEAD"], None, |o| {
+            o.status <= 1
+        })?;
+        let branch = out.stdout_str().trim().to_owned();
+        Ok((out.success() && !branch.is_empty()).then_some(branch))
     }
 
     /// Run a long git command that reports progress on stderr (clone, fetch,
@@ -242,7 +292,7 @@ impl Git {
     ) -> Result<()> {
         let out = self.run_with_progress(args, cancel, |line| on_progress(parse_progress(line)))?;
         if !out.success() {
-            bail!(failure_message(&out));
+            bail!("{}", failure_message(&out));
         }
         Ok(())
     }
@@ -289,8 +339,11 @@ impl Git {
         });
 
         let status = loop {
-            for line in line_rx.try_iter() {
-                on_progress(&line);
+            match line_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(line) => on_progress(&line),
+                Err(RecvTimeoutError::Timeout) => {}
+                // stderr closed: git is done or about to be.
+                Err(RecvTimeoutError::Disconnected) => break child.wait()?,
             }
             if cancel.is_cancelled() {
                 let _ = child.kill();
@@ -298,15 +351,14 @@ impl Git {
             if let Some(status) = child.try_wait()? {
                 break status;
             }
-            std::thread::sleep(Duration::from_millis(50));
         };
-        let stderr = stderr_reader.join().unwrap_or_default();
+        let stderr = stderr_reader.join().expect("stderr reader");
         for line in line_rx.try_iter() {
             on_progress(&line);
         }
         let output = Output {
             status: status.code().unwrap_or(-1),
-            stdout: stdout_reader.join().unwrap_or_default(),
+            stdout: stdout_reader.join().expect("stdout reader"),
             stderr: keep_final_progress(&stderr),
         };
         self.console.push(Entry::finished(
@@ -314,7 +366,8 @@ impl Git {
             &args,
             output.status,
             started.elapsed(),
-            &output,
+            &output.stdout,
+            &output.stderr,
         ));
         if cancel.is_cancelled() {
             return Err(Cancelled.into());
@@ -529,21 +582,19 @@ mod tests {
     }
 
     /// Settings the user passes in the environment (`GIT_CONFIG_COUNT`)
-    /// still reach git next to ours.
+    /// still reach git next to ours, which are numbered after them.
     #[test]
     fn settings_from_the_environment_are_kept() {
-        let user = |cmd: &mut Command| {
+        let with_user_setting = || {
+            let mut cmd = Command::new("git");
             cmd.env("GIT_CONFIG_COUNT", "1")
                 .env("GIT_CONFIG_KEY_0", "graft.test")
                 .env("GIT_CONFIG_VALUE_0", "mine")
                 .envs(extra_config(1));
+            cmd
         };
-        let mut cmd = Command::new("git");
-        user(&mut cmd);
-        assert_eq!(config_value(cmd, "graft.test"), "mine");
-        let mut cmd = Command::new("git");
-        user(&mut cmd);
-        assert_eq!(config_value(cmd, "core.longpaths"), "true");
+        assert_eq!(config_value(with_user_setting(), "graft.test"), "mine");
+        assert_eq!(config_value(with_user_setting(), "core.longpaths"), "true");
     }
 
     /// Linux only sees the variables `WSLENV` names, and a named but unset

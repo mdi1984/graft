@@ -9,11 +9,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
-use crate::cli::{Git, failure_message};
+use crate::cli::Git;
 use crate::conflicts;
 use crate::model::{Oid, RepoSnapshot, Worktree};
 pub use crate::model::{Preview, Restore};
-use crate::paths::same_path;
+use crate::paths::{display, same_path};
 use crate::repo::git_dir;
 
 const MARKER: &str = "graft-preview";
@@ -134,7 +134,7 @@ fn is_inside(path: &str) -> bool {
 
 fn write_marker(main: &Path, preview: &Preview) -> Result<()> {
     let Some(path) = marker_path(main) else {
-        bail!("{} is not a git worktree", main.display());
+        bail!("{} is not a git worktree", display(main));
     };
     let mut text = match &preview.restore {
         Restore::Branch(b) => format!("restore-branch {b}\n"),
@@ -206,8 +206,9 @@ fn uncommitted_patch(source: &Git) -> Result<(Vec<u8>, Vec<String>)> {
 
 /// Check out `source`'s commit in main and apply its uncommitted changes.
 fn show(main: &Git, source: &Git, restore: Restore) -> Result<Preview> {
-    let head = source.read(["rev-parse", "--verify", "HEAD"])?;
-    let head = Oid::from_hex(head.trim().as_bytes())?;
+    let Some(head) = source.rev("HEAD")? else {
+        bail!("{} has no commits yet.", display(source.cwd()));
+    };
     let (patch, mut added) = uncommitted_patch(source)?;
     main.run(["checkout", "-q", "--detach", &head.to_string()])?;
     // Only files the preview creates are its to remove later: main may
@@ -220,19 +221,17 @@ fn show(main: &Git, source: &Git, restore: Restore) -> Result<Preview> {
         added,
     };
     write_marker(main.cwd(), &preview)?;
-    if !patch.is_empty() {
-        let out = main.run_with_input(["apply", "--whitespace=nowarn", "-"], Some(&patch))?;
-        if !out.success() {
-            let message = failure_message(&out);
-            if let Err(rollback) = restore_main(main) {
-                bail!(
-                    "The worktree's changes could not be applied in main: {message}\n\
-                     Going back failed too, so main still shows the worktree's commit: \
-                     {rollback:#}. Use Restore main to try again."
-                );
-            }
-            bail!("The worktree's changes could not be applied in main: {message}");
+    if !patch.is_empty()
+        && let Err(error) = main.run_input(["apply", "--whitespace=nowarn", "-"], &patch)
+    {
+        if let Err(rollback) = go_back(main, &preview) {
+            bail!(
+                "The worktree's changes could not be applied in main: {error:#}\n\
+                 Going back failed too, so main still shows the worktree's commit: \
+                 {rollback:#}. Use Restore main to try again."
+            );
         }
+        bail!("The worktree's changes could not be applied in main: {error:#}");
     }
     Ok(preview)
 }
@@ -252,15 +251,12 @@ pub fn start(main: &Git, source: &Git) -> Result<Preview> {
         conflicts::in_progress(main.cwd()).is_some(),
         dirty,
     )?;
-    let out = main.run_expecting(["symbolic-ref", "-q", "--short", "HEAD"], None, |o| {
-        o.status <= 1
-    })?;
-    let branch = out.stdout_str().trim().to_owned();
-    let restore = if branch.is_empty() {
-        let id = main.read(["rev-parse", "--verify", "HEAD"])?;
-        Restore::Detached(Oid::from_hex(id.trim().as_bytes())?)
-    } else {
-        Restore::Branch(branch)
+    let restore = match main.current_branch()? {
+        Some(branch) => Restore::Branch(branch),
+        None => match main.rev("HEAD")? {
+            Some(id) => Restore::Detached(id),
+            None => bail!("The main folder has no commits yet."),
+        },
     };
     show(main, source, restore)
 }
@@ -301,7 +297,12 @@ pub fn restore_main(main: &Git) -> Result<()> {
     let Some(preview) = active(main.cwd()) else {
         bail!("Main shows no preview.");
     };
-    clear(main, &preview)?;
+    go_back(main, &preview)
+}
+
+/// Undo `preview`: clear it, check out what main had and forget the marker.
+fn go_back(main: &Git, preview: &Preview) -> Result<()> {
+    clear(main, preview)?;
     match &preview.restore {
         // `switch`: git before 2.44 (e.g. Ubuntu 24.04's, in WSL) reads
         // `checkout --end-of-options` as a file name.

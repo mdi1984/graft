@@ -160,10 +160,7 @@ pub fn files(git: &Git, id: Oid) -> Result<Vec<StashFile>> {
         .map(|change| StashFile { change, commit: id })
         .collect();
     // Untracked files stashed with -u live in a third parent.
-    let third = git.run_raw(["rev-parse", "--verify", "--quiet", &format!("{id}^3")])?;
-    if third.success()
-        && let Ok(untracked) = Oid::from_hex(third.stdout_str().trim().as_bytes())
-    {
+    if let Some(untracked) = git.rev(&format!("{id}^3"))? {
         let names = git.read(["ls-tree", "-r", "--name-only", "-z", &untracked.to_string()])?;
         for path in names.split('\0').filter(|p| !p.is_empty()) {
             files.push(StashFile {

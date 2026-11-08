@@ -37,9 +37,7 @@ pub fn unstage_paths(git: &Git, paths: &[String]) -> Result<()> {
 }
 
 fn has_head(git: &Git) -> Result<bool> {
-    Ok(git
-        .run_raw(["rev-parse", "-q", "--verify", "HEAD"])?
-        .success())
+    Ok(git.rev("HEAD")?.is_some())
 }
 
 /// Throw away unstaged changes. Tracked files go back to their staged (or
@@ -138,7 +136,10 @@ fn new_file_header(path: &str) -> Vec<u8> {
 
 /// Whether git turns CRLF into LF when adding files (core.autocrlf).
 fn strips_cr(git: &Git) -> Result<bool> {
-    let out = git.run_raw(["config", "--get", "core.autocrlf"])?;
+    // Exit code 1: not set.
+    let out = git.run_accepting(["config", "--get", "core.autocrlf"], None, |o| {
+        o.status <= 1
+    })?;
     let value = out.stdout_str().trim().to_lowercase();
     Ok(value == "true" || value == "input")
 }
@@ -180,13 +181,8 @@ fn apply_patch(git: &Git, patch: &[u8], cached: bool, reverse: bool) -> Result<(
         args.push("--reverse");
     }
     args.push("-");
-    let out = git.run_with_input(args, Some(patch))?;
-    if !out.success() {
-        bail!(
-            "git could not apply the change: {}",
-            crate::cli::failure_message(&out)
-        );
-    }
+    git.run_input(args, patch)
+        .context("git could not apply the change")?;
     Ok(())
 }
 
@@ -205,10 +201,7 @@ pub fn commit(git: &Git, message: &str, amend: bool) -> Result<String> {
     if amend {
         args.push("--amend");
     }
-    let out = git.run_with_input(args, Some(message.as_bytes()))?;
-    if !out.success() {
-        bail!(crate::cli::failure_message(&out));
-    }
+    let out = git.run_input(args, message.as_bytes())?;
     let summary = out
         .stdout_str()
         .lines()

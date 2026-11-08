@@ -55,6 +55,39 @@ pub(crate) fn through_link(root: &Path, rel: &Path) -> bool {
     })
 }
 
+/// `*` matches any run of characters, `?` one character; case-insensitive
+/// like the Windows file system.
+pub(crate) fn glob_match(pattern: &str, name: &str) -> bool {
+    let p: Vec<char> = pattern.to_lowercase().chars().collect();
+    let n: Vec<char> = name.to_lowercase().chars().collect();
+    let (mut pi, mut ni) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while ni < n.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some((pi, ni));
+            pi += 1;
+        } else if let Some((sp, sn)) = star {
+            pi = sp + 1;
+            ni = sn + 1;
+            star = Some((sp, sn + 1));
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|c| *c == '*')
+}
+
+/// The patterns in a list setting the user typed: separated by commas,
+/// semicolons or line breaks.
+pub(crate) fn pattern_list(text: &str) -> impl Iterator<Item = &str> {
+    text.split([',', ';', '\n'])
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+}
+
 /// Start `cmd` without flashing a console window (Graft is a GUI app, so
 /// every console program it starts would otherwise open one).
 pub fn no_window(cmd: &mut Command) -> &mut Command {
@@ -118,6 +151,22 @@ mod tests {
             Path::new(r"\\wsl.localhost\Debian\home\app")
         ));
         assert!(same_path(Path::new(r"C:\Dev\x\"), Path::new("c:/dev/x")));
+    }
+
+    #[test]
+    fn globs() {
+        assert!(glob_match(".env", ".env"));
+        assert!(glob_match(".env.*", ".env.local"));
+        assert!(!glob_match(".env.*", ".env"));
+        assert!(glob_match("*.local.json", "appsettings.Local.json"));
+        assert!(!glob_match("*.local", "notes.md"));
+        assert!(glob_match("a?c*", "abcdef"));
+    }
+
+    #[test]
+    fn pattern_lists() {
+        let list: Vec<&str> = pattern_list("main, release/*;hotfix/*\n\n  dev ;").collect();
+        assert_eq!(list, ["main", "release/*", "hotfix/*", "dev"]);
     }
 
     #[test]

@@ -149,8 +149,7 @@ pub fn reset(git: &Git, rev: &str, mode: ResetMode) -> Result<()> {
 
 /// Undo the last commit but keep its changes staged.
 pub fn undo_last_commit(git: &Git) -> Result<()> {
-    let out = git.run_raw(["rev-parse", "--verify", "--quiet", "HEAD~1"])?;
-    if !out.success() {
+    if git.rev("HEAD~1")?.is_none() {
         bail!("The first commit cannot be undone this way.");
     }
     reset(git, "HEAD~1", ResetMode::Soft)

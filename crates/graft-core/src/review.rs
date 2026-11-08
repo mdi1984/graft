@@ -4,10 +4,10 @@
 
 use std::io::Read;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use crate::changes::{FileChange, between, is_binary};
-use crate::cli::{Git, failure_message};
+use crate::cli::Git;
 use crate::model::{Oid, RepoSnapshot};
 use crate::status::Change;
 
@@ -142,10 +142,7 @@ pub fn load(git: &Git, base: &str) -> Result<Review> {
             input.extend_from_slice(files[i].change.path.as_bytes());
             input.push(b'\n');
         }
-        let out = git.run_with_input(["hash-object", "--stdin-paths"], Some(&input))?;
-        if !out.success() {
-            bail!(failure_message(&out));
-        }
+        let out = git.run_input(["hash-object", "--stdin-paths"], &input)?;
         for (&i, hash) in present.iter().zip(out.stdout_str().lines()) {
             files[i].content = hash.trim().to_owned();
         }

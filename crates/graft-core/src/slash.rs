@@ -13,8 +13,7 @@ use anyhow::Result;
 use crate::cli::{Git, Progress};
 use crate::jobs::CancelToken;
 use crate::model::{DEFAULT_BRANCHES, Oid, RepoSnapshot, Upstream};
-use crate::paths::folder_name;
-use crate::worktree::glob_match;
+use crate::paths::{display, folder_name, glob_match, pattern_list};
 use crate::{refs, remote, snapshot, worktree};
 
 /// The branch name patterns Slash never proposes unless the user changes
@@ -78,11 +77,7 @@ pub struct Outcome {
 }
 
 fn protected(name: &str, patterns: &str) -> bool {
-    patterns
-        .split(',')
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .any(|p| glob_match(p, name))
+    pattern_list(patterns).any(|p| glob_match(p, name))
 }
 
 /// Fetch (with prune) and work out what could go. `git` points at the main
@@ -157,6 +152,12 @@ pub fn plan(git: &Git, snap: &RepoSnapshot, patterns: &str) -> Result<Plan> {
             Some(wt) if wt.prunable => None,
             Some(wt) if wt.locked => {
                 out.kept.push(keep("its worktree is locked"));
+                continue;
+            }
+            // Unknown is not clean: removing it could lose work.
+            Some(wt) if wt.status.is_none() => {
+                out.kept
+                    .push(keep("the status of its worktree could not be read"));
                 continue;
             }
             Some(wt) if wt.is_dirty() => {
@@ -244,7 +245,7 @@ pub fn execute(
             Err(e) => {
                 outcome
                     .errors
-                    .push(format!("Worktree {}: {e:#}", path.display()));
+                    .push(format!("Worktree {}: {e:#}", display(path)));
                 failed_worktrees.push(path.clone());
             }
         }
@@ -299,4 +300,18 @@ pub fn execute(
 /// Bring back a slashed branch at its old commit.
 pub fn restore(git: &Git, slashed: &Slashed) -> Result<()> {
     refs::create_branch(git, &slashed.branch, &slashed.target.to_string(), false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protected_patterns_in_every_list_form() {
+        for list in ["main, release/*", "main; release/*", "main\nrelease/*"] {
+            assert!(protected("release/1", list), "{list:?}");
+            assert!(protected("main", list), "{list:?}");
+        }
+        assert!(!protected("feature/x", "main; release/*"));
+    }
 }

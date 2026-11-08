@@ -9,7 +9,6 @@
 
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -269,30 +268,19 @@ fn unlogged(root: &Path) -> Git {
 /// Which of `paths` (relative to `root`) git ignores, or `None` if git could
 /// not tell.
 fn check_ignore(root: &Path, paths: &[PathBuf]) -> Option<HashSet<PathBuf>> {
-    // check-ignore refuses literal pathspecs; it reads plain paths anyway.
-    let mut cmd = unlogged(root)
-        .without_literal_pathspecs()
-        .command("git")
-        .ok()?;
-    cmd.args(["check-ignore", "-z", "--stdin"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = cmd.spawn().ok()?;
     let mut input = Vec::new();
     for p in paths {
         input.extend_from_slice(p.to_string_lossy().replace('\\', "/").as_bytes());
         input.push(0);
     }
-    let mut stdin = child.stdin.take()?;
-    std::thread::spawn(move || {
-        let _ = stdin.write_all(&input);
-    });
-    let out = child.wait_with_output().ok()?;
-    // 0: some ignored, 1: none ignored, anything else: an error.
-    if !matches!(out.status.code(), Some(0 | 1)) {
-        return None;
-    }
+    // check-ignore refuses literal pathspecs; it reads plain paths anyway.
+    // Exit code 0: some ignored, 1: none ignored.
+    let out = unlogged(root)
+        .without_literal_pathspecs()
+        .run_accepting(["check-ignore", "-z", "--stdin"], Some(&input), |o| {
+            matches!(o.status, 0 | 1)
+        })
+        .ok()?;
     Some(
         out.stdout
             .split(|b| *b == 0)
@@ -389,8 +377,13 @@ mod tests {
             let _ = tx.send(());
         })
         .unwrap();
-        std::thread::sleep(Duration::from_millis(200));
-        std::fs::write(nested.join("new.txt"), "x").unwrap();
-        assert!(rx.recv_timeout(Duration::from_secs(10)).is_ok());
+        // Write until a change is seen, in case the watch takes a moment
+        // to start.
+        let file = nested.join("new.txt");
+        let seen = (0..20).any(|i| {
+            std::fs::write(&file, i.to_string()).unwrap();
+            rx.recv_timeout(Duration::from_millis(500)).is_ok()
+        });
+        assert!(seen);
     }
 }

@@ -150,8 +150,7 @@ fn a_failed_apply_puts_main_back() {
 }
 
 /// Going back must not delete the user's own ignored file that was in the
-/// way: the rollback removes every file the preview meant to add, also
-/// ones it never wrote.
+/// way: the rollback removes only files the preview created.
 #[test]
 fn a_failed_apply_keeps_main_files() {
     let tmp = tempfile::tempdir().unwrap();
