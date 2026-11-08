@@ -181,18 +181,18 @@ pub fn merge(git: &Git, branch: &str, into: &str, head: Oid) -> Result<bool> {
     let place = display(git.cwd());
     if let Some(op) = in_progress(git.cwd()) {
         bail!(
-            "Nothing was merged: a {} is in progress in {place}. Finish or abort it, then              merge again.",
+            "Nothing was merged: a {} is in progress in {place}. Finish or abort it, then merge again.",
             op.kind.noun().to_lowercase()
         );
     }
     if git.current_branch()?.as_deref() != Some(into) {
         bail!(
-            "Nothing was merged: {into} is no longer checked out in {place}. Check it out              there, then merge again."
+            "Nothing was merged: {into} is no longer checked out in {place}. Check it out there, then merge again."
         );
     }
     if git.rev(&format!("refs/heads/{branch}"))? != Some(head) {
         bail!(
-            "Nothing was merged: {branch} moved since you reviewed it. Look at its new              commits in Review, then merge again."
+            "Nothing was merged: {branch} moved since you reviewed it. Look at its new commits in Review, then merge again."
         );
     }
     crate::conflicts::merge(git, branch, false)
