@@ -1,7 +1,7 @@
 //! The New worktree dialog: a new or existing branch, the folder, and which
 //! ignored files (like `.env`) to copy over.
 
-use egui::{ComboBox, Id, RichText, Ui};
+use egui::{Align, ComboBox, Id, Layout, RichText, Ui};
 use graft_core::RepoSnapshot;
 
 use super::widgets::dialog::{self, footer};
@@ -67,21 +67,19 @@ pub fn show(
         }
 
         field_label(ui, "Folder");
+        // Right to left: the field takes what the button leaves.
         ui.horizontal(|ui| {
-            let browse_width = 92.0;
-            let path = text_field(
-                ui,
-                &mut form.path,
-                "Where the worktree goes",
-                WIDTH - browse_width - 8.0,
-            );
-            if path.changed() {
-                form.path_edited = true;
-                form.error = None;
-            }
-            if button(ui, "Choose…", ButtonKind::Secondary, !form.creating).clicked() {
-                actions.push(Action::BrowseWorktreeFolder);
-            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if button(ui, "Choose…", ButtonKind::Secondary, !form.creating).clicked() {
+                    actions.push(Action::BrowseWorktreeFolder);
+                }
+                let width = ui.available_width();
+                let path = text_field(ui, &mut form.path, "Where the worktree goes", width);
+                if path.changed() {
+                    form.path_edited = true;
+                    form.error = None;
+                }
+            });
         });
 
         ui.add_space(4.0);
@@ -99,12 +97,20 @@ pub fn show(
             error_label(ui, error);
         }
         let creating = form.creating;
-        footer(ui, "Create worktree", true, creating, Some("Creating…"))
+        footer(
+            ui,
+            "Create worktree",
+            ButtonKind::Primary,
+            true,
+            creating,
+            Some("Creating…"),
+        )
     });
-    if shown.inner.primary || shown.enter {
+    let answer = shown.answer();
+    if answer.submit {
         actions.push(Action::CreateWorktree);
     }
-    if shown.inner.cancel || shown.cancel {
+    if answer.cancel {
         actions.push(Action::CloseNewWorktree);
     }
 }

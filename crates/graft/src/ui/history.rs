@@ -12,13 +12,13 @@ use graft_core::history::{Commit, GraphRow, History, LineKind};
 use graft_core::refs::ResetMode;
 use graft_core::short;
 
+use super::branch_menu::{self, checkout_color, menu_item};
+use super::diff_view;
 use super::file_row::{self, file_row, paint_file};
 use super::icons::Icon;
 use super::widgets::{
-    ButtonKind, button, checkout_color, chip, elided, empty_state, icon_button, loading, menu_item,
-    paint_galley_left,
+    ButtonKind, button, chip, elided, empty_state, icon_button, loading, paint_galley_left,
 };
-use super::{branch_menu, diff_view};
 use crate::project::{Action, DialogKind, FileKey, Project, RefKind, RefLabel};
 use crate::text::plural;
 use crate::theme::{self, color};

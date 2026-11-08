@@ -5,8 +5,11 @@ use egui::{Align, Layout, RichText, ScrollArea, Ui};
 use graft_core::Progress;
 use graft_core::slash::{Candidate, Plan, Reason};
 
-use super::widgets::dialog;
-use super::widgets::{ButtonKind, button, elided_path, inline_spinner, note, progress_bar, title};
+use super::widgets::dialog::{self, footer_row};
+use super::widgets::{
+    ButtonKind, button, elided_path, error_label, hint, inline_spinner, note, progress_bar,
+    section_label, small_text, title, warning_label,
+};
 use crate::project::{Action, SlashView, SlashedBranch};
 use crate::theme::{self, color};
 use crate::ui::Actions;
@@ -38,21 +41,25 @@ pub fn show(
                         .unwrap_or_else(|| "Fetching and scanning…".to_owned());
                     ui.label(RichText::new(line).color(color::text_weak()));
                 });
-                ui.add_space(8.0);
-                footer(ui, |ui| {
-                    if button(ui, "Cancel", ButtonKind::Secondary, true).clicked() {
-                        actions.push(Action::CloseSlash);
-                    }
-                });
+                let (_, cancel) = footer_row(
+                    ui,
+                    |_| {},
+                    |ui| button(ui, "Cancel", ButtonKind::Secondary, true).clicked(),
+                );
+                if cancel {
+                    actions.push(Action::CloseSlash);
+                }
             }
             Some(Err(error)) => {
-                wrapped(ui, &format!("Scanning failed: {error}"), color::removed());
-                ui.add_space(8.0);
-                footer(ui, |ui| {
-                    if button(ui, "Close", ButtonKind::Secondary, true).clicked() {
-                        actions.push(Action::CloseSlash);
-                    }
-                });
+                error_label(ui, &format!("Scanning failed: {error}"));
+                let (_, close) = footer_row(
+                    ui,
+                    |_| {},
+                    |ui| button(ui, "Close", ButtonKind::Secondary, true).clicked(),
+                );
+                if close {
+                    actions.push(Action::CloseSlash);
+                }
             }
             Some(Ok(plan)) => plan_ui(ui, view, plan, slashed, progress.as_ref(), actions),
         }
@@ -72,10 +79,9 @@ fn plan_ui(
 ) {
     if let Some(error) = &plan.fetch_error {
         let first = error.lines().next().unwrap_or_default();
-        wrapped(
+        warning_label(
             ui,
             &format!("Could not fetch, so this uses what was fetched before. {first}"),
-            color::dirty_fg(),
         );
     }
 
@@ -121,17 +127,12 @@ fn plan_ui(
                     continue;
                 }
                 ui.add_space(6.0);
-                ui.label(
-                    RichText::new(title.to_uppercase())
-                        .color(color::text_faint())
-                        .size(theme::SMALL_SIZE),
-                );
-                let detail_color = if reason == Reason::NeverPushed {
-                    color::dirty_fg()
+                section_label(ui, title);
+                if reason == Reason::NeverPushed {
+                    small_text(ui, detail, color::dirty_fg());
                 } else {
-                    color::text_faint()
-                };
-                small(ui, detail, detail_color);
+                    hint(ui, detail);
+                }
                 for (i, candidate) in rows {
                     candidate_row(ui, view, i, candidate, actions);
                 }
@@ -147,7 +148,7 @@ fn plan_ui(
                     for (name, why) in &plan.kept {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(name).font(theme::mono()).color(color::text()));
-                            small(ui, why, color::text_faint());
+                            hint(ui, why);
                         });
                     }
                 });
@@ -165,39 +166,41 @@ fn plan_ui(
 
     if let Some(outcome) = &view.outcome {
         for error in &outcome.errors {
-            wrapped(ui, error, color::removed());
+            error_label(ui, error);
         }
     }
 
-    ui.add_space(8.0);
     if view.running {
+        ui.add_space(8.0);
         // Deleting many worktrees takes a while: say where it is.
         let line = progress.map_or("Starting…", |p| p.line.as_str());
         ui.label(RichText::new(line).color(color::text_mid()));
         progress_bar(ui, progress.and_then(|p| p.fraction), WIDTH);
-        ui.add_space(8.0);
     }
     let count = view.checked.iter().filter(|on| **on).count();
-    footer(ui, |ui| {
-        let label = match count {
-            0 => "Slash".to_owned(),
-            n => format!("Slash {n}"),
-        };
-        if button(ui, &label, ButtonKind::Primary, count > 0 && !view.running).clicked() {
-            actions.push(Action::RunSlash);
-        }
-        if view.running {
-            // Stops after the current item; what is done stays restorable.
-            if button(ui, "Stop", ButtonKind::Secondary, true)
-                .on_hover_text("Stop after the current item")
-                .clicked()
-            {
-                actions.push(Action::CancelOperation);
+    let ((), action) = footer_row(
+        ui,
+        |_| {},
+        |ui| {
+            let label = match count {
+                0 => "Slash".to_owned(),
+                n => format!("Slash {n}"),
+            };
+            if button(ui, &label, ButtonKind::Primary, count > 0 && !view.running).clicked() {
+                return Some(Action::RunSlash);
             }
-        } else if button(ui, "Cancel", ButtonKind::Secondary, true).clicked() {
-            actions.push(Action::CloseSlash);
-        }
-    });
+            if view.running {
+                // Stops after the current item; what is done stays restorable.
+                let stop = button(ui, "Stop", ButtonKind::Secondary, true)
+                    .on_hover_text("Stop after the current item");
+                stop.clicked().then_some(Action::CancelOperation)
+            } else {
+                let cancel = button(ui, "Cancel", ButtonKind::Secondary, true);
+                cancel.clicked().then_some(Action::CloseSlash)
+            }
+        },
+    );
+    actions.extend(action);
 }
 
 fn candidate_row(
@@ -228,7 +231,7 @@ fn candidate_row(
         ui.horizontal(|ui| {
             ui.add_space(24.0);
             ui.spacing_mut().item_spacing.x = 0.0;
-            small(ui, prefix, color::text_weak());
+            small_text(ui, prefix, color::text_weak());
             let full = graft_core::paths::display(path);
             let galley = elided_path(
                 ui,
@@ -243,7 +246,7 @@ fn candidate_row(
 }
 
 fn recent_ui(ui: &mut Ui, slashed: &[SlashedBranch], running: bool, actions: &mut Actions) {
-    let now = jiff::Timestamp::now().as_second();
+    let now = crate::time::now();
     for (i, entry) in slashed.iter().enumerate() {
         ui.horizontal(|ui| {
             ui.label(
@@ -252,10 +255,9 @@ fn recent_ui(ui: &mut Ui, slashed: &[SlashedBranch], running: bool, actions: &mu
                     .color(color::text()),
             );
             let sha = graft_core::short(&entry.target);
-            small(
+            hint(
                 ui,
                 &format!("{sha} · {}", crate::time::relative(entry.at, now)),
-                color::text_faint(),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if button(ui, "Restore", ButtonKind::Secondary, !running).clicked() {
@@ -264,18 +266,4 @@ fn recent_ui(ui: &mut Ui, slashed: &[SlashedBranch], running: bool, actions: &mu
             });
         });
     }
-}
-
-fn footer(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
-    ui.horizontal(|ui| {
-        ui.with_layout(Layout::right_to_left(Align::Center), add);
-    });
-}
-
-fn wrapped(ui: &mut Ui, text: &str, color: egui::Color32) {
-    ui.add(egui::Label::new(RichText::new(text).color(color)).wrap());
-}
-
-fn small(ui: &mut Ui, text: &str, color: egui::Color32) {
-    ui.add(egui::Label::new(RichText::new(text).color(color).size(theme::SMALL_SIZE)).wrap());
 }

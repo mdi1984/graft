@@ -6,11 +6,11 @@ use graft_core::console::redact;
 use graft_core::paths::same_path;
 use graft_core::{Branch, RemoteBranch, RepoSnapshot, Upstream, Worktree, paths, remote};
 
-use super::branch_menu;
+use super::branch_menu::{self, checkout_color, menu_item};
 use super::icons::Icon;
 use super::widgets::{
-    self, Badge, ICON_SIZE, checkout_color, elided, elided_path, menu_item, paint_badges_right,
-    paint_galley_left, paint_icon, paint_row_bg, section_heading,
+    self, Badge, ICON_SIZE, elided, elided_path, paint_badges_right, paint_galley_left, paint_icon,
+    paint_row_bg, section_heading,
 };
 use crate::project::{
     Action, CheckedOut, Confirm, DialogKind, Project, RemoteOp, Tab, WorkspaceView, merge_dialog,

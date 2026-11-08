@@ -48,7 +48,7 @@ pub fn preview(snap: &RepoSnapshot, wt: Option<&Worktree>) -> (Can, Option<Actio
         ),
         Ok(Step::Start) => (
             yes(
-                "Check out this worktree's commit plus its uncommitted changes in the main                  folder, e.g. to run it from there",
+                "Check out this worktree's commit plus its uncommitted changes in the main folder, e.g. to run it from there",
             ),
             Some(Action::PreviewInMain(wt.path.clone())),
         ),

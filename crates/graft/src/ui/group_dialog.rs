@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use super::widgets::dialog::{self, footer};
-use super::widgets::{color_swatches, field_label, note, text_field, title};
+use super::widgets::{ButtonKind, color_swatches, field_label, note, text_field, title};
 use crate::groups::GroupId;
 
 const WIDTH: f32 = 400.0;
@@ -49,7 +49,7 @@ pub fn show(ctx: &egui::Context, form: &mut GroupForm) -> Outcome {
         if new {
             note(
                 ui,
-                "Keeps repositories together, e.g. one customer's. Closing their tabs keeps the                  group, and the start page opens them all again.",
+                "Keeps repositories together, e.g. one customer's. Closing their tabs keeps the group, and the start page opens them all again.",
             );
         }
         field_label(ui, "Name");
@@ -62,11 +62,12 @@ pub fn show(ctx: &egui::Context, form: &mut GroupForm) -> Outcome {
             form.color = c;
         }
         let label = if new { "Create group" } else { "Rename" };
-        footer(ui, label, form.ready(), false, None)
+        footer(ui, label, ButtonKind::Primary, form.ready(), false, None)
     });
-    if shown.cancel || shown.inner.cancel {
+    let answer = shown.answer();
+    if answer.cancel {
         Outcome::Cancel
-    } else if (shown.inner.primary || shown.enter) && form.ready() {
+    } else if answer.submit {
         Outcome::Save
     } else {
         Outcome::Open

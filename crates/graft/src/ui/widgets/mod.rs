@@ -14,9 +14,7 @@ use egui::{
 pub use form::*;
 
 use super::icons::{self, Icon};
-use crate::project::{Action, CheckedOut};
 use crate::theme::{self, RADIUS, color};
-use crate::ui::Actions;
 
 pub const ICON_SIZE: f32 = 14.0;
 
@@ -349,6 +347,8 @@ pub enum ButtonKind {
     /// Accent-filled: the one main action of a form.
     Primary,
     Secondary,
+    /// Red-filled: the main action of a question before something destructive.
+    Danger,
 }
 
 /// A plain text button in Graft's style.
@@ -356,7 +356,7 @@ pub fn button(ui: &mut Ui, label: &str, kind: ButtonKind, enabled: bool) -> Resp
     const PAD_X: f32 = 14.0;
     const HEIGHT: f32 = 30.0;
     let font = match kind {
-        ButtonKind::Primary => theme::semibold(theme::BODY_SIZE),
+        ButtonKind::Primary | ButtonKind::Danger => theme::semibold(theme::BODY_SIZE),
         ButtonKind::Secondary => theme::body(),
     };
     // Placeholder color: `galley()` below paints it in the state's color.
@@ -372,7 +372,7 @@ pub fn button(ui: &mut Ui, label: &str, kind: ButtonKind, enabled: bool) -> Resp
     let (rect, response) = ui.allocate_exact_size(size, sense);
     let hovered = enabled && response.hovered();
     let (fill, border, fg) = match kind {
-        ButtonKind::Primary if !enabled => (
+        ButtonKind::Primary | ButtonKind::Danger if !enabled => (
             color::control_bg(),
             color::control_border(),
             color::text_faint(),
@@ -382,6 +382,15 @@ pub fn button(ui: &mut Ui, label: &str, kind: ButtonKind, enabled: bool) -> Resp
                 color::accent_hover()
             } else {
                 color::accent()
+            },
+            Color32::TRANSPARENT,
+            color::on_accent(),
+        ),
+        ButtonKind::Danger => (
+            if hovered {
+                color::removed().gamma_multiply(1.1)
+            } else {
+                color::removed()
             },
             Color32::TRANSPARENT,
             color::on_accent(),
@@ -553,22 +562,4 @@ pub fn color_swatches(ui: &mut Ui, current: usize) -> Option<usize> {
         }
     });
     picked
-}
-
-/// Where a branch is checked out, as the sidebar and the graph color it:
-/// green in the main folder, orange in a linked worktree.
-pub fn checkout_color(checked_out: CheckedOut) -> Color32 {
-    match checked_out {
-        CheckedOut::Main => color::accent(),
-        CheckedOut::Worktree => color::branch_dot_agent(),
-        CheckedOut::Nowhere => color::ahead_fg(),
-    }
-}
-
-/// A context menu entry that sends `action` and closes the menu.
-pub fn menu_item(ui: &mut Ui, label: &str, enabled: bool, actions: &mut Actions, action: Action) {
-    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
-        actions.push(action);
-        ui.close();
-    }
 }

@@ -109,7 +109,7 @@ pub fn show(
     window_frame::drag_area(ui, strip);
 
     let icon = Rect::from_center_size(pos2(full.left() + 22.0, mid), vec2(ICON, ICON));
-    window_frame::paint_app_icon(ui, icon);
+    super::icons::paint_app_icon(ui, icon);
     if ui
         .interact(
             icon.expand(4.0),
