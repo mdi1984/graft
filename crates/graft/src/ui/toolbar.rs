@@ -142,7 +142,7 @@ pub fn show(
         {
             actions.push(Action::OpenDialog(DialogKind::stash()));
         }
-        let can = yes("Check out a branch in a second folder").unless(blocked);
+        let can = can::new_worktree(project);
         if tool_button(ui, None, "New worktree", None, Tone::Normal, can.ok)
             .on_hover_text(can.hint)
             .clicked()

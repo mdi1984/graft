@@ -10,10 +10,23 @@ use graft_core::{RemoteBranch, RepoSnapshot, Worktree};
 use crate::project::{Action, CheckedOut, Project};
 use crate::theme::color;
 use crate::ui::Actions;
+use crate::ui::can::{self, Can};
 
 /// A context menu entry that sends `action` and closes the menu.
 pub fn menu_item(ui: &mut Ui, label: &str, enabled: bool, actions: &mut Actions, action: Action) {
     if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+        actions.push(action);
+        ui.close();
+    }
+}
+
+/// A menu entry that says why, on hover, when it cannot act now.
+pub fn can_item(ui: &mut Ui, label: &str, can: &Can, actions: &mut Actions, action: Action) {
+    if ui
+        .add_enabled(can.ok, egui::Button::new(label))
+        .on_disabled_hover_text(&can.hint)
+        .clicked()
+    {
         actions.push(action);
         ui.close();
     }
@@ -79,10 +92,13 @@ impl Open<'_> {
         }
     }
 
-    /// Whether it can happen now: a checkout waits for the running
-    /// operation.
-    pub fn can_start(&self, project: &Project) -> bool {
-        matches!(self, Open::GoTo(_)) || !project.is_operating()
+    /// Whether it can happen now: going to a worktree always can, a
+    /// checkout waits for the running operation.
+    pub fn can(&self, project: &Project) -> Can {
+        match self {
+            Open::GoTo(_) => can::yes(""),
+            _ => can::act(project, ""),
+        }
     }
 
     /// The menu entry; `named` says which branch it is about.
@@ -109,12 +125,12 @@ impl Open<'_> {
     /// The menu entry, then "New worktree…" unless the branch has one.
     fn items(&self, ui: &mut Ui, project: &Project, named: bool, actions: &mut Actions) {
         let label = self.label(project, named);
-        menu_item(ui, &label, self.can_start(project), actions, self.action());
-        let busy = project.is_operating();
+        can_item(ui, &label, &self.can(project), actions, self.action());
+        let can = can::new_worktree(project);
         match self {
             Open::GoTo(_) => {}
-            Open::Checkout(name) => new_worktree_item(ui, name, named, busy, actions),
-            Open::Track { remote, .. } => new_worktree_item(ui, remote, named, busy, actions),
+            Open::Checkout(name) => new_worktree_item(ui, name, named, &can, actions),
+            Open::Track { remote, .. } => new_worktree_item(ui, remote, named, &can, actions),
         }
     }
 }
@@ -170,16 +186,16 @@ pub fn tracking_items(
     true
 }
 
-fn new_worktree_item(ui: &mut Ui, name: &str, named: bool, busy: bool, actions: &mut Actions) {
+fn new_worktree_item(ui: &mut Ui, name: &str, named: bool, can: &Can, actions: &mut Actions) {
     let label = if named {
         format!("New worktree for {name}…")
     } else {
         "New worktree for this branch…".to_owned()
     };
-    menu_item(
+    can_item(
         ui,
         &label,
-        !busy,
+        can,
         actions,
         Action::NewWorktree(Some(name.to_owned())),
     );

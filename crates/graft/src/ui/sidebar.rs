@@ -6,8 +6,8 @@ use graft_core::console::redact;
 use graft_core::paths::same_path;
 use graft_core::{Branch, RemoteBranch, RepoSnapshot, Upstream, Worktree, paths, remote};
 
-use super::branch_menu::{self, Open, checkout_color, menu_item};
-use super::can;
+use super::branch_menu::{self, Open, can_item, checkout_color, menu_item};
+use super::can::{self, Can};
 use super::icons::Icon;
 use super::widgets::{
     self, Badge, ICON_SIZE, elided, elided_path, paint_badges_right, paint_galley_left, paint_icon,
@@ -36,7 +36,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
 
-            heading(ui, "WORKSPACE", false);
+            heading(ui, "WORKSPACE", None);
             let in_workspace = nav.tab == Tab::Workspace;
             let dirty = current.map_or(0, Worktree::dirty);
             let dirty_badge =
@@ -60,9 +60,9 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
             }
             ui.add_space(SECTION_GAP);
 
-            if let Some(add) = heading(ui, "WORKTREES", true)
-                && add.on_hover_text("New worktree").clicked()
-                && !project.is_operating()
+            let new_worktree = can::new_worktree(project);
+            if let Some(add) = heading(ui, "WORKTREES", Some(&new_worktree))
+                && add.clicked()
             {
                 actions.push(Action::NewWorktree(None));
             }
@@ -110,7 +110,8 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
 
             if collapsible(ui, "TAGS", repo.tags.len(), false) {
                 for tag in repo.tags.iter().rev() {
-                    let response = simple_row(ui, Icon::Tag, &tag.name, color::tag(), 20.0);
+                    let response =
+                        simple_row(ui, Icon::Tag, &tag.name, color::tag(), color::text(), 20.0);
                     if response.clicked() {
                         actions.push(Action::Reveal(tag.target));
                     }
@@ -236,17 +237,22 @@ fn row(ui: &mut Ui, height: f32) -> (Rect, Response) {
 
 /// Section heading, with a "+" button at the right if `plus`; returns the
 /// button's response.
-fn heading(ui: &mut Ui, title: &str, plus: bool) -> Option<Response> {
+/// A section heading, with a "+" button when `plus` says what it adds (or
+/// why it can't now); the button's response takes clicks only when it can.
+fn heading(ui: &mut Ui, title: &str, plus: Option<&Can>) -> Option<Response> {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
     section_heading(ui, ui.painter(), rect.left() + 6.0, rect.center().y, title);
-    if !plus {
-        return None;
-    }
+    let can = plus?;
     let button =
         Rect::from_center_size(pos2(rect.right() - 12.0, rect.center().y), vec2(22.0, 22.0));
-    let response = ui.interact(button, ui.scope_id().with(title), Sense::click());
-    widgets::paint_icon_button(ui, button, &response, Icon::Plus);
-    Some(response)
+    let sense = if can.ok {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let response = ui.interact(button, ui.scope_id().with(title), sense);
+    widgets::paint_icon_button_when(ui, button, &response, Icon::Plus, can.ok);
+    Some(response.on_hover_text(&can.hint))
 }
 
 /// A heading that folds its section; the open state survives restarts.
@@ -721,49 +727,58 @@ fn branch_row(
 
 /// Double-click on a branch: what its menu offers first, if it can start.
 fn open(project: &Project, open: Option<Open>, actions: &mut Actions) {
-    if let Some(open) = open.filter(|o| o.can_start(project)) {
+    if let Some(open) = open.filter(|o| o.can(project).ok) {
         actions.push(open.action());
     }
 }
 
 fn remotes(ui: &mut Ui, project: &Project, repo: &RepoSnapshot, actions: &mut Actions) {
-    let busy = project.is_operating();
+    let can_add = can::add_remote(project);
+    // Only shown when it can't: why.
+    let can_change = can::act(project, "");
     let add = Action::OpenDialog(DialogKind::add_remote(repo.remotes.is_empty()));
     for remote in &repo.remotes {
-        simple_row(ui, Icon::Cloud, &remote.name, color::text_mid(), 8.0)
-            .on_hover_text(graft_core::console::redact(&remote.fetch_url))
-            .context_menu(|ui| {
-                menu_item(
-                    ui,
-                    "Edit…",
-                    !busy,
-                    actions,
-                    Action::OpenDialog(DialogKind::edit_remote(&remote.name, &remote.fetch_url)),
-                );
-                if ui.button("Copy URL").clicked() {
-                    ui.ctx().copy_text(remote.fetch_url.clone());
-                    ui.close();
-                }
-                menu_item(
-                    ui,
-                    "Remove…",
-                    !busy,
-                    actions,
-                    Action::Ask(Box::new(Confirm {
-                        title: format!("Remove remote {}?", remote.name),
-                        body: format!(
-                            "Graft forgets {} and its remote branches. Nothing changes on the \
+        simple_row(
+            ui,
+            Icon::Cloud,
+            &remote.name,
+            color::text_mid(),
+            color::text(),
+            8.0,
+        )
+        .on_hover_text(graft_core::console::redact(&remote.fetch_url))
+        .context_menu(|ui| {
+            can_item(
+                ui,
+                "Edit…",
+                &can_change,
+                actions,
+                Action::OpenDialog(DialogKind::edit_remote(&remote.name, &remote.fetch_url)),
+            );
+            if ui.button("Copy URL").clicked() {
+                ui.ctx().copy_text(remote.fetch_url.clone());
+                ui.close();
+            }
+            can_item(
+                ui,
+                "Remove…",
+                &can_change,
+                actions,
+                Action::Ask(Box::new(Confirm {
+                    title: format!("Remove remote {}?", remote.name),
+                    body: format!(
+                        "Graft forgets {} and its remote branches. Nothing changes on the \
                              server, and your local branches keep their commits; branches that \
                              tracked it lose their upstream.",
-                            redact(&remote.fetch_url)
-                        ),
-                        confirm_label: "Remove remote".to_owned(),
-                        action: Action::RemoveRemote(remote.name.clone()),
-                    })),
-                );
-                ui.separator();
-                menu_item(ui, "Add remote…", !busy, actions, add.clone());
-            });
+                        redact(&remote.fetch_url)
+                    ),
+                    confirm_label: "Remove remote".to_owned(),
+                    action: Action::RemoveRemote(remote.name.clone()),
+                })),
+            );
+            ui.separator();
+            can_item(ui, "Add remote…", &can_add, actions, add.clone());
+        });
         let branches: Vec<&RemoteBranch> = repo
             .remote_branches
             .iter()
@@ -781,8 +796,13 @@ fn remotes(ui: &mut Ui, project: &Project, repo: &RepoSnapshot, actions: &mut Ac
             },
         );
     }
-    let response = simple_row(ui, Icon::Plus, "Add remote…", color::text_weak(), 8.0);
-    if response.clicked() && !busy {
+    let (icon, text) = if can_add.ok {
+        (color::text_weak(), color::text())
+    } else {
+        (color::text_faint(), color::text_faint())
+    };
+    let response = simple_row(ui, Icon::Plus, "Add remote…", icon, text, 8.0);
+    if response.on_hover_text(&can_add.hint).clicked() && can_add.ok {
         actions.push(add);
     }
 }
@@ -830,6 +850,7 @@ fn simple_row(
     icon: Icon,
     text: &str,
     icon_color: egui::Color32,
+    text_color: egui::Color32,
     indent: f32,
 ) -> Response {
     let (rect, response) = row(ui, 24.0);
@@ -847,7 +868,7 @@ fn simple_row(
         ui,
         text,
         theme::mono(),
-        color::text(),
+        text_color,
         rect.right() - PAD_X - x,
     );
     paint_galley_left(ui.painter(), x, y, name);

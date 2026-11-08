@@ -6,7 +6,7 @@ use graft_core::preview::{self, Step};
 use graft_core::review::Review;
 use graft_core::{RepoSnapshot, Worktree};
 
-use crate::project::Action;
+use crate::project::{Action, Project};
 
 pub const FINISH_FIRST: &str = "Finish or abort what is in progress first";
 
@@ -37,6 +37,22 @@ pub fn no(hint: impl Into<String>) -> Can {
         ok: false,
         hint: hint.into(),
     }
+}
+
+/// Anything that starts an operation, with `hint` saying what it does:
+/// not while the repository loads or another operation runs.
+pub fn act(project: &Project, hint: impl Into<String>) -> Can {
+    yes(hint).unless(project.can_act().err())
+}
+
+/// A new worktree (toolbar, the sidebar's "+", a branch's menu).
+pub fn new_worktree(project: &Project) -> Can {
+    act(project, "Check out a branch in a second folder")
+}
+
+/// Adding a remote (the sidebar's REMOTES).
+pub fn add_remote(project: &Project) -> Can {
+    act(project, "Add a remote to fetch from and push to")
 }
 
 /// Merging another branch into `wt`'s branch, or rebasing it.

@@ -397,7 +397,7 @@ pub fn empty_state(ui: &mut Ui, title: &str, detail: &str) {
     );
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ButtonKind {
     /// Accent-filled: the one main action of a form.
     Primary,
@@ -494,11 +494,20 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, size: f32) -> Response {
 
 /// Paint an icon button into a rect that was already interacted with.
 pub fn paint_icon_button(ui: &Ui, rect: Rect, response: &Response, icon: Icon) {
+    paint_icon_button_when(ui, rect, response, icon, true);
+}
+
+/// Like [`paint_icon_button`]; a button that cannot act now (`enabled`
+/// false) is drawn faint, without a hover fill.
+pub fn paint_icon_button_when(ui: &Ui, rect: Rect, response: &Response, icon: Icon, enabled: bool) {
     let painter = ui.painter();
-    if response.hovered() {
+    let hovered = enabled && response.hovered();
+    if hovered {
         painter.rect_filled(rect, 4, color::control_hover_bg());
     }
-    let fg = if response.hovered() {
+    let fg = if !enabled {
+        color::text_faint()
+    } else if hovered {
         color::text()
     } else {
         color::text_weak()

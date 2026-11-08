@@ -235,7 +235,14 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Actions) {
         if let Some(error) = &dialog.error {
             error_label(ui, error);
         }
-        footer(ui, confirm_label, ButtonKind::Primary, true, busy, None)
+        footer(
+            ui,
+            confirm_label,
+            submit_kind(&dialog.kind),
+            true,
+            busy,
+            None,
+        )
     });
     let answer = shown.answer();
     if answer.submit {
@@ -243,6 +250,18 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Actions) {
     }
     if answer.cancel {
         actions.push(Action::CloseDialog);
+    }
+}
+
+/// How the dialog's main button looks: Danger for what throws work away
+/// (a hard reset), which Enter then does not run.
+fn submit_kind(kind: &DialogKind) -> ButtonKind {
+    match kind {
+        DialogKind::Reset {
+            mode: ResetMode::Hard,
+            ..
+        } => ButtonKind::Danger,
+        _ => ButtonKind::Primary,
     }
 }
 
@@ -269,4 +288,26 @@ fn choice(
         picked.changed()
     })
     .inner
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reset(mode: ResetMode) -> DialogKind {
+        DialogKind::Reset {
+            target: "abc".to_owned(),
+            target_label: "abc".to_owned(),
+            branch: "main".to_owned(),
+            mode,
+        }
+    }
+
+    /// Only a hard reset is Danger, so Enter cannot run it.
+    #[test]
+    fn hard_reset_is_danger() {
+        assert_eq!(submit_kind(&reset(ResetMode::Hard)), ButtonKind::Danger);
+        assert_eq!(submit_kind(&reset(ResetMode::Mixed)), ButtonKind::Primary);
+        assert_eq!(submit_kind(&DialogKind::stash()), ButtonKind::Primary);
+    }
 }

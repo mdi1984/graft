@@ -151,7 +151,7 @@ fn header(
     viewed: usize,
     actions: &mut Actions,
 ) {
-    let busy = project.is_operating();
+    let blocked = project.can_act().err();
     // Not enough room for everything on one line: the numbers and the
     // progress bar move to a second line instead of running under the buttons.
     let one_line = ui.available_width() > ONE_LINE_WIDTH;
@@ -169,7 +169,7 @@ fn header(
         }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            merge_button(ui, snap, wt, review, busy, actions);
+            merge_button(ui, snap, wt, review, blocked, actions);
             if button(ui, "Open in IDE", ButtonKind::Secondary, true)
                 .on_hover_text(ide_tip(project, "this worktree"))
                 .clicked()
@@ -181,7 +181,8 @@ fn header(
                 Some(Action::UpdatePreview) => "Update preview",
                 _ => "Preview in main folder",
             };
-            if button(ui, label, ButtonKind::Secondary, can.ok && !busy)
+            let can = can.unless(blocked);
+            if button(ui, label, ButtonKind::Secondary, can.ok)
                 .on_hover_text(can.hint)
                 .clicked()
                 && let Some(action) = preview
@@ -297,15 +298,15 @@ fn merge_button(
     snap: &RepoSnapshot,
     wt: &Worktree,
     review: &Review,
-    busy: bool,
+    blocked: Option<&str>,
     actions: &mut Actions,
 ) {
     let base = review.base.as_str();
     let (can, target) = can::merge_reviewed(snap, wt, review);
+    let can = can.unless(blocked);
     let label = format!("Merge into {base}…");
-    if button(ui, &label, ButtonKind::Primary, can.ok && !busy)
+    if button(ui, &label, ButtonKind::Primary, can.ok)
         .on_hover_text(&can.hint)
-        .on_disabled_hover_text(&can.hint)
         .clicked()
         && let (Some(branch), Some(t)) = (&wt.branch, target)
     {
