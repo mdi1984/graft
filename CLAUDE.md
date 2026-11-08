@@ -171,12 +171,3 @@ main once checks pass.
 - `.github/workflows/ci.yml` checks fmt, clippy (-D warnings) and tests on
   every PR and push to main, and builds the packages (artifact
   `graft-packages`).
-
-## MVP order
-1. Cargo workspace + egui shell + theme
-2. Open/clone/init repo, project tabs, commit graph (virtualized list)
-3. Status + diff
-4. Stage/unstage files, hunks, lines; commit
-5. Worktree sidebar + file watcher
-6. Push/pull/fetch
-7. Slash, Stashes, Review, Conflicts, Preview in main
