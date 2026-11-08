@@ -153,10 +153,9 @@ fn write_marker(main: &Path, preview: &Preview) -> Result<()> {
     Ok(())
 }
 
-/// Run `then` with every file of the worktree (untracked ones included,
-/// ignored ones not) added to a copy of its index, so the worktree's own
+/// Run `then` on a copy of the worktree's index, so the worktree's own
 /// staging is left alone.
-fn with_everything_added<T>(worktree: &Git, then: impl FnOnce(&Git) -> Result<T>) -> Result<T> {
+fn with_index_copy<T>(worktree: &Git, then: impl FnOnce(&Git) -> Result<T>) -> Result<T> {
     // Unique per call: the clock alone repeats between threads on Windows.
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let name = format!(
@@ -177,16 +176,40 @@ fn with_everything_added<T>(worktree: &Git, then: impl FnOnce(&Git) -> Result<T>
         if !copied {
             git.run(["read-tree", "HEAD"])?;
         }
-        git.run(["add", "-A"])?;
         then(&git)
     })();
     let _ = std::fs::remove_file(&tmp);
     result
 }
 
-/// The tree of the worktree's files as they are now.
-fn files_tree(worktree: &Git) -> Result<Oid> {
-    with_everything_added(worktree, |git| {
+/// Run `then` with every file of the worktree (untracked ones included,
+/// ignored ones not) added to a copy of its index.
+fn with_everything_added<T>(worktree: &Git, then: impl FnOnce(&Git) -> Result<T>) -> Result<T> {
+    with_index_copy(worktree, |git| {
+        git.run(["add", "-A"])?;
+        then(git)
+    })
+}
+
+/// The tree of main's files that leaving the preview throws away: tracked
+/// ones (reset) and the ones the preview `added` (deleted). Other new files
+/// stay, so they are left out (and never read: one may be locked).
+fn discarded_tree(main: &Git, added: &[String]) -> Result<Oid> {
+    let mut paths = Vec::new();
+    for path in added {
+        if std::fs::symlink_metadata(main.cwd().join(path)).is_ok() {
+            paths.extend_from_slice(path.as_bytes());
+            paths.push(0);
+        }
+    }
+    with_index_copy(main, |git| {
+        // Any line endings: this only compares, nothing is committed.
+        let add = ["-c", "core.safecrlf=false", "add"];
+        git.run(add.iter().chain(&["-u"]))?;
+        if !paths.is_empty() {
+            let from_stdin = ["-f", "--pathspec-from-file=-", "--pathspec-file-nul"];
+            git.run_input(add.iter().chain(&from_stdin), &paths)?;
+        }
         let id = git.read(["write-tree"])?;
         Ok(Oid::from_hex(id.trim().as_bytes())?)
     })
@@ -255,20 +278,21 @@ fn show(main: &Git, source: &Git, restore: Restore) -> Result<Preview> {
         bail!("The worktree's changes could not be applied in main: {error:#}");
     }
     // Unknown, leaving the preview asks first, as if main had changed.
-    preview.shown = files_tree(main).ok();
+    preview.shown = discarded_tree(main, &preview.added).ok();
     write_marker(main.cwd(), &preview)?;
     Ok(preview)
 }
 
-/// Whether main's files differ from what the preview left there: leaving
-/// the preview would throw away changes made in main since. True when that
-/// is unknown (a marker from an older Graft).
+/// Whether the files leaving the preview throws away (see
+/// [`discarded_tree`]) differ from what the preview left there: changes
+/// made in main since would be lost. True when that is unknown (a marker
+/// from an older Graft, a file git cannot read).
 pub fn main_changed(main: &Git) -> Result<bool> {
     let Some(preview) = active(main.cwd()) else {
         bail!("Main shows no preview.");
     };
     Ok(match preview.shown {
-        Some(shown) => files_tree(main)? != shown,
+        Some(shown) => discarded_tree(main, &preview.added).ok() != Some(shown),
         None => true,
     })
 }

@@ -195,8 +195,10 @@ fn preview_works_with_diff_prefix_settings() {
 }
 
 /// Main as the preview left it can be restored without asking; an edit, a
-/// new or a deleted file in main since is noticed, and so is a marker from
-/// an older Graft, which never recorded what the preview left.
+/// staged new file or a deleted file in main since is noticed (leaving
+/// would lose it), and so is a marker from an older Graft, which never
+/// recorded what the preview left. A new file in main that leaving keeps
+/// is not a change.
 #[test]
 fn changes_in_main_since_the_preview_are_noticed() {
     let tmp = tempfile::tempdir().unwrap();
@@ -217,8 +219,13 @@ fn changes_in_main_since_the_preview_are_noticed() {
     std::fs::write(main.join("a.txt"), "agent\n").unwrap();
     assert!(!preview::main_changed(&git).unwrap());
     std::fs::write(main.join("mine.txt"), "new in main\n").unwrap();
+    assert!(!preview::main_changed(&git).unwrap());
+    sh(&main, &["add", "mine.txt"]);
     assert!(preview::main_changed(&git).unwrap());
-    std::fs::remove_file(main.join("mine.txt")).unwrap();
+    sh(&main, &["rm", "-q", "--cached", "mine.txt"]);
+    assert!(!preview::main_changed(&git).unwrap());
+    std::fs::write(main.join("new.txt"), "edited in main\n").unwrap();
+    assert!(preview::main_changed(&git).unwrap());
     std::fs::remove_file(main.join("new.txt")).unwrap();
     assert!(preview::main_changed(&git).unwrap());
 
@@ -238,4 +245,46 @@ fn changes_in_main_since_the_preview_are_noticed() {
     assert!(preview::main_changed(&git).unwrap());
     preview::restore_main(&git).unwrap();
     assert!(preview::main_changed(&git).is_err(), "no preview");
+}
+
+/// A file in main that git cannot read (locked by an app running from
+/// main) leaves it unknown whether leaving would lose changes: that counts
+/// as changed. A locked new file that leaving keeps is never read.
+#[cfg(windows)]
+#[test]
+fn a_file_git_cannot_read_counts_as_changed() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let (git, agent) = main_and_agent(tmp.path(), "build/\n");
+    let main = git.cwd().to_path_buf();
+    std::fs::write(agent.join("a.txt"), "agent\n").unwrap();
+    preview::start(&git, &git.at(&agent)).unwrap();
+    let lock = |path: &Path| {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(0)
+            .open(path)
+            .unwrap()
+    };
+
+    let db = lock(&main.join("app.db"));
+    assert!(!preview::main_changed(&git).unwrap());
+
+    // Same content, but git has to read it again to know.
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+    let tracked = main.join(".gitignore");
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&tracked)
+        .unwrap();
+    file.set_modified(later).unwrap();
+    drop(file);
+    let locked = lock(&tracked);
+    assert!(preview::main_changed(&git).unwrap());
+    drop((db, locked));
+    assert!(!preview::main_changed(&git).unwrap());
+    preview::restore_main(&git).unwrap();
 }

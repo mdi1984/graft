@@ -64,8 +64,11 @@ impl Project {
             move |p, _, result| match result {
                 Ok(true) => p.infos.push(done.to_owned()),
                 Ok(false) => p.ask(Confirm {
-                    title: "The main folder changed during the preview".to_owned(),
-                    body: "Changes made in the main folder since the preview are discarded."
+                    title: "Discard changes made in the main folder?".to_owned(),
+                    body: "Files in the main folder changed since the preview, or Graft \
+                           could not read them all to check. Changes made since to tracked \
+                           files and to files the preview added are discarded; other new \
+                           files stay."
                         .to_owned(),
                     confirm_label: confirm_label.to_owned(),
                     action: Action::LeavePreviewAnyway(leave),
