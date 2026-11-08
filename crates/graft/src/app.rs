@@ -10,8 +10,7 @@ use egui::{CentralPanel, Frame, Margin, Panel};
 use graft_core::console::Console;
 use graft_core::paths::same_path;
 use graft_core::repo::{self, Location};
-use graft_core::{JobPool, Waker};
-use graft_core::{Panicked, is_cancelled};
+use graft_core::{JobPool, Panicked, Waker, is_cancelled};
 use serde::{Deserialize, Serialize};
 
 use crate::groups::{self, GroupId, TabGroup};

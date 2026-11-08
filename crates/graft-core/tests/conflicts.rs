@@ -5,9 +5,8 @@ mod common;
 use std::path::Path;
 
 use common::sh;
-use graft_core::Operation;
 use graft_core::conflicts::{self, Resolution};
-use graft_core::status;
+use graft_core::{Operation, status};
 
 /// main and topic both change line 2 of f.txt; topic also deletes gone.txt
 /// which main changes.

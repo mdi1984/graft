@@ -27,7 +27,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
-use graft_core::Operation;
 use graft_core::console::Console;
 use graft_core::details::{self, CommitDetails};
 use graft_core::history::{self, Commit, History};
@@ -35,9 +34,9 @@ use graft_core::ops::LineOp;
 use graft_core::stash::{Stash, StashFile};
 use graft_core::watch::Watcher;
 use graft_core::{
-    CancelToken, Git, Oid, Panicked, RepoSnapshot, Worktree, is_cancelled, null_oid, snapshot,
+    CancelToken, Git, JobPool, Oid, Operation, Panicked, RepoSnapshot, Waker, Worktree,
+    is_cancelled, null_oid, snapshot,
 };
-use graft_core::{JobPool, Waker};
 
 pub use changes::{CommitForm, DiffView, FileKey};
 pub use conflicts::{ConflictView, merge_dialog};

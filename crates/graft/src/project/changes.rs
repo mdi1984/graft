@@ -5,10 +5,9 @@
 use std::collections::BTreeSet;
 use std::ops::Range;
 
-use graft_core::Git;
 use graft_core::diff::{self, FileDiff, Gap, Source};
 use graft_core::ops::{self, LineOp};
-use graft_core::{EntryKind, FileList, StatusEntry};
+use graft_core::{EntryKind, FileList, Git, StatusEntry};
 
 use super::comments::{Pick, Side};
 use super::ops::{At, quietly};

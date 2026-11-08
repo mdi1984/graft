@@ -3,8 +3,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use graft_core::Waker;
-use graft_core::{CancelToken, Progress};
+use graft_core::{CancelToken, Progress, Waker};
 
 pub struct Running {
     pub label: String,

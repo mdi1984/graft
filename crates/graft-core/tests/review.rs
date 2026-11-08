@@ -3,9 +3,8 @@
 mod common;
 
 use common::sh;
-use graft_core::Change;
 use graft_core::diff::{self, Source};
-use graft_core::review;
+use graft_core::{Change, review};
 
 #[test]
 fn branch_changes_since_fork_including_uncommitted() {

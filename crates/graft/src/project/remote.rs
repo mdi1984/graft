@@ -2,8 +2,7 @@
 //! remote rejects a push.
 
 use graft_core::refusal::rejected_push;
-use graft_core::remote;
-use graft_core::{CancelToken, Git, Progress};
+use graft_core::{CancelToken, Git, Progress, remote};
 
 use super::ops::{At, quietly, say};
 use super::{Action, Confirm, Project};

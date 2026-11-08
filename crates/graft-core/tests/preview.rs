@@ -5,9 +5,8 @@ mod common;
 use std::path::{Path, PathBuf};
 
 use common::sh;
-use graft_core::Git;
 use graft_core::worktree::{self, Start};
-use graft_core::{Restore, preview};
+use graft_core::{Git, Restore, preview};
 
 #[test]
 fn start_update_and_restore() {

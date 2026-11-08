@@ -7,10 +7,9 @@ use egui::{
     Align, Frame, Key, Layout, Margin, Panel, Rect, RichText, ScrollArea, Sense, Stroke,
     StrokeKind, TextEdit, Ui, pos2, vec2,
 };
-use graft_core::Change;
 use graft_core::paths::same_path;
 use graft_core::review::{Review, ReviewFile};
-use graft_core::{RepoSnapshot, Worktree};
+use graft_core::{Change, RepoSnapshot, Worktree};
 
 use super::can;
 use super::diff_view::{self, Marks};
