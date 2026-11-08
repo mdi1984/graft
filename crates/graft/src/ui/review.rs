@@ -4,10 +4,9 @@
 //! for a coding agent in one go), Open in IDE and Merge.
 
 use egui::{
-    Align, Frame, Key, Layout, Margin, Panel, Rect, RichText, ScrollArea, Sense, Stroke,
-    StrokeKind, TextEdit, Ui, pos2, vec2,
+    Align, Frame, Key, Layout, Margin, Panel, Rect, RichText, ScrollArea, Sense, TextEdit, Ui,
+    pos2, vec2,
 };
-use graft_core::paths::same_path;
 use graft_core::review::{Review, ReviewFile};
 use graft_core::{Change, RepoSnapshot, Worktree};
 
@@ -15,7 +14,8 @@ use super::can;
 use super::diff_view::{self, Marks};
 use super::file_row;
 use super::widgets::{
-    Badge, ButtonKind, ahead, button, empty_state, paint_galley_left, progress_bar, waiting,
+    Badge, ButtonKind, ahead, button, empty_state, paint_check, paint_galley_left, progress_bar,
+    section_heading_row, waiting,
 };
 use crate::keys::{self, Command};
 use crate::project::comments::{self, LineComment};
@@ -25,7 +25,8 @@ use crate::theme::{self, color};
 use crate::ui::Actions;
 
 pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
-    // Shared handles: the screen reads them while `project` takes actions.
+    // A cheap clone (shared): `snap` and `wt` stay readable below while
+    // `project` is lent out mutably, e.g. to the comment editor.
     let Some(snap) = project.snapshot.clone() else {
         return;
     };
@@ -74,11 +75,6 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
         return;
     }
 
-    let uncommitted: Vec<&str> = wt
-        .status
-        .as_ref()
-        .map(|s| s.entries.iter().map(|e| e.path.as_str()).collect())
-        .unwrap_or_default();
     Panel::left("review-files")
         .resizable(true)
         .default_size(340.0)
@@ -90,7 +86,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
         )
         .show(ui, |ui| {
             comments_bar(ui, project, wt, actions);
-            file_list(ui, project, &review, &uncommitted, actions)
+            file_list(ui, project, &review, actions)
         });
 
     let selected = project.review.as_ref().and_then(|v| v.selected.clone());
@@ -99,43 +95,39 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
         return;
     };
     let file = file.clone();
-    file_header(ui, project, wt, &file, actions);
+    // Side by side only helps when there is an old and a new version; then
+    // it can be toggled.
+    let both_sides = !matches!(file.change.change, Change::Added | Change::Deleted);
+    let split = both_sides.then(|| project.review.as_ref().is_none_or(|v| v.split));
+    file_header(ui, project, wt, &file, split, actions);
     let path = file.change.path.as_str();
     let diff = project
         .read_only_diff
         .as_ref()
         .and_then(|d| d.diff.as_ref());
-    let (placed, outdated) = match (diff, project.review_state()) {
+    // Copies: the comment panel below may change the comments.
+    let (placed, outdated): (Vec<_>, Vec<LineComment>) = match (diff, project.review_state()) {
         (Some(diff), Some(state)) => {
             let (placed, outdated) =
                 comments::place(diff, state.comments.iter().filter(|c| c.path == path));
-            let placed: Vec<_> = placed.into_iter().map(|(at, c)| (at, c.id)).collect();
-            let outdated: Vec<LineComment> = outdated.into_iter().cloned().collect();
-            (placed, outdated)
+            (
+                placed.into_iter().map(|(at, c)| (at, c.clone())).collect(),
+                outdated.into_iter().cloned().collect(),
+            )
         }
         _ => (Vec::new(), Vec::new()),
     };
     comment_panel(ui, project, path, &outdated, actions);
-    // Side by side only helps when there is an old and a new version.
-    let both_sides = !matches!(file.change.change, Change::Added | Change::Deleted);
-    let split = both_sides && project.review.as_ref().is_none_or(|v| v.split);
-    let state_comments = project
-        .review_state()
-        .map(|s| s.comments.as_slice())
-        .unwrap_or_default();
     let marks = Marks {
         pick: project.review.as_ref().and_then(|v| v.pick),
-        placed: placed
-            .iter()
-            .filter_map(|&(at, id)| Some((at, state_comments.iter().find(|c| c.id == id)?)))
-            .collect(),
+        placed: placed.iter().map(|(at, c)| (*at, c)).collect(),
     };
     match &project.read_only_diff {
         Some(diff) => diff_view::body(
             ui,
             diff,
             project.is_operating(),
-            split,
+            split == Some(true),
             project.settings().wrap_lines,
             Some(&marks),
             actions,
@@ -309,35 +301,11 @@ fn merge_button(
     actions: &mut Actions,
 ) {
     let base = review.base.as_str();
-    let target = snap.worktree_for_branch(base);
-    let (enabled, hint) = match (&wt.branch, target) {
-        (None, _) => (false, "Check out a branch to merge it".to_owned()),
-        _ if review.commits == 0 => (
-            false,
-            "No commits to merge yet; uncommitted changes are not merged".to_owned(),
-        ),
-        (Some(_), None) => (
-            false,
-            format!("{base} is not checked out in any worktree; check it out to merge into it"),
-        ),
-        (Some(_), Some(t)) if same_path(&t.path, &wt.path) => {
-            (false, "This worktree is the base itself".to_owned())
-        }
-        (Some(_), Some(t)) if t.in_progress.is_some() => {
-            (false, format!("{base} has a merge or rebase in progress"))
-        }
-        (Some(branch), Some(t)) => (
-            !busy,
-            format!(
-                "Run git merge {branch} in {}",
-                graft_core::paths::folder_name(&t.path)
-            ),
-        ),
-    };
+    let (can, target) = can::merge_reviewed(snap, wt, review);
     let label = format!("Merge into {base}…");
-    if button(ui, &label, ButtonKind::Primary, enabled)
-        .on_hover_text(&hint)
-        .on_disabled_hover_text(&hint)
+    if button(ui, &label, ButtonKind::Primary, can.ok && !busy)
+        .on_hover_text(&can.hint)
+        .on_disabled_hover_text(&can.hint)
         .clicked()
         && let (Some(branch), Some(t)) = (&wt.branch, target)
     {
@@ -366,19 +334,9 @@ fn merge_button(
     }
 }
 
-fn file_list(
-    ui: &mut Ui,
-    project: &Project,
-    review: &Review,
-    uncommitted: &[&str],
-    actions: &mut Actions,
-) {
+fn file_list(ui: &mut Ui, project: &Project, review: &Review, actions: &mut Actions) {
     let selected = project.review.as_ref().and_then(|v| v.selected.as_deref());
-    ui.label(
-        RichText::new(format!("FILES  {}", review.files.len()))
-            .font(theme::semibold(theme::SMALL_SIZE))
-            .color(color::text_faint()),
-    );
+    section_heading_row(ui, &format!("FILES  {}", review.files.len()));
     ui.add_space(4.0);
     ScrollArea::vertical()
         .id_salt("review-file-list")
@@ -397,11 +355,11 @@ fn file_list(
                     ui.scope_id().with(("viewed", path)),
                     Sense::click(),
                 );
-                paint_check(ui, check, viewed, check_response.hovered());
+                paint_check(ui.painter(), check, viewed, check_response.hovered());
 
                 let note = if file.untracked {
                     Some("untracked")
-                } else if uncommitted.contains(&path.as_str()) {
+                } else if file.uncommitted {
                     Some("uncommitted")
                 } else {
                     None
@@ -455,38 +413,17 @@ fn file_list(
         });
 }
 
-fn paint_check(ui: &Ui, rect: Rect, checked: bool, hovered: bool) {
-    let painter = ui.painter();
-    if checked {
-        painter.rect_filled(rect, 3, color::accent());
-        let y = rect.center().y;
-        painter.line(
-            vec![
-                pos2(rect.left() + 3.0, y),
-                pos2(rect.left() + 6.0, y + 3.0),
-                pos2(rect.right() - 3.0, y - 3.0),
-            ],
-            Stroke::new(1.6, color::on_accent()),
-        );
-    } else {
-        let stroke = if hovered {
-            color::text_weak()
-        } else {
-            color::control_border()
-        };
-        painter.rect_stroke(rect, 3, Stroke::new(1.0, stroke), StrokeKind::Inside);
-    }
-}
-
+/// The open file's name and buttons; `split` is whether it shows side by
+/// side, `None` when it cannot.
 fn file_header(
     ui: &mut Ui,
     project: &Project,
     wt: &Worktree,
     file: &ReviewFile,
+    split: Option<bool>,
     actions: &mut Actions,
 ) {
     let viewed = project.is_viewed(file);
-    let split = project.review.as_ref().is_none_or(|v| v.split);
     let path = file.change.path.clone();
     Panel::top("review-file-header")
         .frame(
@@ -535,10 +472,11 @@ fn file_header(
                     {
                         actions.push(Action::OpenInIde(wt.path.join(&path)));
                     }
-                    let both_sides = !matches!(file.change.change, Change::Added | Change::Deleted);
-                    let toggle = if split { "Unified" } else { "Side by side" };
-                    if both_sides && button(ui, toggle, ButtonKind::Secondary, true).clicked() {
-                        actions.push(Action::ToggleReviewSplit);
+                    if let Some(split) = split {
+                        let toggle = if split { "Unified" } else { "Side by side" };
+                        if button(ui, toggle, ButtonKind::Secondary, true).clicked() {
+                            actions.push(Action::ToggleReviewSplit);
+                        }
                     }
                     if let Some(view) = &project.read_only_diff {
                         diff_view::whole_file_button(ui, view, project.settings(), actions);

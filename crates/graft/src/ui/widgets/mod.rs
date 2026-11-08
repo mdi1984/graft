@@ -8,15 +8,13 @@ use std::sync::Arc;
 use egui::text::{LayoutJob, TextFormat};
 use egui::{
     Align2, Color32, FontId, Galley, Painter, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui,
-    pos2, vec2,
+    Vec2, pos2, vec2,
 };
 
 pub use form::*;
 
 use super::icons::{self, Icon};
-use crate::project::{Action, CheckedOut};
 use crate::theme::{self, RADIUS, color};
-use crate::ui::Actions;
 
 pub const ICON_SIZE: f32 = 14.0;
 
@@ -84,8 +82,8 @@ pub fn paint_icon(painter: &Painter, left_center: Pos2, icon: Icon, color: Color
 
 #[derive(Clone, Copy)]
 pub struct BadgeColors {
-    pub bg: Color32,
-    pub fg: Color32,
+    bg: Color32,
+    fg: Color32,
 }
 
 pub fn dirty() -> BadgeColors {
@@ -156,7 +154,8 @@ pub fn paint_badges_right(painter: &Painter, right: f32, y: f32, badges: Vec<Bad
     x
 }
 
-/// Small uppercase heading for a sidebar section, e.g. "WORKTREES".
+/// Small letter-spaced heading over a section, painted at `x`, centered on
+/// `y`. `title` comes in capitals: "WORKTREES", "FILES  12".
 pub fn section_heading(ui: &Ui, painter: &Painter, x: f32, y: f32, title: &str) {
     let format = TextFormat {
         font_id: theme::semibold(theme::SMALL_SIZE),
@@ -168,6 +167,58 @@ pub fn section_heading(ui: &Ui, painter: &Painter, x: f32, y: f32, title: &str) 
         .painter()
         .layout_job(LayoutJob::single_section(title.to_owned(), format));
     paint_galley_left(painter, x, y, galley);
+}
+
+/// A checkbox square: accent-filled with a tick when `checked`, else an
+/// outline that darkens on hover.
+pub fn paint_check(painter: &Painter, rect: Rect, checked: bool, hovered: bool) {
+    if checked {
+        painter.rect_filled(rect, 3, color::accent());
+        // The tick scales with the box: 12 px gets a 2.5 px inset.
+        let inset = rect.width() * 0.21;
+        let y = rect.center().y;
+        painter.line(
+            vec![
+                pos2(rect.left() + inset, y),
+                pos2(rect.left() + 2.0 * inset, y + inset),
+                pos2(rect.right() - inset, y - inset),
+            ],
+            Stroke::new(1.6, color::on_accent()),
+        );
+    } else {
+        let border = if hovered {
+            color::text_weak()
+        } else {
+            color::control_border()
+        };
+        painter.rect_stroke(rect, 3, Stroke::new(1.0, border), StrokeKind::Inside);
+    }
+}
+
+/// A [`section_heading`] on a row of its own, in a laid-out panel.
+pub fn section_heading_row(ui: &mut Ui, title: &str) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 16.0), Sense::hover());
+    section_heading(ui, ui.painter(), rect.left(), rect.center().y, title);
+}
+
+/// Height of a [`two_line_row`].
+pub const TWO_LINE_HEIGHT: f32 = 46.0;
+
+/// A clickable list row the full width: `title` above, the smaller `meta`
+/// below. Its background is inset by `inset` from the row's edges.
+pub fn two_line_row(ui: &mut Ui, inset: Vec2, selected: bool, title: &str, meta: &str) -> Response {
+    const PAD_X: f32 = 10.0;
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(ui.available_width(), TWO_LINE_HEIGHT), Sense::click());
+    let bg = rect.shrink2(inset);
+    paint_row_bg(ui.painter(), bg, &response, selected);
+    let x = bg.left() + PAD_X;
+    let width = bg.width() - 2.0 * PAD_X;
+    let title = elided(ui, title, theme::body(), color::text(), width);
+    paint_galley_left(ui.painter(), x, rect.top() + 15.0, title);
+    let meta = elided(ui, meta, theme::small(), color::text_weak(), width);
+    paint_galley_left(ui.painter(), x, rect.top() + 33.0, meta);
+    response
 }
 
 /// Row background: selected, hovered, or nothing.
@@ -349,21 +400,32 @@ pub enum ButtonKind {
     /// Accent-filled: the one main action of a form.
     Primary,
     Secondary,
+    /// Red-filled: the main action of a question before something destructive.
+    Danger,
+}
+
+const BUTTON_PAD_X: f32 = 14.0;
+const BUTTON_HEIGHT: f32 = 30.0;
+
+fn button_galley(ui: &Ui, label: &str, kind: ButtonKind) -> Arc<Galley> {
+    let font = match kind {
+        ButtonKind::Primary | ButtonKind::Danger => theme::semibold(theme::BODY_SIZE),
+        ButtonKind::Secondary => theme::body(),
+    };
+    ui.painter()
+        .layout_no_wrap(label.to_owned(), font, Color32::PLACEHOLDER)
+}
+
+/// How wide [`button`] makes a button, e.g. to center a row of them.
+pub fn button_width(ui: &Ui, label: &str, kind: ButtonKind) -> f32 {
+    button_galley(ui, label, kind).size().x + 2.0 * BUTTON_PAD_X
 }
 
 /// A plain text button in Graft's style.
 pub fn button(ui: &mut Ui, label: &str, kind: ButtonKind, enabled: bool) -> Response {
-    const PAD_X: f32 = 14.0;
-    const HEIGHT: f32 = 30.0;
-    let font = match kind {
-        ButtonKind::Primary => theme::semibold(theme::BODY_SIZE),
-        ButtonKind::Secondary => theme::body(),
-    };
     // Placeholder color: `galley()` below paints it in the state's color.
-    let text = ui
-        .painter()
-        .layout_no_wrap(label.to_owned(), font, Color32::PLACEHOLDER);
-    let size = vec2(text.size().x + 2.0 * PAD_X, HEIGHT);
+    let text = button_galley(ui, label, kind);
+    let size = vec2(text.size().x + 2.0 * BUTTON_PAD_X, BUTTON_HEIGHT);
     let sense = if enabled {
         Sense::click()
     } else {
@@ -372,7 +434,7 @@ pub fn button(ui: &mut Ui, label: &str, kind: ButtonKind, enabled: bool) -> Resp
     let (rect, response) = ui.allocate_exact_size(size, sense);
     let hovered = enabled && response.hovered();
     let (fill, border, fg) = match kind {
-        ButtonKind::Primary if !enabled => (
+        ButtonKind::Primary | ButtonKind::Danger if !enabled => (
             color::control_bg(),
             color::control_border(),
             color::text_faint(),
@@ -382,6 +444,15 @@ pub fn button(ui: &mut Ui, label: &str, kind: ButtonKind, enabled: bool) -> Resp
                 color::accent_hover()
             } else {
                 color::accent()
+            },
+            Color32::TRANSPARENT,
+            color::on_accent(),
+        ),
+        ButtonKind::Danger => (
+            if hovered {
+                color::removed().gamma_multiply(1.1)
+            } else {
+                color::removed()
             },
             Color32::TRANSPARENT,
             color::on_accent(),
@@ -465,6 +536,14 @@ pub fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Res
         .inner
 }
 
+const CHIP_PAD_X: f32 = 5.0;
+const CHIP_HEIGHT: f32 = 17.0;
+
+/// The size of a [`chip`] around `galley`, when it has room.
+pub fn chip_size(galley: &Galley) -> Vec2 {
+    vec2(galley.size().x + 2.0 * CHIP_PAD_X, CHIP_HEIGHT)
+}
+
 /// A rounded label like a ref name on a commit. Returns its width.
 pub fn chip(
     painter: &Painter,
@@ -474,10 +553,8 @@ pub fn chip(
     fg: Color32,
     max_width: f32,
 ) -> f32 {
-    const PAD_X: f32 = 5.0;
-    const HEIGHT: f32 = 17.0;
-    let width = (galley.size().x + 2.0 * PAD_X).min(max_width);
-    let rect = Rect::from_min_size(pos2(x, y - HEIGHT / 2.0), vec2(width, HEIGHT));
+    let width = chip_size(&galley).x.min(max_width);
+    let rect = Rect::from_min_size(pos2(x, y - CHIP_HEIGHT / 2.0), vec2(width, CHIP_HEIGHT));
     painter.rect(
         rect,
         4,
@@ -485,9 +562,9 @@ pub fn chip(
         Stroke::new(1.0, fg.gamma_multiply(0.35)),
         StrokeKind::Inside,
     );
-    let clip = rect.shrink2(vec2(PAD_X - 1.0, 0.0));
+    let clip = rect.shrink2(vec2(CHIP_PAD_X - 1.0, 0.0));
     painter.with_clip_rect(clip).galley(
-        pos2(rect.left() + PAD_X, y - galley.size().y / 2.0),
+        pos2(rect.left() + CHIP_PAD_X, y - galley.size().y / 2.0),
         galley,
         fg,
     );
@@ -553,22 +630,4 @@ pub fn color_swatches(ui: &mut Ui, current: usize) -> Option<usize> {
         }
     });
     picked
-}
-
-/// Where a branch is checked out, as the sidebar and the graph color it:
-/// green in the main folder, orange in a linked worktree.
-pub fn checkout_color(checked_out: CheckedOut) -> Color32 {
-    match checked_out {
-        CheckedOut::Main => color::accent(),
-        CheckedOut::Worktree => color::branch_dot_agent(),
-        CheckedOut::Nowhere => color::ahead_fg(),
-    }
-}
-
-/// A context menu entry that sends `action` and closes the menu.
-pub fn menu_item(ui: &mut Ui, label: &str, enabled: bool, actions: &mut Actions, action: Action) {
-    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
-        actions.push(action);
-        ui.close();
-    }
 }

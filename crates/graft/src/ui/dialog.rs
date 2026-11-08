@@ -4,7 +4,7 @@ use egui::{RichText, Ui};
 use graft_core::refs::ResetMode;
 
 use super::widgets::dialog::{self, footer};
-use super::widgets::{error_label, field_label, note, text_field, title};
+use super::widgets::{ButtonKind, error_label, field_label, note, text_field, title};
 use crate::project::{Action, Dialog, DialogKind};
 use crate::theme::{self, color};
 use crate::ui::Actions;
@@ -15,7 +15,8 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Actions) {
     let busy = dialog.submitting;
     let shown = dialog::show(ctx, "ref-dialog", WIDTH, busy, |ui| {
         let focus = std::mem::take(&mut dialog.focus);
-        let before = format!("{:?}", dialog.kind);
+        // Any edit clears the last error.
+        let mut edited = false;
         let confirm_label = match &mut dialog.kind {
             DialogKind::NewBranch {
                 name,
@@ -26,20 +27,14 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Actions) {
                 title(ui, "New branch");
                 note(ui, &format!("Starts at {start_label}."));
                 field_label(ui, "Name");
-                let r = text_field(ui, name, "e.g. feature/login", WIDTH);
-                if focus {
-                    r.request_focus();
-                }
-                ui.checkbox(checkout, "Switch to it");
+                edited |= focused_field(ui, name, "e.g. feature/login", WIDTH, focus);
+                edited |= ui.checkbox(checkout, "Switch to it").changed();
                 "Create branch"
             }
             DialogKind::RenameBranch { old, name } => {
                 title(ui, &format!("Rename {old}"));
                 field_label(ui, "New name");
-                let r = text_field(ui, name, old, WIDTH);
-                if focus {
-                    r.request_focus();
-                }
+                edited |= focused_field(ui, name, old, WIDTH, focus);
                 note(
                     ui,
                     "Its upstream setting moves along; the remote branch keeps its name.",
@@ -55,12 +50,9 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Actions) {
                 title(ui, "New tag");
                 note(ui, &format!("Tags {target_label}."));
                 field_label(ui, "Name");
-                let r = text_field(ui, name, "e.g. v1.2.0", WIDTH);
-                if focus {
-                    r.request_focus();
-                }
+                edited |= focused_field(ui, name, "e.g. v1.2.0", WIDTH, focus);
                 field_label(ui, "Message (optional; makes an annotated tag)");
-                text_field(ui, message, "Release notes, …", WIDTH);
+                edited |= text_field(ui, message, "Release notes, …", WIDTH).changed();
                 "Create tag"
             }
             DialogKind::Stash {
@@ -76,16 +68,20 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Actions) {
                      Bring them back from the Stashes tab, here or in another worktree.",
                 );
                 field_label(ui, "Message (optional)");
-                let r = text_field(ui, message, "What you were doing", WIDTH);
-                if focus {
-                    r.request_focus();
-                }
+                edited |= focused_field(ui, message, "What you were doing", WIDTH, focus);
                 ui.add_space(4.0);
-                ui.checkbox(include_untracked, "Include untracked files");
-                ui.add_enabled_ui(!*staged_only, |ui| {
-                    ui.checkbox(keep_index, "Keep staged changes in place too");
-                });
-                ui.checkbox(staged_only, "Only stash what is staged");
+                edited |= ui
+                    .checkbox(include_untracked, "Include untracked files")
+                    .changed();
+                edited |= ui
+                    .add_enabled_ui(!*staged_only, |ui| {
+                        ui.checkbox(keep_index, "Keep staged changes in place too")
+                            .changed()
+                    })
+                    .inner;
+                edited |= ui
+                    .checkbox(staged_only, "Only stash what is staged")
+                    .changed();
                 "Stash"
             }
             DialogKind::StashBranch { label, name, .. } => {
@@ -99,10 +95,7 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Actions) {
                     ),
                 );
                 field_label(ui, "Branch name");
-                let r = text_field(ui, name, "e.g. wip/idea", WIDTH);
-                if focus {
-                    r.request_focus();
-                }
+                edited |= focused_field(ui, name, "e.g. wip/idea", WIDTH, focus);
                 "Create branch"
             }
             DialogKind::Reset {
@@ -118,21 +111,21 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Actions) {
                      the branch (they stay reachable for a while through the reflog).",
                 );
                 ui.add_space(4.0);
-                choice(
+                edited |= choice(
                     ui,
                     mode,
                     ResetMode::Soft,
                     "Soft",
                     "Keep their changes, staged",
                 );
-                choice(
+                edited |= choice(
                     ui,
                     mode,
                     ResetMode::Mixed,
                     "Mixed",
                     "Keep their changes, unstaged",
                 );
-                choice(
+                edited |= choice(
                     ui,
                     mode,
                     ResetMode::Hard,
@@ -165,15 +158,15 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Actions) {
                     Some(old) => title(ui, &format!("Edit remote {old}")),
                 }
                 field_label(ui, "Name");
-                let r = text_field(ui, name, "origin", WIDTH);
-                if focus {
-                    r.request_focus();
-                }
+                edited |= focused_field(ui, name, "origin", WIDTH, focus);
                 field_label(ui, "URL");
-                text_field(ui, url, "https://github.com/you/repository.git", WIDTH);
+                edited |=
+                    text_field(ui, url, "https://github.com/you/repository.git", WIDTH).changed();
                 if original.is_none() {
                     ui.add_space(4.0);
-                    ui.checkbox(fetch, "Fetch its branches right away");
+                    edited |= ui
+                        .checkbox(fetch, "Fetch its branches right away")
+                        .changed();
                     "Add remote"
                 } else {
                     "Save"
@@ -193,10 +186,7 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Actions) {
                      the same lines, the merge stops and you resolve the conflicts first.",
                 );
                 field_label(ui, "Branch to merge");
-                let r = text_field(ui, filter, "Filter branches", WIDTH);
-                if focus {
-                    r.request_focus();
-                }
+                edited |= focused_field(ui, filter, "Filter branches", WIDTH, focus);
                 let needle = filter.trim().to_lowercase();
                 egui::Frame::new()
                     .fill(color::app_bg())
@@ -221,6 +211,7 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Actions) {
                                         .min_size(egui::vec2(ui.available_width(), 24.0));
                                     if ui.add(row).clicked() {
                                         *rev = choice.clone();
+                                        edited = true;
                                     }
                                 }
                                 if shown == 0 {
@@ -231,29 +222,50 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Actions) {
                                 }
                             });
                     });
-                ui.checkbox(no_ff, "Always create a merge commit (--no-ff)");
+                edited |= ui
+                    .checkbox(no_ff, "Always create a merge commit (--no-ff)")
+                    .changed();
                 "Merge"
             }
         };
-        if before != format!("{:?}", dialog.kind) {
+        if edited {
             dialog.error = None;
         }
         if let Some(error) = &dialog.error {
             error_label(ui, error);
         }
-        footer(ui, confirm_label, true, busy, None)
+        footer(ui, confirm_label, ButtonKind::Primary, true, busy, None)
     });
-    if shown.inner.primary || shown.enter {
+    let answer = shown.answer();
+    if answer.submit {
         actions.push(Action::SubmitDialog);
     }
-    if shown.inner.cancel || shown.cancel {
+    if answer.cancel {
         actions.push(Action::CloseDialog);
     }
 }
 
-fn choice(ui: &mut Ui, value: &mut ResetMode, option: ResetMode, label: &str, detail: &str) {
+/// A text field that takes the focus when `focus`; returns whether it changed.
+fn focused_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32, focus: bool) -> bool {
+    let field = text_field(ui, text, hint, width);
+    if focus {
+        field.request_focus();
+    }
+    field.changed()
+}
+
+/// A reset mode to pick; returns whether it was picked just now.
+fn choice(
+    ui: &mut Ui,
+    value: &mut ResetMode,
+    option: ResetMode,
+    label: &str,
+    detail: &str,
+) -> bool {
     ui.horizontal(|ui| {
-        ui.radio_value(value, option, RichText::new(label).color(color::text()));
+        let picked = ui.radio_value(value, option, RichText::new(label).color(color::text()));
         ui.label(RichText::new(detail).color(color::text_weak()));
-    });
+        picked.changed()
+    })
+    .inner
 }

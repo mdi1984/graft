@@ -27,15 +27,6 @@ fn fullscreen(ctx: &Context) -> bool {
     ctx.input(|i| i.viewport().fullscreen.unwrap_or(false))
 }
 
-pub fn paint_app_icon(ui: &Ui, rect: Rect) {
-    ui.painter().image(
-        super::icons::app_icon(ui.ctx()).id(),
-        rect,
-        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-        Color32::WHITE,
-    );
-}
-
 /// Empty title bar space: drag to move the window, double-click to maximize.
 /// Call before adding the widgets on top of it, so they take precedence.
 pub fn drag_area(ui: &Ui, rect: Rect) {

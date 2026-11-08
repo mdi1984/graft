@@ -2,13 +2,31 @@
 //! History lists several branches in one menu, so it asks for `named`
 //! labels that say which branch an entry is about.
 
-use egui::Ui;
+use egui::{Color32, Ui};
 use graft_core::paths::same_path;
 use graft_core::{RemoteBranch, RepoSnapshot};
 
-use super::widgets::menu_item;
-use crate::project::{Action, Project};
+use crate::project::{Action, CheckedOut, Project};
+use crate::theme::color;
 use crate::ui::Actions;
+
+/// A context menu entry that sends `action` and closes the menu.
+pub fn menu_item(ui: &mut Ui, label: &str, enabled: bool, actions: &mut Actions, action: Action) {
+    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+        actions.push(action);
+        ui.close();
+    }
+}
+
+/// Where a branch is checked out, as the sidebar and the graph color it:
+/// green in the main folder, orange in a linked worktree.
+pub fn checkout_color(checked_out: CheckedOut) -> Color32 {
+    match checked_out {
+        CheckedOut::Main => color::accent(),
+        CheckedOut::Worktree => color::branch_dot_agent(),
+        CheckedOut::Nowhere => color::ahead_fg(),
+    }
+}
 
 /// Go to the worktree that has the local branch `name`, or check it out or
 /// open a new worktree for it. Nothing for the selected worktree's own
@@ -55,17 +73,21 @@ pub fn local_items(
 }
 
 /// Check out the remote branch as a new local branch that tracks it, or open
-/// a new worktree for it. For remote branches without a local branch of
-/// their name.
+/// a new worktree for it. Only for a remote branch without a local branch
+/// of its name; returns whether anything was offered.
 pub fn tracking_items(
     ui: &mut Ui,
     project: &Project,
+    repo: &RepoSnapshot,
     branch: &RemoteBranch,
     named: bool,
     actions: &mut Actions,
-) {
-    let busy = project.is_operating();
+) -> bool {
     let local = branch.branch_name();
+    if repo.branch(local).is_some() {
+        return false;
+    }
+    let busy = project.is_operating();
     let label = if named {
         format!("Check out {} as {local}", branch.name)
     } else {
@@ -82,6 +104,7 @@ pub fn tracking_items(
         },
     );
     new_worktree_item(ui, &branch.name, named, busy, actions);
+    true
 }
 
 fn new_worktree_item(ui: &mut Ui, name: &str, named: bool, busy: bool, actions: &mut Actions) {

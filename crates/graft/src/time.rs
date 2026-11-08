@@ -34,6 +34,11 @@ fn absolute_in(seconds: i64, zone: &TimeZone) -> String {
     format(seconds, "%-d %b %Y, %H:%M", zone)
 }
 
+/// "14:05:09".
+pub fn clock(seconds: i64) -> String {
+    format(seconds, "%H:%M:%S", &TimeZone::system())
+}
+
 fn format(seconds: i64, pattern: &str, zone: &TimeZone) -> String {
     match Timestamp::from_second(seconds) {
         Ok(ts) => ts.to_zoned(zone.clone()).strftime(pattern).to_string(),

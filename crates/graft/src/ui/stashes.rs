@@ -2,7 +2,7 @@
 //! worktrees) with the branch and worktree it came from, its files and diffs,
 //! and Apply / Pop / Apply to another worktree / Branch / Drop.
 
-use egui::{Frame, Margin, Panel, RichText, ScrollArea, Sense, Ui, vec2};
+use egui::{Frame, Margin, Panel, RichText, ScrollArea, Ui, Vec2};
 use graft_core::diff::Source;
 use graft_core::paths::{self, folder_name};
 use graft_core::stash::Stash;
@@ -11,7 +11,7 @@ use graft_core::{RepoSnapshot, short};
 use super::diff_view;
 use super::file_row::{FILE_ROW_HEIGHT, file_row};
 use super::widgets::{
-    ButtonKind, button, elided, empty_state, paint_galley_left, paint_row_bg, waiting,
+    ButtonKind, button, empty_state, hint, section_heading_row, two_line_row, waiting,
 };
 use crate::project::{Action, Confirm, DialogKind, FileKey, Project};
 use crate::theme::{self, color};
@@ -60,20 +60,17 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
         empty_state(ui, "No stash selected", "Pick a stash on the left.");
         return;
     };
-    // Room for the header and every file, up to half the height.
-    let files = match &project.stash_files {
-        Some(Ok(files)) => files.len(),
-        _ => 1,
-    };
-    let height = (128.0 + files as f32 * (FILE_ROW_HEIGHT + 1.0)).min(ui.available_height() * 0.5);
+    // As tall as the header and every file, up to half the height.
+    let max_height = ui.available_height() * 0.5 - 2.0 * DETAILS_MARGIN_Y;
     Panel::top("stash-details")
-        .exact_size(height)
         .frame(
             Frame::new()
                 .fill(color::sidebar_bg())
-                .inner_margin(Margin::symmetric(16, 12)),
+                .inner_margin(Margin::symmetric(16, DETAILS_MARGIN_Y as i8)),
         )
-        .show(ui, |ui| details(ui, project, snap, stash, actions));
+        .show(ui, |ui| {
+            details(ui, project, snap, stash, max_height, actions)
+        });
 
     match &project.read_only_diff {
         Some(view) => diff_view::show_view(
@@ -95,16 +92,8 @@ fn list(
     actions: &mut Actions,
 ) {
     let now = time::now();
-    ui.label(
-        RichText::new(format!("STASHES  {}", stashes.len()))
-            .font(theme::semibold(theme::SMALL_SIZE))
-            .color(color::text_faint()),
-    );
-    ui.label(
-        RichText::new("Shared by all worktrees of this repository.")
-            .color(color::text_faint())
-            .size(theme::SMALL_SIZE),
-    );
+    section_heading_row(ui, &format!("STASHES  {}", stashes.len()));
+    hint(ui, "Shared by all worktrees of this repository.");
     ui.add_space(6.0);
     ScrollArea::vertical()
         .id_salt("stash-list-scroll")
@@ -113,21 +102,12 @@ fn list(
             ui.spacing_mut().item_spacing.y = 2.0;
             for stash in stashes {
                 let selected = project.selected_stash == Some(stash.id);
-                let (rect, response) =
-                    ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::click());
-                let painter = ui.painter();
-                paint_row_bg(painter, rect, &response, selected);
-                let x = rect.left() + 10.0;
-                let width = rect.width() - 20.0;
-                let title = elided(ui, &stash.message, theme::body(), color::text(), width);
-                paint_galley_left(painter, x, rect.top() + 15.0, title);
                 let meta = format!(
                     "{} · {}",
                     origin(snap, stash),
                     time::relative(stash.time, now)
                 );
-                let meta = elided(ui, &meta, theme::small(), color::text_weak(), width);
-                paint_galley_left(painter, x, rect.top() + 33.0, meta);
+                let response = two_line_row(ui, Vec2::ZERO, selected, &stash.message, &meta);
                 if response.clicked() {
                     actions.push(Action::SelectStash(stash.id));
                 }
@@ -171,11 +151,16 @@ fn origin(snap: &RepoSnapshot, stash: &Stash) -> String {
     }
 }
 
+const DETAILS_MARGIN_Y: f32 = 12.0;
+
+/// The selected stash: what it is, what to do with it, and its files, in at
+/// most `max_height`.
 fn details(
     ui: &mut Ui,
     project: &Project,
     snap: &RepoSnapshot,
     stash: &Stash,
+    max_height: f32,
     actions: &mut Actions,
 ) {
     let busy = project.is_operating();
@@ -266,9 +251,11 @@ fn details(
         Some(Ok(files)) => files,
     };
     let open = project.read_only_diff.as_ref().map(|v| &v.key);
+    let room = (max_height - ui.min_rect().height()).max(FILE_ROW_HEIGHT);
     ScrollArea::vertical()
         .id_salt("stash-files")
-        .auto_shrink([false, false])
+        .max_height(room)
+        .auto_shrink([false, true])
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
             for file in files {

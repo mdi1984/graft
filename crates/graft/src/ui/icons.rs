@@ -1,7 +1,8 @@
 //! Small stroke icons, painted in a 24×24 design grid scaled to the target rect.
 
 use egui::{
-    Color32, Context, Painter, Pos2, Rect, Shape, Stroke, TextureHandle, TextureOptions, vec2,
+    Color32, Context, Painter, Pos2, Rect, Shape, Stroke, TextureHandle, TextureOptions, Ui, pos2,
+    vec2,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -199,13 +200,19 @@ pub fn app_logo(ctx: &Context) -> TextureHandle {
     )
 }
 
-/// The app icon drawn for small sizes (title bar).
-pub fn app_icon(ctx: &Context) -> TextureHandle {
-    texture(
-        ctx,
+/// Paint the app icon for small sizes (title bar, About) into `rect`.
+pub fn paint_app_icon(ui: &Ui, rect: Rect) {
+    let icon = texture(
+        ui.ctx(),
         "graft-app-icon",
         include_bytes!("../../assets/icon/graft-title.png"),
-    )
+    );
+    ui.painter().image(
+        icon.id(),
+        rect,
+        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+        Color32::WHITE,
+    );
 }
 
 /// A bundled PNG as a texture, decoded on first use. Mipmapped, so it stays

@@ -2,9 +2,9 @@
 
 use egui::{Align, Layout, RichText, Sense, Ui, vec2};
 
-use super::widgets::dialog;
+use super::icons::paint_app_icon;
+use super::widgets::dialog::{self, footer_row};
 use super::widgets::{ButtonKind, button, error_label, inline_spinner};
-use super::window_frame::paint_app_icon;
 use crate::theme::{self, color};
 use crate::update::{self, Status};
 
@@ -47,17 +47,17 @@ pub fn show(ctx: &egui::Context, status: &Status) -> Option<AboutAction> {
         ui.add_space(10.0);
         updates(ui, status, &mut action);
 
-        ui.add_space(12.0);
-        ui.horizontal(|ui| {
-            if button(ui, "GitHub", ButtonKind::Secondary, true).clicked() {
-                action = Some(AboutAction::Open(update::REPO_URL.to_owned()));
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if button(ui, "Close", ButtonKind::Secondary, true).clicked() {
-                    action = Some(AboutAction::Close);
-                }
-            });
-        });
+        ui.add_space(4.0);
+        let (github, close) = footer_row(
+            ui,
+            |ui| button(ui, "GitHub", ButtonKind::Secondary, true).clicked(),
+            |ui| button(ui, "Close", ButtonKind::Secondary, true).clicked(),
+        );
+        if github {
+            action = Some(AboutAction::Open(update::REPO_URL.to_owned()));
+        } else if close {
+            action = Some(AboutAction::Close);
+        }
     });
     if action.is_none() && shown.cancel {
         action = Some(AboutAction::Close);

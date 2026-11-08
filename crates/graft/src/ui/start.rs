@@ -4,15 +4,18 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use egui::{Align2, Color32, Rect, ScrollArea, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use egui::{
+    Align, Align2, Color32, Layout, Rect, ScrollArea, Sense, Stroke, StrokeKind, Ui, pos2, vec2,
+};
 use graft_core::paths::{self, native};
 use graft_core::repo::clone_folder_name;
 use graft_core::wsl::Wsl;
 
 use super::icons::{self, Icon};
 use super::widgets::{
-    ButtonKind, button, elided, elided_path, field_label, paint_galley_left, paint_icon_button,
-    paint_placeholder_left, progress_bar, section_heading, text_field,
+    ButtonKind, button, elided, elided_path, error_label, field_label, hint, paint_galley_left,
+    paint_icon_button, paint_placeholder_left, progress_bar, section_heading, small_text,
+    text_field,
 };
 use crate::groups::{GroupId, TabGroup};
 use crate::keys::{Command, Keymap};
@@ -52,25 +55,31 @@ fn place_of(path: &Path) -> Place {
 }
 
 pub struct StartPage {
-    pub mode: Mode,
-    pub url: String,
-    pub clone_parent: String,
-    pub folder_name: String,
+    mode: Mode,
+    url: String,
+    clone_parent: String,
+    folder_name: String,
     /// The user typed a folder name, so stop deriving it from the URL.
     folder_name_edited: bool,
-    pub init_path: String,
+    init_path: String,
     /// A clone or init in progress.
     busy: Option<Running>,
     error: Option<String>,
-    pub place: Place,
-    /// Installed WSL distros; `None` until asked for.
-    distros: Option<Vec<String>>,
+    place: Place,
+    distros: Distros,
     homes: HashMap<String, Home>,
     /// The clone folder and new repository folder typed for other places.
     other_fields: HashMap<Place, (String, String)>,
     /// The clone folder Graft started with, kept while the field does not
     /// resolve (e.g. `~` before the home folder is known).
     saved_clone_parent: PathBuf,
+}
+
+/// The installed WSL distros, listed in the background once.
+enum Distros {
+    NotAsked,
+    Asked,
+    Known(Vec<String>),
 }
 
 /// A recently opened repository. `exists` is checked in the background
@@ -128,7 +137,7 @@ impl StartPage {
             busy: None,
             error: None,
             place: place_of(&clone_parent),
-            distros: None,
+            distros: Distros::NotAsked,
             homes: HashMap::new(),
             other_fields: HashMap::new(),
             saved_clone_parent: clone_parent.clone(),
@@ -228,7 +237,7 @@ impl StartPage {
                 None => self.set_place(Place::Windows),
             }
         }
-        self.distros = Some(distros);
+        self.distros = Distros::Known(distros);
     }
 
     /// A home folder arrived: show folders under it with `~`.
@@ -286,8 +295,8 @@ impl StartPage {
     /// list, then the home folder of the chosen distro. Asked for apart from
     /// the page's own actions, so a click in the same frame cannot drop it.
     pub fn take_load(&mut self) -> Option<StartAction> {
-        if self.distros.is_none() {
-            self.distros = Some(Vec::new());
+        if let Distros::NotAsked = self.distros {
+            self.distros = Distros::Asked;
             return Some(StartAction::LoadDistros);
         }
         if let Place::Wsl(name) = &self.place
@@ -373,14 +382,14 @@ impl StartPage {
                         match self.mode {
                             Mode::Home => {}
                             Mode::Clone => self.clone_form(ui, width, &mut action),
-                            Mode::Init => self.init_form(ui, width, &mut action),
+                            Mode::Init => self.init_form(ui, &mut action),
                         }
                         if let Some(busy) = &self.busy {
-                            busy_panel(ui, busy, width, &mut action);
+                            busy_panel(ui, busy, &mut action);
                         }
                         if let Some(error) = &self.error {
                             ui.add_space(4.0);
-                            ui.label(egui::RichText::new(error).color(color::removed()));
+                            error_label(ui, error);
                         }
                         ui.add_space(24.0);
                         if !groups.is_empty() {
@@ -389,11 +398,7 @@ impl StartPage {
                         }
                         self.recent_list(ui, recent, width, &mut action);
                         ui.add_space(16.0);
-                        ui.label(
-                            egui::RichText::new(tip(keys))
-                                .color(color::text_faint())
-                                .size(theme::SMALL_SIZE),
-                        );
+                        hint(ui, &tip(keys));
                     });
                 });
             });
@@ -422,8 +427,9 @@ impl StartPage {
 
     /// "Location: This PC | WSL distros", only when WSL has distros.
     fn places(&mut self, ui: &mut Ui) {
-        let Some(distros) = self.distros.clone().filter(|d| !d.is_empty()) else {
-            return;
+        let distros = match &self.distros {
+            Distros::Known(distros) if !distros.is_empty() => distros.clone(),
+            _ => return,
         };
         let idle = self.busy.is_none();
         ui.horizontal(|ui| {
@@ -530,14 +536,14 @@ impl StartPage {
                 Place::Windows => r"C:\dev",
                 Place::Wsl(_) => "~/projects",
             };
-            ui.horizontal(|ui| {
-                if text_field(ui, &mut self.clone_parent, hint, inner - 96.0).changed() {
-                    self.error = None;
-                }
-                if button(ui, "Browse…", ButtonKind::Secondary, self.busy.is_none()).clicked() {
-                    *action = Some(StartAction::PickCloneParent);
-                }
-            });
+            let (browse, edited) =
+                browse_row(ui, &mut self.clone_parent, hint, self.busy.is_none());
+            if edited {
+                self.error = None;
+            }
+            if browse {
+                *action = Some(StartAction::PickCloneParent);
+            }
             ui.add_space(4.0);
             field_label(ui, "Folder name");
             if text_field(ui, &mut self.folder_name, "repo", inner).changed() {
@@ -550,11 +556,7 @@ impl StartPage {
                 && !self.folder_name.trim().is_empty()
                 && self.busy.is_none();
             if let Some(problem) = self.folder_problem(&self.clone_parent) {
-                ui.label(
-                    egui::RichText::new(problem)
-                        .color(color::text_weak())
-                        .size(theme::SMALL_SIZE),
-                );
+                small_text(ui, &problem, color::text_weak());
             } else if let Some(dest) = dest.as_deref().filter(|_| ready) {
                 let (rect, _) = ui.allocate_exact_size(vec2(inner, 16.0), Sense::hover());
                 let prefix = ui.painter().layout_no_wrap(
@@ -596,26 +598,19 @@ impl StartPage {
         });
     }
 
-    fn init_form(&mut self, ui: &mut Ui, width: f32, action: &mut Option<StartAction>) {
+    fn init_form(&mut self, ui: &mut Ui, action: &mut Option<StartAction>) {
         form_frame(ui, |ui| {
-            let inner = width - 32.0;
             field_label(ui, "New repository folder (created if missing)");
             let hint = match self.place {
                 Place::Windows => r"C:\dev\my-project",
                 Place::Wsl(_) => "~/projects/my-project",
             };
-            ui.horizontal(|ui| {
-                text_field(ui, &mut self.init_path, hint, inner - 96.0);
-                if button(ui, "Browse…", ButtonKind::Secondary, self.busy.is_none()).clicked() {
-                    *action = Some(StartAction::PickInitFolder);
-                }
-            });
+            let (browse, _) = browse_row(ui, &mut self.init_path, hint, self.busy.is_none());
+            if browse {
+                *action = Some(StartAction::PickInitFolder);
+            }
             if let Some(problem) = self.folder_problem(&self.init_path) {
-                ui.label(
-                    egui::RichText::new(problem)
-                        .color(color::text_weak())
-                        .size(theme::SMALL_SIZE),
-                );
+                small_text(ui, &problem, color::text_weak());
             }
             ui.add_space(6.0);
             let target = self.resolve(&self.init_path);
@@ -634,6 +629,20 @@ impl StartPage {
             });
         });
     }
+}
+
+/// A folder field with "Browse…" at its right. Returns whether Browse was
+/// clicked and whether the field changed.
+fn browse_row(ui: &mut Ui, text: &mut String, hint: &str, enabled: bool) -> (bool, bool) {
+    ui.horizontal(|ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let browse = button(ui, "Browse…", ButtonKind::Secondary, enabled).clicked();
+            let width = ui.available_width();
+            (browse, text_field(ui, text, hint, width).changed())
+        })
+        .inner
+    })
+    .inner
 }
 
 fn form_frame(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
@@ -687,29 +696,19 @@ fn card(
     response
 }
 
-fn busy_panel(ui: &mut Ui, busy: &Running, width: f32, action: &mut Option<StartAction>) {
-    let progress = busy.progress();
+/// The running clone or init: what it is doing, a progress bar and Cancel.
+/// Each progress report from git wakes the UI, so this needs no polling.
+fn busy_panel(ui: &mut Ui, busy: &Running, action: &mut Option<StartAction>) {
     ui.add_space(6.0);
+    ui.label(egui::RichText::new(busy.status()).color(color::text()));
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(&busy.label).color(color::text()));
-        if !progress.phase.is_empty() {
-            let pct = progress
-                .fraction
-                .map(|f| format!(" {:.0}%", f * 100.0))
-                .unwrap_or_default();
-            ui.label(
-                egui::RichText::new(format!("· {}{pct}", progress.phase)).color(color::text_weak()),
-            );
-        }
-    });
-    ui.horizontal(|ui| {
-        progress_bar(ui, progress.fraction, width - 96.0);
-        // Progress arrives from git in the background; look again soon.
-        ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(100));
-        if busy.can_cancel() && button(ui, "Cancel", ButtonKind::Secondary, true).clicked() {
-            *action = Some(StartAction::Cancel);
-        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if busy.can_cancel() && button(ui, "Cancel", ButtonKind::Secondary, true).clicked() {
+                *action = Some(StartAction::Cancel);
+            }
+            let width = ui.available_width();
+            progress_bar(ui, busy.progress().fraction, width);
+        });
     });
 }
 
@@ -889,8 +888,8 @@ fn group_list(ui: &mut Ui, groups: &[TabGroup], width: f32, action: &mut Option<
     }
 }
 
-/// "Tip: drop a folder onto this window to open it. Ctrl+O opens, Ctrl+T
-/// shows this page."
+/// The tip under the lists: drop a folder to open it, plus the keys that
+/// open a folder and this page, as they are set.
 fn tip(keys: &Keymap) -> String {
     let mut tip = "Tip: drop a folder onto this window to open it.".to_owned();
     if let Some(key) = keys.text(Command::OpenFolder) {

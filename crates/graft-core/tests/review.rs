@@ -43,6 +43,8 @@ fn branch_changes_since_fork_including_uncommitted() {
     assert_eq!(get("gone.txt").change.change, Change::Deleted);
     assert!(get("gone.txt").content.is_empty());
     assert!(get("d.txt").untracked);
+    assert!(get("d.txt").uncommitted && get("c.txt").uncommitted);
+    assert!(!get("a.txt").uncommitted, "committed on the branch");
     assert_eq!(get("d.txt").change.added, Some(2));
     assert_eq!(r.added(), 2 + 1 + 1 + 2);
 

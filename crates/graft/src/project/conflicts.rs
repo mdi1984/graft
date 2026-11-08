@@ -65,13 +65,7 @@ fn resolution_text(segment: &Segment, resolution: Option<&Resolution>) -> String
 pub fn merge_dialog(project: &Project, rev: Option<&str>) -> Option<DialogKind> {
     let snap = project.snapshot.as_ref()?;
     let into = project.worktree()?.branch.clone()?;
-    let choices: Vec<String> = snap
-        .branches
-        .iter()
-        .map(|b| b.name.clone())
-        .filter(|b| *b != into)
-        .chain(snap.remote_branches.iter().map(|b| b.name.clone()))
-        .collect();
+    let choices = snap.merge_choices(&into).map(str::to_owned).collect();
     Some(DialogKind::Merge {
         into,
         rev: rev.unwrap_or_default().to_owned(),

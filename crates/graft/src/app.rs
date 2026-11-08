@@ -967,7 +967,7 @@ impl eframe::App for GraftApp {
             .iter()
             .map(|p| TabInfo {
                 name: p.name.clone(),
-                tooltip: graft_core::paths::display(&p.root),
+                path: graft_core::paths::display(&p.root),
                 dirty: p.is_dirty(),
                 busy: p.is_starting(),
                 error: p.error.is_some(),

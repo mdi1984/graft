@@ -21,7 +21,7 @@ pub const STATUS_HEIGHT: f32 = 26.0;
 #[derive(Default)]
 pub struct ConsoleView {
     next_seq: u64,
-    pub entries: Vec<Entry>,
+    entries: Vec<Entry>,
     /// Entries before this `seq` were seen (console open).
     seen: u64,
     /// Entries before this `seq` are hidden ("Clear").
@@ -198,15 +198,8 @@ fn entry_row(ui: &mut Ui, entry: &Entry) {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let clock = jiff::Timestamp::from_second(secs)
-        .map(|t| {
-            t.to_zoned(jiff::tz::TimeZone::system())
-                .strftime("%H:%M:%S")
-                .to_string()
-        })
-        .unwrap_or_default();
     let mut x = rect.left() + 4.0;
-    let time = painter.layout_no_wrap(clock, theme::mono(), color::text_faint());
+    let time = painter.layout_no_wrap(crate::time::clock(secs), theme::mono(), color::text_faint());
     let time_width = time.size().x;
     paint_galley_left(painter, x, y, time);
     x += time_width + 10.0;

@@ -12,13 +12,14 @@ use graft_core::history::{Commit, GraphRow, History, LineKind};
 use graft_core::refs::ResetMode;
 use graft_core::short;
 
+use super::branch_menu::{self, checkout_color, menu_item};
+use super::diff_view;
 use super::file_row::{self, file_row, paint_file};
 use super::icons::Icon;
 use super::widgets::{
-    ButtonKind, button, checkout_color, chip, elided, empty_state, icon_button, loading, menu_item,
+    ButtonKind, button, chip, chip_size, elided, empty_state, icon_button, loading,
     paint_galley_left,
 };
-use super::{branch_menu, diff_view};
 use crate::keys;
 use crate::project::{Action, DialogKind, FileKey, Project, RefKind, RefLabel};
 use crate::text::plural;
@@ -424,7 +425,7 @@ fn paint_row(
 
 /// Like the sidebar: green is checked out in the main folder, orange in a
 /// linked worktree; the viewed worktree's HEAD is bold.
-pub fn label_style(label: &RefLabel) -> (Color32, egui::FontId) {
+fn label_style(label: &RefLabel) -> (Color32, egui::FontId) {
     let branch_color = checkout_color(label.checked_out);
     match label.kind {
         RefKind::Head => (branch_color, theme::semibold(theme::SMALL_SIZE + 0.5)),
@@ -515,15 +516,14 @@ fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Ac
             .iter()
             .filter(|r| r.target == commit.id)
         {
-            // A local branch of that name is offered above, or points
-            // elsewhere; origin/HEAD is no branch to check out.
+            // Two remotes can have a branch of the same name: offer one.
             let local = r.branch_name();
-            if local == "HEAD" || repo.branch(local).is_some() || tracked.contains(&local) {
-                continue;
+            if !tracked.contains(&local)
+                && branch_menu::tracking_items(ui, project, repo, r, true, actions)
+            {
+                tracked.push(local);
+                offered = true;
             }
-            tracked.push(local);
-            branch_menu::tracking_items(ui, project, r, true, actions);
-            offered = true;
         }
         if offered {
             ui.separator();
@@ -650,15 +650,14 @@ fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &m
             for label in labels {
                 let (fg, font) = label_style(label);
                 let galley = ui.painter().layout_no_wrap(label.name.clone(), font, fg);
-                let width = galley.size().x + 10.0;
-                let (rect, _) = ui.allocate_exact_size(vec2(width, 18.0), Sense::hover());
+                let (rect, _) = ui.allocate_exact_size(chip_size(&galley), Sense::hover());
                 chip(
                     ui.painter(),
                     rect.left(),
                     rect.center().y,
                     galley,
                     fg,
-                    width,
+                    rect.width(),
                 );
             }
         });

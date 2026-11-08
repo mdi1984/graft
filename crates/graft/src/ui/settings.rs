@@ -5,9 +5,10 @@
 use egui::{Align, ComboBox, Key, Layout, RichText, ScrollArea, Ui};
 use graft_core::identity::Identity;
 
-use super::widgets::dialog;
+use super::widgets::dialog::{self, footer_row, main_buttons};
 use super::widgets::{
-    ButtonKind, button, error_label, field_label, hint, inline_spinner, text_field, title,
+    ButtonKind, button, error_label, field_label, hint, inline_spinner, section_label, text_field,
+    title,
 };
 use crate::keys::{self, Command, Keymap, Scope};
 use crate::settings::{Settings, ThemeChoice};
@@ -24,7 +25,7 @@ pub struct SettingsForm {
     key_error: Option<String>,
     /// The identity as loaded, to tell whether it was edited.
     loaded: Option<Identity>,
-    pub identity: Identity,
+    identity: Identity,
 }
 
 pub enum Outcome {
@@ -184,25 +185,23 @@ pub fn show(
             });
         });
 
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            if button(ui, "Restore defaults", ButtonKind::Secondary, true).clicked() {
-                form.draft = Settings::default();
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if button(ui, "Save", ButtonKind::Primary, true).clicked() {
-                    let identity = form
-                        .loaded
-                        .as_ref()
-                        .filter(|loaded| **loaded != form.identity)
-                        .map(|_| form.identity.clone());
-                    outcome = Outcome::Save(form.draft.clone(), identity);
-                }
-                if button(ui, "Cancel", ButtonKind::Secondary, true).clicked() {
-                    outcome = Outcome::Cancel;
-                }
-            });
-        });
+        let (restore, answer) = footer_row(
+            ui,
+            |ui| button(ui, "Restore defaults", ButtonKind::Secondary, true).clicked(),
+            |ui| main_buttons(ui, "Save", ButtonKind::Primary, true, false, None),
+        );
+        if restore {
+            form.draft = Settings::default();
+        } else if answer.submit {
+            let identity = form
+                .loaded
+                .as_ref()
+                .filter(|loaded| **loaded != form.identity)
+                .map(|_| form.identity.clone());
+            outcome = Outcome::Save(form.draft.clone(), identity);
+        } else if answer.cancel {
+            outcome = Outcome::Cancel;
+        }
     });
     if matches!(outcome, Outcome::Open) && shown.cancel {
         outcome = Outcome::Cancel;
@@ -306,11 +305,7 @@ fn shortcut_row(ui: &mut Ui, form: &mut SettingsForm, command: Command) {
 
 fn section(ui: &mut Ui, title: &str) {
     ui.add_space(8.0);
-    ui.label(
-        RichText::new(title.to_uppercase())
-            .color(color::text_faint())
-            .size(theme::SMALL_SIZE),
-    );
+    section_label(ui, title);
 }
 
 /// " Alt+Z switches it anywhere.", if `command` has a shortcut.

@@ -1,11 +1,11 @@
 //! Text and status pieces of dialogs and forms.
 
-use egui::{Align2, RichText, Sense, Ui, vec2};
+use egui::{Align2, Color32, RichText, Sense, Ui, vec2};
 
 use super::spinner;
 use crate::theme::{self, color};
 
-/// A dialog's title.
+/// The title of a dialog or a full-screen message.
 pub fn title(ui: &mut Ui, text: &str) {
     ui.label(
         RichText::new(text)
@@ -29,21 +29,33 @@ pub fn field_label(ui: &mut Ui, text: &str) {
     );
 }
 
+/// A small uppercase label over a group of settings or choices.
+pub fn section_label(ui: &mut Ui, text: &str) {
+    ui.label(
+        RichText::new(text.to_uppercase())
+            .color(color::text_faint())
+            .size(theme::SMALL_SIZE),
+    );
+}
+
 /// Small faint help text, wrapped.
 pub fn hint(ui: &mut Ui, text: &str) {
-    ui.add(
-        egui::Label::new(
-            RichText::new(text)
-                .color(color::text_faint())
-                .size(theme::SMALL_SIZE),
-        )
-        .wrap(),
-    );
+    small_text(ui, text, color::text_faint());
+}
+
+/// Small text in `color`, wrapped.
+pub fn small_text(ui: &mut Ui, text: &str, color: Color32) {
+    ui.add(egui::Label::new(RichText::new(text).color(color).size(theme::SMALL_SIZE)).wrap());
 }
 
 /// What went wrong, wrapped.
 pub fn error_label(ui: &mut Ui, text: &str) {
     ui.add(egui::Label::new(RichText::new(text).color(color::removed())).wrap());
+}
+
+/// A caution that is not an error, wrapped.
+pub fn warning_label(ui: &mut Ui, text: &str) {
+    ui.add(egui::Label::new(RichText::new(text).color(color::dirty_fg())).wrap());
 }
 
 /// A small spinner in the layout, e.g. next to a busy button.
