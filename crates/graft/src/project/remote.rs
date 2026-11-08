@@ -71,11 +71,14 @@ impl Project {
         let label = op.label();
         let done: Ending = match &op {
             RemoteOp::Fetch => plain(quietly),
-            RemoteOp::Pull => Box::new(after_conflicts(
-                "Pulled".to_owned(),
-                "Pulling".to_owned(),
-                None,
-            )),
+            // Like a merge when it stops with conflicts; otherwise the view
+            // stays (unlike a merge, a pull is often done mid-work).
+            RemoteOp::Pull => Box::new(|p: &mut Project, ran_in, result| match result {
+                Ok(false) => p.infos.push("Pulled".to_owned()),
+                result => {
+                    after_conflicts("Pulled".into(), "Pulling".into(), None)(p, ran_in, result)
+                }
+            }),
             RemoteOp::Push => plain(|p: &mut Project, ran_in, result| p.pushed(ran_in, result)),
             RemoteOp::ForcePush { .. } => plain(say("Force pushed".to_owned())),
             RemoteOp::PushTag { remote, tag } => {
