@@ -64,74 +64,19 @@ These kept a 129-commit cleanup busy; follow them so it isn't needed again.
   WSL's git can be older (Ubuntu 24.04: 2.43), e.g. `checkout`/`reset` reject
   `--end-of-options`.
 
-## Screens
-Always visible: title bar, project tabs (one per open repo, top of the window),
-toolbar (Commit, Pull, Push, Fetch | Branch, Merge, Stash, New worktree |
-Preview in main, Slash | search), tabs: Workspace, Review, Stashes.
-
-Project tabs: repo name + dirty dot; close, reorder, restored on next launch.
-A "+" tab opens the start page: Open local folder, Clone from URL (progress,
-credentials via git/GCM), Create new repo, Recent repositories.
-
-Sidebar: WORKSPACE (File status w/ count, History); WORKTREES
-(branch, path, dirty count, ahead badge); BRANCHES; REMOTES/STASHES/TAGS.
-
-Workspace (main area switches):
-- Clicking a dirty worktree -> File status: left column = staged files above
-  unstaged files; right = diff with Stage hunk / Discard hunk and per-line
-  checkboxes ("N lines selected -> Stage lines" bar). Bottom, full width:
-  commit summary, description, Amend, "Push after commit", Commit button.
-- Clicking a clean worktree or branch -> History: commit graph (colored lanes,
-  ref chips), an "Uncommitted changes" row at the top if dirty, details pane right.
-
-Review: worktree vs merge-base of base branch, INCLUDING uncommitted changes.
-File list with "Viewed" checkboxes (keyed by content hash) + progress bar;
-side-by-side diff with word highlights; local notes; Open in IDE, Preview in main, Merge.
-
-Stashes: create (message, -u, --keep-index, --staged for selected lines);
-list shows which worktree each stash came from; Apply / Pop / Apply to
-another worktree / Branch from stash / Drop.
-
-Conflicts: merge banner (Abort / Continue, disabled until resolved);
-per-conflict cards Ours | (Base) | Theirs with Use ours/theirs/both/Edit;
-live Result panel; whole-file take ours/theirs for lock files.
-Read stages 1/2/3 from the index; resolve -> git add -> merge --continue.
-
-## Feature mechanics
-- Line staging (MVP): build patch from selected lines (unselected '-' -> context,
-  unselected '+' -> dropped), `git apply --cached --recount`; unstage with --reverse.
-  Later: content-based (apply in memory, write blob, update index).
-- Slash (cleanup): `git fetch --prune`, then group: upstream [gone] (pre-checked),
-  merged into main (pre-checked), never pushed (unchecked, warn), stale worktrees
-  (git worktree prune). Remove worktrees before branches. Never touch current,
-  default, protected patterns, locked worktrees. Dry run default.
-  Undo log of name+SHA ("Recently slashed").
-- Preview in main: require clean main, `git checkout --detach <wt HEAD>`, apply the
-  worktree's uncommitted diff, banner with "Restore main".
-- Copy configured ignored files (.env etc.) into new worktrees.
-
-## Everyday git (beyond the original spec)
-- Branches: checkout (refuse or offer stash when dirty), create, rename, delete,
-  set upstream, checkout a remote branch as tracking branch, compare two branches.
-- Commit context menu in History: checkout detached, create branch/tag here,
-  cherry-pick, revert, reset soft/mixed/hard (hard asks first), copy SHA.
-- Rebase onto a branch (same banner/continue/abort flow as merge).
-- Tags: create (lightweight/annotated), delete, push. Remotes: add/edit/remove,
-  fetch all, optional auto-fetch interval.
-- Push: publish new branch with upstream, force only as --force-with-lease.
-  Pull follows the repo's pull.rebase / ff settings.
-- Files: discard changes, add to .gitignore, open in Explorer / IDE,
-  file history and blame.
-- Undo last commit (soft reset to HEAD~1, guarded by reflog).
-
-## Trust and polish
-- Git output console: every command Graft runs, with exit code and output.
-  Errors surface as readable notifications, never silently.
-- Progress + cancel for long operations (clone, fetch, push, pull).
-- Settings: git identity (global / per repo), IDE command, auto-fetch interval,
-  Slash protected patterns, ignored files copied into new worktrees.
-- Detect and warn for submodules, Git LFS, very large repos.
-- Keyboard shortcuts for main actions; Ctrl+K palette searches commits, branches, files.
+## Product rules
+Promises the code doesn't make obvious; keep them when changing a feature.
+- Never fail silently: every git command shows in the console (Git output)
+  with exit code and output; errors become readable notifications.
+- Clone, fetch, push and pull show progress and can be cancelled.
+- Slash never touches the current or default branch, protected patterns or
+  locked worktrees; removes worktrees before their branches; "never pushed"
+  starts unchecked; every deletion goes to the undo log ("Recently slashed").
+- Push forces only as `--force-with-lease`; Pull follows the repo's pull
+  settings. Reset hard asks first; Undo last commit is guarded by the reflog.
+- Line staging builds a patch from the selected lines (unselected `-` become
+  context, unselected `+` are dropped) and runs `git apply --cached --recount`.
+- Preview in main needs a clean main folder and always offers "Restore main".
 - App icon "Splice": `crates/graft/assets/icon/` (SVG source; .ico + PNGs are
   generated by `cargo run -p icon-gen`).
 
