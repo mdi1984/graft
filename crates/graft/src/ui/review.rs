@@ -10,12 +10,14 @@ use egui::{
 use graft_core::review::{Review, ReviewFile};
 use graft_core::{Change, RepoSnapshot, Worktree};
 
+use super::AppAction;
 use super::can;
 use super::diff_view::{self, Marks};
 use super::file_row::{self, Extras, file_row};
+use super::file_tree::{self, Row};
 use super::widgets::{
-    ButtonKind, button, empty_state, fits, paint_check, progress_bar, remember_width,
-    section_heading_row, waiting,
+    ButtonKind, button, empty_state, fits, folder_row, paint_check, progress_bar, remember_width,
+    section_with_link, waiting,
 };
 use crate::keys::{self, Command};
 use crate::project::comments::{self, LineComment};
@@ -343,60 +345,137 @@ fn merge_button(
     }
 }
 
+/// How far each folder level indents the tree.
+const NEST: f32 = 14.0;
+
 fn file_list(ui: &mut Ui, project: &Project, review: &Review, actions: &mut Actions) {
     let selected = project.review.as_ref().and_then(|v| v.selected.as_deref());
-    section_heading_row(ui, &format!("FILES  {}", review.files.len()));
-    ui.add_space(4.0);
+    let folders = project.settings().review_folders;
+    let link = if folders {
+        ("Show list", "List the files without their folders")
+    } else {
+        ("Show folders", "Show the files under their folders")
+    };
+    let heading = format!("FILES  {}", review.files.len());
+    if section_with_link(ui, &heading, Some(link), &can::yes("")) {
+        actions.app(AppAction::ToggleReviewFolders);
+    }
     ScrollArea::vertical()
         .id_salt("review-file-list")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
-            for file in &review.files {
-                let path = &file.change.path;
-                let viewed = project.is_viewed(file);
-                let is_selected = selected == Some(path.as_str());
-                let note = if file.untracked {
-                    Some("untracked")
-                } else if file.uncommitted {
-                    Some("uncommitted")
-                } else {
-                    None
-                };
-                let extras = Extras {
-                    inset: 22.0,
-                    note: note.map(|note| (note, color::dirty_fg())),
-                    // Comments on this file.
-                    badge: project
-                        .review_state()
-                        .map_or(0, |s| s.file_comment_count(path)),
-                };
-                let response = file_row(ui, &file.change, is_selected, extras);
-                let rect = response.rect;
-                let y = rect.center().y;
-                let check = Rect::from_center_size(pos2(rect.left() + 12.0, y), vec2(14.0, 14.0));
-                let check_response = ui.interact(
-                    check.expand(4.0),
-                    ui.scope_id().with(("viewed", path)),
-                    Sense::click(),
-                );
-                paint_check(ui.painter(), check, viewed, check_response.hovered());
-                if viewed {
-                    // Dim viewed files so what is left stands out.
-                    ui.painter().rect_filled(
-                        Rect::from_min_max(pos2(rect.left() + 24.0, rect.top()), rect.max),
-                        4,
-                        color::app_bg().gamma_multiply(0.55),
-                    );
-                }
-
-                if check_response.clicked() {
-                    actions.push(Action::ToggleViewed(path.clone()));
-                } else if response.clicked() {
-                    actions.push(Action::SelectReviewFile(path.clone()));
+            if folders {
+                file_tree(ui, project, review, selected, actions);
+            } else {
+                for file in &review.files {
+                    review_file_row(ui, project, file, selected, None, actions);
                 }
             }
         });
+}
+
+/// The files under their folders; a folded folder hides what is inside.
+fn file_tree(
+    ui: &mut Ui,
+    project: &Project,
+    review: &Review,
+    selected: Option<&str>,
+    actions: &mut Actions,
+) {
+    let paths: Vec<&str> = review
+        .files
+        .iter()
+        .map(|f| f.change.path.as_str())
+        .collect();
+    let mut folded: Option<usize> = None;
+    for row in file_tree::rows(&paths) {
+        if folded.is_some_and(|depth| row.depth() > depth) {
+            continue;
+        }
+        folded = None;
+        match row {
+            Row::Folder {
+                path,
+                name,
+                depth,
+                files,
+            } => {
+                let inside = &review.files[files.clone()];
+                let viewed = inside.iter().filter(|f| project.is_viewed(f)).count();
+                let marked = selected.is_some_and(|s| paths[files].contains(&s));
+                let open = folder_row(
+                    ui,
+                    Id::unique(("review-folder", &project.root, path)),
+                    name,
+                    theme::body(),
+                    &format!("{viewed}/{}", inside.len()),
+                    18.0 + depth as f32 * NEST,
+                    marked,
+                );
+                if !open {
+                    folded = Some(depth);
+                }
+            }
+            Row::File { index, depth } => {
+                let file = &review.files[index];
+                review_file_row(ui, project, file, selected, Some(depth), actions);
+            }
+        }
+    }
+}
+
+/// One file with its Viewed box; `depth` in a tree, `None` in the flat list.
+fn review_file_row(
+    ui: &mut Ui,
+    project: &Project,
+    file: &ReviewFile,
+    selected: Option<&str>,
+    depth: Option<usize>,
+    actions: &mut Actions,
+) {
+    let path = &file.change.path;
+    let viewed = project.is_viewed(file);
+    let note = if file.untracked {
+        Some("untracked")
+    } else if file.uncommitted {
+        Some("uncommitted")
+    } else {
+        None
+    };
+    let extras = Extras {
+        inset: 22.0 + depth.unwrap_or(0) as f32 * NEST,
+        note: note.map(|note| (note, color::dirty_fg())),
+        // Comments on this file.
+        badge: project
+            .review_state()
+            .map_or(0, |s| s.file_comment_count(path)),
+        name_only: depth.is_some(),
+    };
+    let response = file_row(ui, &file.change, selected == Some(path.as_str()), extras);
+    let rect = response.rect;
+    let y = rect.center().y;
+    let check = Rect::from_center_size(pos2(rect.left() + 12.0, y), vec2(14.0, 14.0));
+    let check_response = ui.interact(
+        check.expand(4.0),
+        ui.scope_id().with(("viewed", path)),
+        Sense::click(),
+    );
+    paint_check(ui.painter(), check, viewed, check_response.hovered());
+    if viewed {
+        // Dim viewed files so what is left stands out.
+        ui.painter().rect_filled(
+            Rect::from_min_max(pos2(rect.left() + 24.0, rect.top()), rect.max),
+            4,
+            color::app_bg().gamma_multiply(0.55),
+        );
+    }
+
+    if check_response.clicked() {
+        actions.push(Action::ToggleViewed(path.clone()));
+    } else if response.clicked() {
+        actions.push(Action::SelectReviewFile(path.clone()));
+    }
 }
 
 /// The open file's name and buttons; `split` is whether it shows side by

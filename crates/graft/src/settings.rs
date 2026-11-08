@@ -24,6 +24,8 @@ pub struct Settings {
     pub wrap_lines: bool,
     /// Diffs show every line of a file, not just the changes with context.
     pub whole_file: bool,
+    /// Review lists the files under their folders instead of flat.
+    pub review_folders: bool,
     /// Keyboard shortcuts; only the ones changed from the defaults are saved.
     pub keys: Keymap,
 }
@@ -39,6 +41,7 @@ impl Default for Settings {
             check_updates: true,
             wrap_lines: false,
             whole_file: false,
+            review_folders: false,
             keys: Keymap::default(),
         }
     }

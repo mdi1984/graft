@@ -128,6 +128,14 @@ pub fn show(
             ),
         );
 
+        section(ui, "Review");
+        ui.checkbox(&mut form.draft.review_folders, "Show files in folders");
+        hint(
+            ui,
+            "Review lists the files under their folders instead of one flat list. The link \
+             above Review's file list switches it too.",
+        );
+
         section(ui, "Fetching");
         ui.horizontal(|ui| {
             ui.label(

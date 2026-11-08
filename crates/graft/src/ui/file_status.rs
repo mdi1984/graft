@@ -1,16 +1,14 @@
 //! File status: staged files above unstaged files on the left, the selected
 //! file's diff on the right, and the commit box across the bottom.
 
-use egui::{
-    Color32, Frame, Margin, Panel, Rect, RichText, ScrollArea, Sense, Stroke, Ui, pos2, vec2,
-};
+use egui::{Frame, Margin, Panel, Rect, RichText, ScrollArea, Sense, Stroke, Ui, pos2, vec2};
 use graft_core::{FileList, StatusEntry, WorktreeStatus};
 
 use super::can::{self, Can};
 use super::file_row;
 use super::icons::Icon;
 use super::widgets::{
-    ButtonKind, button, empty_state, hint, paint_icon_button, section_heading, text_field,
+    ButtonKind, button, empty_state, hint, paint_icon_button, section_with_link, text_field,
 };
 use super::{conflicts, diff_view};
 use crate::keys::Command;
@@ -179,42 +177,8 @@ fn file_lists(ui: &mut Ui, project: &Project, status: &WorktreeStatus, actions: 
 /// Section heading with a count and an optional link on the right; returns
 /// whether the link was clicked.
 fn section(ui: &mut Ui, title: &str, count: usize, link: Option<(&str, &str)>, can: &Can) -> bool {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
-    let y = rect.center().y;
-    section_heading(
-        ui,
-        ui.painter(),
-        rect.left() + 4.0,
-        y,
-        &format!("{title}  {count}"),
-    );
-    let Some((link, tip)) = link.filter(|_| count > 0) else {
-        return false;
-    };
-    let galley = ui
-        .painter()
-        .layout_no_wrap(link.to_owned(), theme::small(), Color32::PLACEHOLDER);
-    let r = Rect::from_min_size(
-        pos2(rect.right() - galley.size().x - 8.0, rect.top() + 3.0),
-        vec2(galley.size().x + 6.0, 18.0),
-    );
-    let response = ui
-        .interact(
-            r,
-            ui.scope_id().with(("section-link", title)),
-            Sense::click(),
-        )
-        .on_hover_text(can.blocked().unwrap_or(tip));
-    let fg = if !can.ok {
-        color::text_faint()
-    } else if response.hovered() {
-        color::text()
-    } else {
-        color::ahead_fg()
-    };
-    ui.painter()
-        .galley(pos2(r.left() + 3.0, y - galley.size().y / 2.0), galley, fg);
-    response.clicked() && can.ok
+    let link = link.filter(|_| count > 0);
+    section_with_link(ui, &format!("{title}  {count}"), link, can)
 }
 
 /// A note in an empty section.

@@ -181,7 +181,16 @@ fn grouped<'a, T>(
             .count();
         let run = &items[i..i + n];
         let has_mark = run.iter().any(|item| marked(item));
-        if folder_row(ui, id.with(prefix), folder, n, level.indent, has_mark) {
+        let count = n.to_string();
+        if widgets::folder_row(
+            ui,
+            id.with(prefix),
+            folder,
+            theme::mono(),
+            &count,
+            level.indent,
+            has_mark,
+        ) {
             let inner = Level {
                 skip: prefix.len(),
                 indent: level.indent + NEST,
@@ -190,45 +199,6 @@ fn grouped<'a, T>(
         }
         i += n;
     }
-}
-
-/// A branch folder that folds its branches; open until folded, and it stays
-/// the way it was left. Highlighted while folded over the current branch.
-fn folder_row(ui: &mut Ui, id: Id, name: &str, count: usize, indent: f32, marked: bool) -> bool {
-    let mut open = ui.data_mut(|d| *d.get_persisted_mut_or(id, true));
-    let (rect, response) = row(ui, 24.0);
-    let painter = ui.painter();
-    paint_row_bg(painter, rect, &response, marked && !open);
-    let y = rect.center().y;
-    let chevron = if open {
-        Icon::ChevronDown
-    } else {
-        Icon::ChevronRight
-    };
-    let chevron_rect =
-        Rect::from_center_size(pos2(rect.left() + indent + 7.0, y), vec2(10.0, 10.0));
-    super::icons::paint(painter, chevron_rect, chevron, color::text_faint());
-    let folder_rect =
-        Rect::from_center_size(pos2(rect.left() + indent + 21.0, y), vec2(12.0, 12.0));
-    super::icons::paint(painter, folder_rect, Icon::Folder, color::text_weak());
-
-    let count = painter.layout_no_wrap(count.to_string(), theme::small(), color::text_faint());
-    let count_x = rect.right() - PAD_X - count.size().x;
-    paint_galley_left(painter, count_x, y, count);
-    let x = rect.left() + indent + 32.0;
-    let label = elided(
-        ui,
-        name,
-        theme::mono(),
-        color::text_mid(),
-        count_x - 6.0 - x,
-    );
-    paint_galley_left(ui.painter(), x, y, label);
-    if response.clicked() {
-        open = !open;
-        ui.data_mut(|d| d.insert_persisted(id, open));
-    }
-    open
 }
 
 fn row(ui: &mut Ui, height: f32) -> (Rect, Response) {
