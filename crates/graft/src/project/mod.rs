@@ -414,6 +414,8 @@ pub struct Project {
 
     commits: Option<Arc<Vec<Commit>>>,
     tips: Vec<Oid>,
+    /// The tips a history walk in flight reads.
+    walking: Option<Vec<Oid>>,
     pub history: Option<History>,
     pub history_loading: bool,
     history_generation: u64,
@@ -504,6 +506,7 @@ impl Project {
             tickets: 0,
             commits: None,
             tips: Vec::new(),
+            walking: None,
             history: None,
             history_loading: false,
             history_generation: 0,
@@ -720,7 +723,14 @@ impl Project {
     }
 
     /// Rebuild the graph; with `walk`, also re-read commits from disk.
+    /// A walk in flight for the same tips is kept, never restarted or
+    /// replaced by a rebuild from older commits: when it lands,
+    /// [`Self::on_history`] builds again if the parent changed meanwhile.
     fn load_history(&mut self, walk: bool) {
+        if self.walking.as_ref() == Some(&self.tips) {
+            return;
+        }
+        self.walking = walk.then(|| self.tips.clone());
         self.history_generation += 1;
         self.history_cancel.cancel();
         self.history_cancel = CancelToken::default();
@@ -750,6 +760,7 @@ impl Project {
             return;
         }
         self.history_loading = false;
+        self.walking = None;
         let head = self.pending == Some(Pending::Head);
         if head {
             self.pending = None;
@@ -1114,5 +1125,66 @@ mod tests {
         let history = project.history.as_ref().unwrap();
         assert!(history.index.contains_key(&history::worktree_id()));
         assert_eq!(project.selected, Some(history::worktree_id()));
+    }
+
+    /// A repository with one commit, opened once its history is loaded.
+    fn opened_repo(tmp: &Path) -> (PathBuf, Project) {
+        let root = tmp.join("app");
+        std::fs::create_dir(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        git(&root, &["add", "a.txt"]);
+        git(&root, &["commit", "-q", "-m", "first"]);
+        let mut project = open(&root);
+        wait(&mut project, "history never loaded", |p| {
+            !p.history_loading && p.history.is_some()
+        });
+        (root, project)
+    }
+
+    /// The files changed: what the watcher's refresh brings.
+    fn refreshed(project: &mut Project) {
+        let snap = snapshot::load(&project.git).unwrap();
+        project.take_snapshot(snap);
+    }
+
+    /// Refreshes while the first history loads (files keep changing, or a
+    /// repository in WSL) keep that load instead of starting it again.
+    #[test]
+    fn refreshes_during_the_first_load_keep_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_root, mut project) = opened_repo(tmp.path());
+        project.commits = None;
+        project.history = None;
+        project.load_history(true);
+        let generation = project.history_generation;
+        for _ in 0..3 {
+            refreshed(&mut project);
+        }
+        assert_eq!(project.history_generation, generation, "load restarted");
+        wait(&mut project, "history never loaded", |p| {
+            !p.history_loading && p.history.is_some()
+        });
+    }
+
+    /// The worktree gets changes while the history is read again after a
+    /// commit: the new history has both the commit and the changes.
+    #[test]
+    fn changes_during_a_reload_keep_its_new_commits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, mut project) = opened_repo(tmp.path());
+        std::fs::write(root.join("a.txt"), "b\n").unwrap();
+        git(&root, &["commit", "-q", "-am", "second"]);
+        refreshed(&mut project);
+        assert!(project.history_loading);
+        std::fs::write(root.join("a.txt"), "dirty\n").unwrap();
+        refreshed(&mut project);
+        wait(&mut project, "history never loaded", |p| {
+            !p.history_loading && p.history.is_some()
+        });
+        let head = project.worktree().and_then(|wt| wt.head).unwrap();
+        let history = project.history.as_ref().unwrap();
+        assert!(history.index.contains_key(&head), "the new commit");
+        assert!(history.index.contains_key(&history::worktree_id()));
     }
 }
