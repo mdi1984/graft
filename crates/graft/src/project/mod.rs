@@ -272,10 +272,13 @@ pub enum Action {
     },
     /// Merge the reviewed branch into its base, in the worktree that has the
     /// base checked out.
+    /// Merge `branch` into `into` (checked out in `worktree`) if it is
+    /// still at the reviewed `head`.
     MergeReviewed {
         worktree: PathBuf,
         branch: String,
         into: String,
+        head: Oid,
     },
     OpenInIde(PathBuf),
 
@@ -1079,7 +1082,8 @@ impl Project {
                 worktree,
                 branch,
                 into,
-            } => self.merge_reviewed(worktree, branch, into),
+                head,
+            } => self.merge_reviewed(worktree, branch, into, head),
             Action::OpenInIde(path) => self.open_in_ide(path),
 
             Action::OpenSlash => self.open_slash(),

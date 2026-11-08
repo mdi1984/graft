@@ -4,9 +4,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use graft_core::Operation;
 use graft_core::conflicts::{self, ConflictFile, Resolution, Segment};
 use graft_core::paths::same_path;
+use graft_core::{Oid, Operation, review};
 
 use super::ops::{At, say};
 use super::{DialogKind, Project, Tab, WorkspaceView, readable};
@@ -166,14 +166,20 @@ impl Project {
     }
 
     /// Merge a reviewed branch in the worktree that has its base checked
-    /// out; conflicts are resolved there.
-    pub(super) fn merge_reviewed(&mut self, worktree: PathBuf, branch: String, into: String) {
+    /// out, unless it moved on since `head`; conflicts are resolved there.
+    pub(super) fn merge_reviewed(
+        &mut self,
+        worktree: PathBuf,
+        branch: String,
+        into: String,
+        head: Oid,
+    ) {
         let done = format!("Merged {branch} into {into}");
         let doing = format!("Merging {branch} into {into}");
         self.run_op(
             At::Path(worktree),
             "Merging",
-            move |git| conflicts::merge(&git, &branch, false),
+            move |git| review::merge(&git, &branch, head),
             after_conflicts(done, doing, Some(into)),
         );
     }

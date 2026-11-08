@@ -337,6 +337,7 @@ fn merge_button(
                 worktree: t.path.clone(),
                 branch: branch.clone(),
                 into: base.to_owned(),
+                head: review.head,
             },
         })));
     }
@@ -758,6 +759,7 @@ mod tests {
         let review = Review {
             base: "main".to_owned(),
             merge_base: wt.head.unwrap(),
+            head: wt.head.unwrap(),
             commits: 12,
             files: Vec::new(),
         };

@@ -142,3 +142,33 @@ fn folders_do_not_break_the_review() {
     let b = r.files.iter().find(|f| f.change.path == "b.txt").unwrap();
     assert!(!b.content.is_empty(), "files still get their content hash");
 }
+
+/// Merge merges what was reviewed: once the branch moved on (an agent
+/// committed after the review), nothing is merged until it is reviewed
+/// again.
+#[test]
+fn merge_takes_only_the_reviewed_commits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main = &common::init(&tmp.path().join("r"));
+    common::commit(main, "a.txt", "a\n", "base");
+    let agent = tmp.path().join("agent");
+    let agent_arg = agent.to_str().unwrap();
+    sh(main, &["worktree", "add", "-q", "-b", "feature", agent_arg]);
+    common::commit(&agent, "b.txt", "b\n", "reviewed");
+
+    let r = review::load(&common::git(&agent), "main").unwrap();
+    assert_eq!(r.head.to_string(), common::rev(&agent, "HEAD"));
+    common::commit(&agent, "c.txt", "c\n", "after the review");
+    let before = common::rev(main, "HEAD");
+    let err = review::merge(&common::git(main), "feature", r.head).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("moved since you reviewed it"),
+        "{err:#}"
+    );
+    assert_eq!(common::rev(main, "HEAD"), before);
+
+    let r = review::load(&common::git(&agent), "main").unwrap();
+    let stopped = review::merge(&common::git(main), "feature", r.head).unwrap();
+    assert!(!stopped);
+    assert_eq!(common::rev(main, "HEAD"), common::rev(&agent, "HEAD"));
+}

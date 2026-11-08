@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 use std::io::Read;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::changes::{FileChange, between, count_lines, is_binary};
 use crate::cli::Git;
@@ -34,6 +34,8 @@ impl ReviewFile {
 pub struct Review {
     pub base: String,
     pub merge_base: Oid,
+    /// The worktree's HEAD it was loaded for: Merge merges only that.
+    pub head: Oid,
     /// Commits on the branch since the merge-base.
     pub commits: usize,
     pub files: Vec<ReviewFile>,
@@ -68,14 +70,16 @@ const MAX_COUNTED: u64 = 8 * 1024 * 1024;
 
 /// `git` points at the worktree under review.
 pub fn load(git: &Git, base: &str) -> Result<Review> {
+    let head = git.rev("HEAD")?.context("This branch has no commits yet")?;
+    let head_hex = head.to_string();
     let merge_base = git
-        .read(["merge-base", "--end-of-options", base, "HEAD"])
+        .read(["merge-base", "--end-of-options", base, &head_hex])
         .with_context(|| format!("{base} and this branch have no common history"))?;
     let merge_base = merge_base.trim().to_owned();
     // The rest runs side by side: each git start costs tens of milliseconds
     // on Windows.
     let (commits, changes, untracked, uncommitted) = std::thread::scope(|s| {
-        let range = format!("{merge_base}..HEAD");
+        let range = format!("{merge_base}..{head_hex}");
         let commits = s.spawn(move || git.read(["rev-list", "--count", &range]));
         let uncommitted = s.spawn(|| git.run(["diff", "--name-only", "-z", "HEAD"]));
         let untracked = s.spawn(|| git.run(["ls-files", "--others", "--exclude-standard", "-z"]));
@@ -160,7 +164,21 @@ pub fn load(git: &Git, base: &str) -> Result<Review> {
         base: base.to_owned(),
         merge_base: Oid::from_hex(merge_base.as_bytes())
             .with_context(|| format!("unexpected merge-base {merge_base}"))?,
+        head,
         commits,
         files,
     })
+}
+
+/// Merge the reviewed `branch` into the branch checked out where `git`
+/// points, if it is still at the reviewed `head`: commits made after the
+/// review are never merged unseen. Ok(true): stopped with conflicts.
+pub fn merge(git: &Git, branch: &str, head: Oid) -> Result<bool> {
+    if git.rev(&format!("refs/heads/{branch}"))? != Some(head) {
+        bail!(
+            "Nothing was merged: {branch} moved since you reviewed it. Look at its new \
+             commits in Review, then merge again."
+        );
+    }
+    crate::conflicts::merge(git, branch, false)
 }
