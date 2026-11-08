@@ -13,7 +13,7 @@ use graft_core::console::Console;
 use graft_core::watch::Watcher;
 use graft_core::worktree::{self, Start};
 use graft_core::wsl::Wsl;
-use graft_core::{CancelToken, Git, conflicts, history, ops, preview, repo, snapshot};
+use graft_core::{CancelToken, Git, conflicts, history, ops, preview, remote, repo, snapshot};
 
 /// A temporary folder inside the distro, removed on drop.
 struct Distro {
@@ -243,6 +243,28 @@ fn partial_stage_of_new_script_keeps_mode() {
     let entry = d.sh("cd app && git ls-files --stage -- new.sh");
     assert!(entry.starts_with("100755 "), "{entry}");
     assert_eq!(d.sh("cd app && git show :new.sh"), "#!/bin/sh\necho a");
+}
+
+/// Linux git has no pull setting like Git for Windows' pull.rebase=false: a
+/// pull of a diverged branch goes through anyway, as a merge unless the
+/// user's config in the distro says otherwise.
+#[test]
+fn pull_of_a_diverged_branch() {
+    let Some(d) = Distro::start("pull_of_a_diverged_branch") else {
+        return;
+    };
+    d.sh("git init -q --bare -b main server.git \
+         && git clone -q server.git mine && git clone -q server.git theirs \
+         && for r in mine theirs; do git -C $r config user.name Ada \
+            && git -C $r config user.email ada@example.com; done \
+         && cd mine && printf 'a\\n' > a.txt && git add a.txt && git commit -q -m a \
+         && git push -q origin main && cd ../theirs && git pull -q \
+         && printf 'theirs\\n' > a.txt && git commit -qam theirs && git push -q \
+         && cd ../mine && printf 'mine\\n' > b.txt && git add b.txt && git commit -q -m mine");
+    let git = Git::new(d.path("mine"), Console::default());
+    let stopped = remote::pull(&git, &CancelToken::default(), |_| {}).unwrap();
+    assert!(!stopped);
+    assert_eq!(d.sh("cd mine && cat a.txt b.txt"), "theirs\nmine");
 }
 
 /// Windows has no Recycle Bin inside WSL: discarding a new file deletes

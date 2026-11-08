@@ -87,9 +87,27 @@ pub fn pull(git: &Git, cancel: &CancelToken, on_progress: impl FnMut(Progress)) 
     if let Err(why) = pull_check(&branch, &upstream(git)?) {
         bail!(why);
     }
+    let mut args = vec!["pull", "--progress"];
+    if !says_how_to_pull(git, &branch)? {
+        // Git's old default, which Git for Windows' installer sets too
+        // (pull.rebase=false); since git 2.33 a pull of a diverged branch
+        // fails without any setting, as in WSL.
+        args.push("--no-rebase");
+    }
     let accept = conflicts::done_or_stopped(git)?;
-    let out = git.run_progress_accepting(&["pull", "--progress"], cancel, on_progress, accept)?;
+    let out = git.run_progress_accepting(&args, cancel, on_progress, accept)?;
     Ok(!out.success())
+}
+
+/// Whether any config scope says how a pull of `branch` reconciles a
+/// diverged upstream (merge, rebase or fast-forward only).
+fn says_how_to_pull(git: &Git, branch: &str) -> Result<bool> {
+    for key in ["pull.rebase", &format!("branch.{branch}.rebase"), "pull.ff"] {
+        if git.config(&["--get", key])?.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Push the current branch (see [`push_plan`]).
