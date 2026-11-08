@@ -23,6 +23,38 @@ git worktree support (for parallel AI-agent work), pleasant code review.
 3. Job runner: background pool for git ops, graph layout, diffs.
 4. Git engine: reads via gix, writes via git CLI; watcher triggers incremental refresh.
 
+Where code goes:
+- `crates/graft-core`: git and the disk, no UI. One module per area
+  (`ops` stage/discard, `remote` push/pull/fetch, `slash`, `preview`,
+  `conflicts`, `stash`, `worktree`, ...). `cli.rs` runs git.
+- `crates/graft/src/project/`: one open repository's state and rules.
+  Views send an `Action`; each feature starts its jobs and handles their
+  results in its own file (`run_op`, `run_head_op` in `ops.rs`).
+- `crates/graft/src/ui/`: drawing only. `ui/can.rs` answers "may this
+  button act now, and if not, why".
+- `crates/graft/src/app.rs`: the window, project tabs, settings, updates.
+
+## Code rules
+These kept a 129-commit cleanup busy; follow them so it isn't needed again.
+1. One rule, one place. Whether an action may run, and why not, is decided
+   in `ui/can.rs` or `project/`; views ask and show the reason, never
+   re-check. Before adding an `if` that refuses something, search for the
+   existing rule and extend it.
+2. Every action carries its target. A confirm, dialog or job records the
+   worktree / branch / file it is about when it is created (`Selection`),
+   checks it again when it runs (`still_selected`), and never acts on
+   "whatever is selected now". Follow-up questions queue through `ask`.
+3. Destructive git operations re-check right before they run (delete
+   branch, discard, force push, Restore): use commands that compare first
+   (`update-ref -d <name> <old>`, `--force-with-lease`, applying the exact
+   diff the user saw) so a change made meanwhile makes them fail, not
+   destroy it.
+4. git runs through one path. Every call goes through `cli.rs`; settings
+   every call needs go in its `CONFIG` list, never at one call site. Pass
+   refs in full (`refs/heads/x`), so a tag named like a branch can't be
+   picked; pass many paths via stdin. Behavior that depends on git's
+   config or version gets a test with that config.
+
 ## Windows rules
 - Treat file content as bytes, not String. Respect core.autocrlf.
 - Handle no-newline-at-EOF and binary files explicitly.
@@ -109,6 +141,13 @@ lands: `cargo fmt`, `cargo clippy --workspace --all-targets` with no warnings,
 `cargo test --workspace`, and launching Graft to check the screen. Git logic
 gets tests against throwaway repos. One branch + PR per step, merged into
 main once checks pass.
+- Every bug fix comes with a test that fails without it. Before finishing,
+  search for code doing the same thing: if the fix belongs there too, share
+  the logic instead of fixing twice.
+- Tests must not depend on the machine: throwaway repos, a test identity
+  (`testing::git`), no global config where it matters. Before pushing, run
+  the tests once with `GIT_CONFIG_GLOBAL` emptied (`NUL` on Windows),
+  as CI has no git identity.
 
 ## Releases
 - Semantic versions, one for the whole workspace (`[workspace.package] version`
