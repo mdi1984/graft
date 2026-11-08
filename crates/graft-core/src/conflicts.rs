@@ -10,7 +10,6 @@ use anyhow::{Context, Result, bail};
 use crate::changes::is_binary;
 use crate::cli::{Git, Output};
 use crate::model::Operation;
-use crate::repo::in_progress;
 
 /// What one side of a conflict is called.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,20 +57,30 @@ pub fn side_names(kind: Option<Operation>, branch: Option<&str>) -> SideNames {
 /// Run a command that may stop with conflicts. Ok(true) means it stopped and
 /// the conflicts are waiting to be resolved.
 fn run_may_conflict(git: &Git, args: &[&str]) -> Result<bool> {
-    let out = git.run_accepting(args, None, done_or_stopped(git))?;
+    let out = git.run_accepting(args, None, done_or_stopped(git)?)?;
     Ok(!out.success())
 }
 
-/// Tells, for a merge, rebase, cherry-pick, revert or pull about to run in
-/// `git`'s worktree, whether it went through or stopped part-way to resolve
-/// conflicts and continue (rather than failed): it left an operation in
-/// progress where there was none. Judged by the repository, not by git's
-/// words, which for a pull include fetched branch names and the remote's
-/// messages.
-pub(crate) fn done_or_stopped(git: &Git) -> impl Fn(&Output) -> bool {
-    let worktree = git.cwd().to_path_buf();
-    let before = in_progress(&worktree).is_some();
-    move |out| out.success() || (!before && in_progress(&worktree).is_some())
+/// Tells, for a merge, rebase, cherry-pick, revert or pull (or a continue)
+/// about to run in `git`'s worktree, whether it went through or stopped
+/// part-way to resolve conflicts (rather than failed): it failed and left
+/// conflicted files where there were none. Judged by the index, not by
+/// git's words, which for a pull include fetched branch names and the
+/// remote's messages. Anything else that stops it (a hook, a commit made
+/// empty, another operation in progress) is reported in git's words; what
+/// it left in progress still offers Abort and Continue.
+pub(crate) fn done_or_stopped(git: &Git) -> Result<impl Fn(&Output) -> bool> {
+    let before = has_conflicts(git)?;
+    let git = git.clone();
+    let after = std::cell::OnceCell::new();
+    Ok(move |out: &Output| {
+        out.success() || (!before && *after.get_or_init(|| has_conflicts(&git).unwrap_or(false)))
+    })
+}
+
+/// Whether the index has conflicted (unmerged) files.
+fn has_conflicts(git: &Git) -> Result<bool> {
+    Ok(!git.run(["ls-files", "-u", "-z"])?.stdout.is_empty())
 }
 
 /// Merge `rev` into the current branch. Ok(true): stopped with conflicts.

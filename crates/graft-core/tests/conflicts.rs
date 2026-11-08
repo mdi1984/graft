@@ -300,3 +300,72 @@ fn a_refused_merge_is_not_taken_for_conflicts() {
     assert!(format!("{error:#}").contains("unmerged files"), "{error:#}");
     assert!(conflicts::cherry_pick(&git, "topic").is_err());
 }
+
+/// Continuing a rebase whose next commit conflicts too stops again with
+/// conflicts; it is not an error.
+#[test]
+fn continue_stops_at_the_next_conflict() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    common::init(dir);
+    common::commit(dir, "f", "0\n", "f");
+    common::commit(dir, "g", "0\n", "g");
+    sh(dir, &["switch", "-q", "-c", "topic"]);
+    common::commit(dir, "f", "topic\n", "topic f");
+    common::commit(dir, "g", "topic\n", "topic g");
+    sh(dir, &["switch", "-q", "main"]);
+    common::commit(dir, "f", "main\n", "main f");
+    common::commit(dir, "g", "main\n", "main g");
+    sh(dir, &["switch", "-q", "topic"]);
+    let git = common::git(dir);
+
+    assert!(conflicts::rebase(&git, "main").unwrap());
+    std::fs::write(dir.join("f"), "resolved\n").unwrap();
+    sh(dir, &["add", "f"]);
+    assert!(conflicts::continue_op(&git, Operation::Rebase).unwrap());
+    assert_eq!(status::load(&git).unwrap().conflicted().count(), 1);
+    assert!(repo::in_progress(dir).is_some());
+}
+
+/// A cherry-pick of a change already there stops without conflicts; git's
+/// own words say why.
+#[test]
+fn an_empty_cherry_pick_says_why() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    common::init(dir);
+    common::commit(dir, "a", "a\n", "a");
+    sh(dir, &["commit", "-q", "--allow-empty", "-m", "empty"]);
+    sh(dir, &["switch", "-q", "-c", "x", "HEAD~1"]);
+    let git = common::git(dir);
+
+    let error = conflicts::cherry_pick(&git, "main").unwrap_err();
+    assert!(format!("{error:#}").contains("empty"), "{error:#}");
+}
+
+/// A merge a hook stops is an error with the hook's words, not conflicts.
+#[test]
+fn a_merge_stopped_by_a_hook_shows_the_hook() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = &tmp.path().join("r");
+    common::init(dir);
+    common::commit(dir, "a", "a\n", "a");
+    sh(dir, &["switch", "-q", "-c", "topic"]);
+    common::commit(dir, "b", "b\n", "b");
+    sh(dir, &["switch", "-q", "main"]);
+    common::commit(dir, "c", "c\n", "c");
+    let hooks = tmp.path().join("hooks");
+    std::fs::create_dir(&hooks).unwrap();
+    let hook = hooks.join("pre-merge-commit");
+    std::fs::write(&hook, "#!/bin/sh\necho 'hook says no' >&2\nexit 1\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    sh(dir, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+    let git = common::git(dir);
+
+    let error = conflicts::merge(&git, "topic", false).unwrap_err();
+    assert!(format!("{error:#}").contains("hook says no"), "{error:#}");
+}

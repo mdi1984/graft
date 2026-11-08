@@ -87,7 +87,7 @@ pub fn pull(git: &Git, cancel: &CancelToken, on_progress: impl FnMut(Progress)) 
     if let Err(why) = pull_check(&branch, &upstream(git)?) {
         bail!(why);
     }
-    let accept = conflicts::done_or_stopped(git);
+    let accept = conflicts::done_or_stopped(git)?;
     let out = git.run_progress_accepting(&["pull", "--progress"], cancel, on_progress, accept)?;
     Ok(!out.success())
 }
