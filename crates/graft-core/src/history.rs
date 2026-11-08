@@ -8,7 +8,7 @@ use std::path::Path;
 use anyhow::Result;
 use smallvec::SmallVec;
 
-use crate::cli::CancelToken;
+use crate::jobs::CancelToken;
 use crate::model::{Oid, null_oid};
 
 #[derive(Clone, Debug)]
@@ -16,7 +16,6 @@ pub struct Commit {
     pub id: Oid,
     pub parents: SmallVec<[Oid; 2]>,
     pub author: String,
-    pub email: String,
     /// Author time, seconds since the Unix epoch.
     pub time: i64,
     /// Committer time; used for ordering like git does.
@@ -24,26 +23,29 @@ pub struct Commit {
     pub summary: String,
 }
 
+/// The id of the pseudo commit that stands for a worktree's uncommitted
+/// changes in a [`History`] (the all-zero id, which no commit has).
+pub fn worktree_id() -> Oid {
+    null_oid()
+}
+
+/// Whether `id` is [`worktree_id`].
+pub fn is_worktree_id(id: &Oid) -> bool {
+    id.is_null()
+}
+
 impl Commit {
     /// The pseudo commit standing for uncommitted changes.
     pub fn is_worktree(&self) -> bool {
-        self.id.is_null()
+        is_worktree_id(&self.id)
     }
 }
 
-/// Walked commits, newest first, before ordering and layout.
-#[derive(Clone, Debug, Default)]
-pub struct Commits {
-    pub list: Vec<Commit>,
-    /// True if the walk stopped at the limit.
-    pub truncated: bool,
-}
-
 /// Walk all commits reachable from `tips`, newest first, up to `limit`.
-pub fn walk(root: &Path, tips: &[Oid], limit: usize, cancel: &CancelToken) -> Result<Commits> {
+pub fn walk(root: &Path, tips: &[Oid], limit: usize, cancel: &CancelToken) -> Result<Vec<Commit>> {
     let mut repo = gix::open(root)?;
     repo.object_cache_size_if_unset(64 * 1024 * 1024);
-    let mut commits = Commits::default();
+    let mut commits = Vec::new();
     if tips.is_empty() {
         return Ok(commits);
     }
@@ -54,11 +56,8 @@ pub fn walk(root: &Path, tips: &[Oid], limit: usize, cancel: &CancelToken) -> Re
         ))
         .all()?;
     for info in walk {
-        if cancel.is_cancelled() {
-            anyhow::bail!("Cancelled");
-        }
-        if commits.list.len() >= limit {
-            commits.truncated = true;
+        cancel.check()?;
+        if commits.len() >= limit {
             break;
         }
         let info = info?;
@@ -66,11 +65,10 @@ pub fn walk(root: &Path, tips: &[Oid], limit: usize, cancel: &CancelToken) -> Re
         let author = commit.author()?;
         let time = author.time().map(|t| t.seconds).unwrap_or(0);
         let summary = summary_line(commit.message_raw_sloppy());
-        commits.list.push(Commit {
+        commits.push(Commit {
             id: info.id,
             parents: info.parent_ids.iter().copied().collect(),
             author: author.name.to_string(),
-            email: author.email.to_string(),
             time,
             commit_time: info.commit_time.unwrap_or(time),
             summary,
@@ -95,20 +93,18 @@ pub struct History {
     pub rows: Vec<GraphRow>,
     pub lanes: usize,
     pub index: HashMap<Oid, usize>,
-    pub truncated: bool,
 }
 
 impl History {
     /// Order and lay out `commits`. With `worktree_parent`, a pseudo commit for
     /// uncommitted changes is shown on top of that commit.
-    pub fn build(commits: &Commits, worktree_parent: Option<Oid>) -> Self {
-        let mut list = commits.list.clone();
+    pub fn build(commits: &[Commit], worktree_parent: Option<Oid>) -> Self {
+        let mut list = commits.to_vec();
         if let Some(parent) = worktree_parent {
             list.push(Commit {
-                id: null_oid(),
+                id: worktree_id(),
                 parents: SmallVec::from_slice(&[parent]),
                 author: String::new(),
-                email: String::new(),
                 time: i64::MAX,
                 commit_time: i64::MAX,
                 summary: String::new(),
@@ -122,7 +118,6 @@ impl History {
             rows,
             lanes,
             index,
-            truncated: commits.truncated,
         }
     }
 }
@@ -183,9 +178,8 @@ pub struct GraphRow {
 pub struct Line {
     pub kind: LineKind,
     /// Lane at the top of the row (`Pass`, `In`) or at the bottom (`Out`).
+    /// Lanes never shift, so a `Pass` line ends where it starts.
     pub lane: u16,
-    /// For `Pass`: lane at the bottom (equal to `lane`: lanes never shift).
-    pub to: u16,
     pub color: u8,
 }
 
@@ -199,12 +193,12 @@ pub enum LineKind {
     Out,
 }
 
-/// Number of distinct lane colors the UI provides.
+/// Number of distinct lane colors; the UI's palette has exactly this many.
 pub const LANE_COLORS: u8 = 8;
 
 /// Assign every commit a lane. Lanes keep their column for their whole life,
 /// freed columns are reused, and each new lane gets the next color.
-pub fn layout(commits: &[Commit]) -> (Vec<GraphRow>, usize) {
+fn layout(commits: &[Commit]) -> (Vec<GraphRow>, usize) {
     // Each lane: the commit it is waiting for and its color.
     let mut lanes: Vec<Option<(Oid, u8)>> = Vec::new();
     let mut next_color = 0u8;
@@ -237,7 +231,6 @@ pub fn layout(commits: &[Commit]) -> (Vec<GraphRow>, usize) {
             row.lines.push(Line {
                 kind: LineKind::In,
                 lane: i as u16,
-                to: node_lane as u16,
                 color,
             });
             lanes[i] = None;
@@ -247,7 +240,6 @@ pub fn layout(commits: &[Commit]) -> (Vec<GraphRow>, usize) {
                 row.lines.push(Line {
                     kind: LineKind::Pass,
                     lane: i as u16,
-                    to: i as u16,
                     color: *color,
                 });
             }
@@ -273,7 +265,6 @@ pub fn layout(commits: &[Commit]) -> (Vec<GraphRow>, usize) {
             row.lines.push(Line {
                 kind: LineKind::Out,
                 lane: target as u16,
-                to: target as u16,
                 color,
             });
         }
@@ -310,7 +301,6 @@ mod tests {
             id: oid(n),
             parents: parents.iter().map(|&p| oid(p)).collect(),
             author: String::new(),
-            email: String::new(),
             time,
             commit_time: time,
             summary: format!("c{n}"),
@@ -323,10 +313,7 @@ mod tests {
 
     #[test]
     fn linear_history_uses_one_lane() {
-        let commits = Commits {
-            list: vec![commit(3, &[2], 30), commit(2, &[1], 20), commit(1, &[], 10)],
-            truncated: false,
-        };
+        let commits = [commit(3, &[2], 30), commit(2, &[1], 20), commit(1, &[], 10)];
         let h = History::build(&commits, None);
         assert_eq!(ids(&h), ["c3", "c2", "c1"]);
         assert_eq!(h.lanes, 1);
@@ -336,15 +323,12 @@ mod tests {
     #[test]
     fn branch_and_merge_get_two_lanes() {
         // 1 <- 2 <- 4 (merge of 2 and 3); 1 <- 3
-        let commits = Commits {
-            list: vec![
-                commit(4, &[2, 3], 40),
-                commit(3, &[1], 30),
-                commit(2, &[1], 20),
-                commit(1, &[], 10),
-            ],
-            truncated: false,
-        };
+        let commits = [
+            commit(4, &[2, 3], 40),
+            commit(3, &[1], 30),
+            commit(2, &[1], 20),
+            commit(1, &[], 10),
+        ];
         let h = History::build(&commits, None);
         assert_eq!(ids(&h), ["c4", "c3", "c2", "c1"]);
         assert_eq!(h.lanes, 2);
@@ -371,20 +355,14 @@ mod tests {
     #[test]
     fn children_come_before_parents_despite_clock_skew() {
         // Child 2 has an older timestamp than its parent 1.
-        let commits = Commits {
-            list: vec![commit(1, &[], 50), commit(2, &[1], 10)],
-            truncated: false,
-        };
+        let commits = [commit(1, &[], 50), commit(2, &[1], 10)];
         let h = History::build(&commits, None);
         assert_eq!(ids(&h), ["c2", "c1"]);
     }
 
     #[test]
     fn worktree_row_sits_on_top_of_head() {
-        let commits = Commits {
-            list: vec![commit(2, &[1], 20), commit(1, &[], 10)],
-            truncated: false,
-        };
+        let commits = [commit(2, &[1], 20), commit(1, &[], 10)];
         let h = History::build(&commits, Some(oid(2)));
         assert!(h.commits[0].is_worktree());
         assert_eq!(h.commits[1].id, oid(2));

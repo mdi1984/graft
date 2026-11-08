@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::Git;
+use crate::cli::Git;
+use crate::model::remote_ref;
+use crate::paths::{display, glob_match, pattern_list, through_link};
 
 /// Files worth copying into a new worktree by default: ignored, so git will
 /// not bring them, but needed to build or run.
@@ -14,21 +16,13 @@ pub const DEFAULT_COPY_PATTERNS: &str = ".env, .env.*, *.local, *.local.json";
 /// What the new worktree checks out.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Start {
-    /// Create `name` at `base` (a branch, tag or commit).
+    /// Create `name` at `base` (a branch, tag or commit), without an
+    /// upstream even when `base` is a remote branch.
     NewBranch { name: String, base: String },
     /// Check out an existing local branch.
     Existing(String),
     /// Create a local branch `name` tracking `remote` (e.g. `origin/feature`).
     Tracking { name: String, remote: String },
-}
-
-impl Start {
-    pub fn branch(&self) -> &str {
-        match self {
-            Start::NewBranch { name, .. } | Start::Tracking { name, .. } => name,
-            Start::Existing(name) => name,
-        }
-    }
 }
 
 pub fn add(git: &Git, path: &Path, start: &Start) -> Result<()> {
@@ -40,19 +34,27 @@ pub fn add(git: &Git, path: &Path, start: &Start) -> Result<()> {
     {
         bail!(
             "The folder {} already exists and is not empty. Pick another folder.",
-            path.display()
+            display(path)
         );
     }
     let path = git.path_arg(path)?;
     match start {
         Start::NewBranch { name, base } => {
-            git.run(["worktree", "add", "-b", name, &path, base])?;
+            git.run(["worktree", "add", "--no-track", "-b", name, &path, base])?;
         }
         Start::Existing(name) => {
             git.run(["worktree", "add", &path, name])?;
         }
         Start::Tracking { name, remote } => {
-            git.run(["worktree", "add", "--track", "-b", name, &path, remote])?;
+            git.run([
+                "worktree",
+                "add",
+                "--track",
+                "-b",
+                name,
+                &path,
+                &remote_ref(remote),
+            ])?;
         }
     }
     Ok(())
@@ -93,6 +95,15 @@ pub fn default_path(main: &Path, branch: &str) -> PathBuf {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "repo".to_owned());
+    let parent = main.parent().unwrap_or(main);
+    parent
+        .join(format!("{repo}.worktrees"))
+        .join(folder_for(branch))
+}
+
+/// The folder name for a worktree of `branch`: the name with characters a
+/// folder name cannot have (and spaces) as `-`.
+pub fn folder_for(branch: &str) -> String {
     let folder: String = branch
         .chars()
         .map(|c| match c {
@@ -100,21 +111,14 @@ pub fn default_path(main: &Path, branch: &str) -> PathBuf {
             c => c,
         })
         .collect();
-    let parent = main.parent().unwrap_or(main);
-    parent
-        .join(format!("{repo}.worktrees"))
-        .join(folder.trim_matches('-'))
+    folder.trim_matches('-').to_owned()
 }
 
-/// Copy ignored files of `from` whose names match one of the comma-separated
-/// `patterns` into the same place in `to`. Existing files are kept. Returns the
-/// copied paths.
+/// Copy ignored files of `from` whose names match one of `patterns` (see
+/// [`pattern_list`]) into the same place in `to`. Existing files are kept.
+/// Returns the copied paths.
 pub fn copy_ignored(from: &Git, to: &Path, patterns: &str) -> Result<Vec<String>> {
-    let patterns: Vec<&str> = patterns
-        .split([',', ';', '\n'])
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .collect();
+    let patterns: Vec<&str> = pattern_list(patterns).collect();
     if patterns.is_empty() {
         return Ok(Vec::new());
     }
@@ -142,13 +146,12 @@ pub fn copy_ignored(from: &Git, to: &Path, patterns: &str) -> Result<Vec<String>
         let dst = to.join(rel.as_ref());
         // A link in the new worktree (a checked-in symlink folder) must not
         // send the copy somewhere outside it.
-        if dst.exists() || !src.is_file() || crate::model::through_link(to, Path::new(rel.as_ref()))
-        {
+        if dst.exists() || !src.is_file() || through_link(to, Path::new(rel.as_ref())) {
             continue;
         }
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent)
-                .with_context(|| format!("Could not create {}", parent.display()))?;
+                .with_context(|| format!("Could not create {}", display(parent)))?;
         }
         std::fs::copy(&src, &dst).with_context(|| format!("Could not copy {rel}"))?;
         copied.push(rel.into_owned());
@@ -156,47 +159,13 @@ pub fn copy_ignored(from: &Git, to: &Path, patterns: &str) -> Result<Vec<String>
     Ok(copied)
 }
 
-/// `*` matches any run of characters, `?` one character; case-insensitive
-/// like the Windows file system.
-pub fn glob_match(pattern: &str, name: &str) -> bool {
-    let p: Vec<char> = pattern.to_lowercase().chars().collect();
-    let n: Vec<char> = name.to_lowercase().chars().collect();
-    let (mut pi, mut ni) = (0, 0);
-    let mut star: Option<(usize, usize)> = None;
-    while ni < n.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
-            pi += 1;
-            ni += 1;
-        } else if pi < p.len() && p[pi] == '*' {
-            star = Some((pi, ni));
-            pi += 1;
-        } else if let Some((sp, sn)) = star {
-            pi = sp + 1;
-            ni = sn + 1;
-            star = Some((sp, sn + 1));
-        } else {
-            return false;
-        }
-    }
-    p[pi..].iter().all(|c| *c == '*')
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn globs() {
-        assert!(glob_match(".env", ".env"));
-        assert!(glob_match(".env.*", ".env.local"));
-        assert!(!glob_match(".env.*", ".env"));
-        assert!(glob_match("*.local.json", "appsettings.Local.json"));
-        assert!(!glob_match("*.local", "notes.md"));
-        assert!(glob_match("a?c*", "abcdef"));
-    }
-
-    #[test]
     fn default_paths() {
+        assert_eq!(folder_for("/feature/x:y/"), "feature-x-y");
         let p = default_path(Path::new(r"C:\dev\graft"), "feature/login page");
         assert_eq!(
             p,

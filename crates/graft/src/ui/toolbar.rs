@@ -5,55 +5,38 @@
 //! text says why.
 
 use egui::{Align, Layout, Ui};
+use graft_core::remote::{self, PushPlan};
 use graft_core::{RepoSnapshot, Upstream, Worktree};
 
+use super::can::{self, Can, no, yes};
 use super::icons::Icon;
-use super::widgets::{Tone, tool_button, toolbar_divider};
+use super::widgets::{Tone, fits, remember_width, tool_button, toolbar_divider};
 use crate::project::{Action, DialogKind, Project, RemoteOp, merge_dialog};
-
-/// Below this width, buttons with an icon drop their label.
-const COMPACT_WIDTH: f32 = 1120.0;
-
-/// Whether a button can act now, and its hover text: what it does, or why not.
-struct Can {
-    ok: bool,
-    hint: String,
-}
-
-fn yes(hint: impl Into<String>) -> Can {
-    Can {
-        ok: true,
-        hint: hint.into(),
-    }
-}
-
-fn no(hint: impl Into<String>) -> Can {
-    Can {
-        ok: false,
-        hint: hint.into(),
-    }
-}
-
-const FINISH_FIRST: &str = "Finish or abort what is in progress first";
+use crate::text::plural;
+use crate::ui::Actions;
 
 pub fn show(
     ui: &mut Ui,
     projects: &[Project],
     index: usize,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
     search: &mut String,
 ) {
     let project = &projects[index];
     let snap = project.snapshot.as_deref();
     let wt = project.worktree();
-    let busy = project.is_operating() || snap.is_none();
+    let blocked = project.can_act().err();
     let ahead = wt.map_or(0, |wt| wt.ahead());
     let behind = wt.map_or(0, |wt| wt.behind());
-    let compact = ui.available_width() < COMPACT_WIDTH;
+    // Buttons with an icon drop their label when the labeled buttons (as
+    // wide as last measured) leave the search less than its full width.
+    let labeled = egui::Id::unique("toolbar-labeled-width");
+    let compact = !fits(ui, labeled, ui.available_width() - super::search::MAX_WIDTH);
     let label = |text: &'static str| if compact { "" } else { text };
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
+        let start = ui.cursor().left();
 
         let can = can_commit(wt);
         if tool_button(
@@ -69,7 +52,7 @@ pub fn show(
         {
             actions.push(Action::ShowFileStatus);
         }
-        let can = can_pull(snap, wt);
+        let can = can_pull(snap, wt).unless(blocked);
         let pull_badge = (behind > 0).then(|| behind.to_string());
         if tool_button(
             ui,
@@ -81,11 +64,10 @@ pub fn show(
         )
         .on_hover_text(can.hint)
         .clicked()
-            && !busy
         {
             actions.push(Action::Remote(RemoteOp::Pull));
         }
-        let can = can_push(snap, wt);
+        let can = can_push(snap, wt).unless(blocked);
         let push_badge = (ahead > 0).then(|| ahead.to_string());
         if tool_button(
             ui,
@@ -97,7 +79,6 @@ pub fn show(
         )
         .on_hover_text(can.hint)
         .clicked()
-            && !busy
         {
             actions.push(Action::Remote(RemoteOp::Push));
         }
@@ -105,7 +86,8 @@ pub fn show(
             yes("Fetch all remotes")
         } else {
             no("No remote to fetch from. Add one under Remotes in the sidebar.")
-        };
+        }
+        .unless(blocked);
         if tool_button(
             ui,
             Some(Icon::Fetch),
@@ -116,7 +98,6 @@ pub fn show(
         )
         .on_hover_text(can.hint)
         .clicked()
-            && !busy
         {
             actions.push(Action::Remote(RemoteOp::Fetch));
         }
@@ -126,26 +107,16 @@ pub fn show(
             Some(wt) if wt.head.is_some() => yes("New branch from the current commit"),
             Some(_) => no("Make a first commit before creating branches"),
             None => no("Select a worktree first"),
-        };
+        }
+        .unless(blocked);
         if tool_button(ui, None, "Branch", None, Tone::Normal, can.ok)
             .on_hover_text(can.hint)
             .clicked()
-            && !busy
             && let Some(wt) = wt
         {
-            let (start, start_label) = match (&wt.branch, wt.head) {
-                (Some(b), _) => (b.clone(), b.clone()),
-                (None, Some(id)) => (id.to_string(), graft_core::short(&id)),
-                (None, None) => ("HEAD".to_owned(), "HEAD".to_owned()),
-            };
-            actions.push(Action::OpenDialog(DialogKind::NewBranch {
-                name: String::new(),
-                start,
-                start_label,
-                checkout: true,
-            }));
+            actions.push(Action::OpenDialog(DialogKind::new_branch_at(wt)));
         }
-        let can = can_merge(snap, wt);
+        let can = can::merge(snap, wt).unless(blocked);
         if tool_button(
             ui,
             Some(Icon::Merge),
@@ -156,38 +127,36 @@ pub fn show(
         )
         .on_hover_text(can.hint)
         .clicked()
-            && !busy
             && let Some(kind) = merge_dialog(project, None)
         {
             actions.push(Action::OpenDialog(kind));
         }
-        let can = if wt.is_some_and(|wt| wt.dirty() > 0) {
+        let can = if wt.is_some_and(|wt| wt.is_dirty()) {
             yes("Put this worktree's changes aside")
         } else {
             no("Nothing to stash: the worktree is clean")
-        };
+        }
+        .unless(blocked);
         if tool_button(ui, None, "Stash", None, Tone::Normal, can.ok)
             .on_hover_text(can.hint)
             .clicked()
-            && !busy
         {
-            actions.push(Action::OpenDialog(DialogKind::Stash {
-                message: String::new(),
-                include_untracked: true,
-                keep_index: false,
-                staged_only: false,
-            }));
+            actions.push(Action::OpenDialog(DialogKind::stash()));
         }
-        if tool_button(ui, None, "New worktree", None, Tone::Normal, snap.is_some())
-            .on_hover_text("Check out a branch in a second folder")
+        let can = can::new_worktree(project);
+        if tool_button(ui, None, "New worktree", None, Tone::Normal, can.ok)
+            .on_hover_text(can.hint)
             .clicked()
-            && !busy
         {
             actions.push(Action::NewWorktree(None));
         }
         toolbar_divider(ui);
 
-        let (can, preview_action) = can_preview(snap, wt);
+        let (can, preview_action) = match snap {
+            Some(snap) => can::preview(snap, wt),
+            None => (no("Select a worktree first"), None),
+        };
+        let can = can.unless(blocked);
         if tool_button(
             ui,
             None,
@@ -198,24 +167,27 @@ pub fn show(
         )
         .on_hover_text(can.hint)
         .clicked()
-            && !busy
             && let Some(action) = preview_action
         {
             actions.push(action);
         }
+        let can =
+            yes("Clean up finished branches and worktrees (shows a preview first)").unless(blocked);
         if tool_button(
             ui,
             Some(Icon::Slash),
             label("Slash"),
             None,
             Tone::Danger,
-            true,
+            can.ok,
         )
-        .on_hover_text("Clean up finished branches and worktrees (shows a preview first)")
+        .on_hover_text(can.hint)
         .clicked()
-            && !busy
         {
             actions.push(Action::OpenSlash);
+        }
+        if !compact {
+            remember_width(ui, labeled, ui.cursor().left() - start);
         }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -230,7 +202,7 @@ fn has_remote(snap: Option<&RepoSnapshot>) -> bool {
 
 fn can_commit(wt: Option<&Worktree>) -> Can {
     match wt {
-        Some(wt) if wt.dirty() > 0 => yes("Commit: show the changes to stage and commit"),
+        Some(wt) if wt.is_dirty() => yes("Commit: show the changes to stage and commit"),
         Some(_) => no("Nothing to commit: the worktree is clean"),
         None => no("Select a worktree first"),
     }
@@ -251,7 +223,7 @@ fn branch_upstream<'a>(
         return Err(no("Select a worktree first"));
     };
     if wt.in_progress.is_some() {
-        return Err(no(FINISH_FIRST));
+        return Err(no(can::FINISH_FIRST));
     }
     let branch = wt
         .branch
@@ -267,80 +239,35 @@ fn branch_upstream<'a>(
 fn can_pull(snap: Option<&RepoSnapshot>, wt: Option<&Worktree>) -> Can {
     match branch_upstream(snap, wt, "pull from") {
         Err(can) => can,
-        Ok((branch, Upstream::Tracking { name, .. })) => yes(format!("Pull {name} into {branch}")),
-        Ok((branch, Upstream::None)) => no(format!(
-            "{branch} has no upstream yet, so there is nothing to pull. Push publishes it."
-        )),
-        Ok((_, Upstream::Gone { name })) => no(format!("{name} was deleted on the remote")),
+        Ok((branch, upstream)) => match remote::pull_check(branch, upstream) {
+            Ok(name) => yes(format!("Pull {name} into {branch}")),
+            Err(why) => no(why),
+        },
     }
 }
 
 fn can_push(snap: Option<&RepoSnapshot>, wt: Option<&Worktree>) -> Can {
     let ahead = wt.map_or(0, |wt| wt.ahead());
-    match branch_upstream(snap, wt, "push to") {
-        Err(can) => can,
-        Ok((branch, Upstream::Tracking { name, .. })) if ahead == 0 => no(format!(
+    let (branch, upstream) = match branch_upstream(snap, wt, "push to") {
+        Err(can) => return can,
+        Ok(found) => found,
+    };
+    let remotes = snap
+        .into_iter()
+        .flat_map(|s| &s.remotes)
+        .map(|r| r.name.as_str());
+    match (remote::push_plan(upstream, remotes), upstream) {
+        (Err(why), _) => no(why),
+        (Ok(PushPlan::Upstream), Upstream::Tracking { name, .. }) if ahead == 0 => no(format!(
             "Nothing to push: {branch} has no commits that {name} lacks"
         )),
-        Ok((_, Upstream::Tracking { name, .. })) => {
-            let commits = if ahead == 1 { "commit" } else { "commits" };
-            yes(format!("Push {ahead} {commits} to {name}"))
-        }
-        Ok((branch, Upstream::None)) => yes(format!("Publish {branch} and track it")),
-        Ok((branch, Upstream::Gone { name })) => yes(format!(
+        (Ok(PushPlan::Upstream), Upstream::Tracking { name, .. }) => yes(format!(
+            "Push {} to {name}",
+            plural(ahead, "commit", "commits")
+        )),
+        (Ok(_), Upstream::Gone { name }) => yes(format!(
             "Push {branch} again ({name} was deleted on the remote)"
         )),
-    }
-}
-
-fn can_merge(snap: Option<&RepoSnapshot>, wt: Option<&Worktree>) -> Can {
-    let Some(wt) = wt else {
-        return no("Select a worktree first");
-    };
-    let Some(branch) = wt.branch.as_deref() else {
-        return no("Check out a branch to merge into");
-    };
-    if wt.in_progress.is_some() {
-        return no(FINISH_FIRST);
-    }
-    let other = snap.is_some_and(|s| {
-        s.branches.iter().any(|b| b.name != branch) || !s.remote_branches.is_empty()
-    });
-    if other {
-        yes(format!("Merge another branch into {branch}"))
-    } else {
-        no("There is no other branch to merge")
-    }
-}
-
-fn can_preview(snap: Option<&RepoSnapshot>, wt: Option<&Worktree>) -> (Can, Option<Action>) {
-    let Some(snap) = snap else {
-        return (no("Select a worktree first"), None);
-    };
-    match (snap.preview.as_ref(), wt) {
-        (Some(p), Some(wt)) if graft_core::same_path(&p.source, &wt.path) => (
-            yes("The main folder shows this worktree: show its current state again"),
-            Some(Action::UpdatePreview),
-        ),
-        (Some(_), _) => (
-            no("The main folder already shows a preview. Restore it first."),
-            None,
-        ),
-        (None, Some(wt)) if wt.is_main => (
-            no("Select another worktree to show its state in the main folder"),
-            None,
-        ),
-        (None, Some(_)) if snap.main_worktree().is_some_and(|m| m.dirty() > 0) => (
-            no("The main folder has uncommitted changes. Commit or stash them first."),
-            None,
-        ),
-        (None, Some(wt)) => (
-            yes(
-                "Check out this worktree's commit plus its uncommitted changes in the main \
-                 folder, e.g. to run it from there",
-            ),
-            Some(Action::PreviewInMain(wt.path.clone())),
-        ),
-        (None, None) => (no("Select a worktree first"), None),
+        (Ok(_), _) => yes(format!("Publish {branch} and track it")),
     }
 }

@@ -3,52 +3,60 @@
 
 use std::time::UNIX_EPOCH;
 
-use egui::{Align, Layout, RichText, ScrollArea, Sense, Ui, pos2, vec2};
+use egui::{Align, Color32, Layout, RichText, ScrollArea, Sense, Ui, pos2, vec2};
 use graft_core::console::Entry;
 
 use super::icons::Icon;
-use super::widgets::{ICON_SIZE, elided, icon_button, paint_galley_left, paint_icon, spinner};
+use super::widgets::{
+    ICON_SIZE, elided, icon_button, paint_galley_left, paint_icon, paint_placeholder_left, spinner,
+};
 use crate::keys::{Command, Keymap};
 use crate::theme::{self, color};
 
 pub const STATUS_HEIGHT: f32 = 26.0;
+/// Width of the "ok" / "exit N" column of a console row.
+const MARK_COLUMN: f32 = 48.0;
 
 /// The latest console entries, re-read only when the console changed.
+/// Entries are told apart by their `seq`, which stays put when old ones
+/// drop out of the console.
 #[derive(Default)]
 pub struct ConsoleView {
-    generation: u64,
-    pub entries: Vec<Entry>,
-    /// Number of entries the user has seen (console open).
-    seen: usize,
-    cleared_at: usize,
+    next_seq: u64,
+    entries: Vec<Entry>,
+    /// Entries before this `seq` were seen (console open).
+    seen: u64,
+    /// Entries before this `seq` are hidden ("Clear").
+    cleared: u64,
 }
 
 impl ConsoleView {
-    pub fn sync(&mut self, console: &graft_core::Console) {
-        let generation = console.generation();
-        if generation != self.generation {
-            self.generation = generation;
+    pub fn sync(&mut self, console: &graft_core::console::Console) {
+        let next_seq = console.next_seq();
+        if next_seq != self.next_seq {
+            self.next_seq = next_seq;
             self.entries = console.snapshot();
-            self.seen = self.seen.min(self.entries.len());
-            self.cleared_at = self.cleared_at.min(self.entries.len());
         }
     }
 
     pub fn unseen_failures(&self) -> usize {
-        self.entries[self.seen.min(self.entries.len())..]
+        self.entries
             .iter()
-            .filter(|e| e.failed())
+            .filter(|e| e.seq >= self.seen && e.failed())
             .count()
     }
 
     pub fn mark_seen(&mut self) {
-        self.seen = self.entries.len();
+        self.seen = self.next_seq;
+    }
+
+    fn shown(&self) -> impl Iterator<Item = &Entry> {
+        self.entries.iter().filter(|e| e.seq >= self.cleared)
     }
 }
 
 /// The bottom status bar: current activity on the left, console toggle right.
-/// The bottom status bar. Returns true when the user clicked "Cancel" on a
-/// cancellable `activity`.
+/// Returns true when the user clicked "Cancel" on a cancellable `activity`.
 pub fn status_bar(
     ui: &mut Ui,
     activity: Option<&str>,
@@ -74,10 +82,10 @@ pub fn status_bar(
             rect.width() / 2.0,
         );
         let width = text.size().x;
-        paint_galley_left(painter, x, y, text, color::text_weak());
+        paint_galley_left(painter, x, y, text);
         if cancellable {
             let galley =
-                painter.layout_no_wrap("Cancel".to_owned(), theme::small(), color::ahead_fg());
+                painter.layout_no_wrap("Cancel".to_owned(), theme::small(), Color32::PLACEHOLDER);
             let r = egui::Rect::from_min_size(
                 pos2(x + width + 10.0, rect.top() + 4.0),
                 vec2(galley.size().x + 8.0, rect.height() - 8.0),
@@ -88,7 +96,7 @@ pub fn status_bar(
             } else {
                 color::ahead_fg()
             };
-            paint_galley_left(painter, r.left() + 4.0, y, galley, fg);
+            paint_placeholder_left(painter, r.left() + 4.0, y, galley, fg);
             cancel = response.clicked();
         }
     } else if let Some(last) = view.entries.last() {
@@ -100,10 +108,9 @@ pub fn status_bar(
             color::text_faint(),
             rect.width() / 2.0,
         );
-        paint_galley_left(painter, x, y, text, color::text_faint());
+        paint_galley_left(painter, x, y, text);
     }
 
-    // Console toggle on the right.
     let failures = view.unseen_failures();
     let label = if failures > 0 {
         format!("Console · {failures} failed")
@@ -128,7 +135,7 @@ pub fn status_bar(
         painter.rect_filled(button, 4, color::control_hover_bg());
     }
     paint_icon(painter, pos2(button.left() + 8.0, y), Icon::Terminal, fg);
-    paint_galley_left(painter, button.left() + 14.0 + ICON_SIZE, y, galley, fg);
+    paint_galley_left(painter, button.left() + 14.0 + ICON_SIZE, y, galley);
     if response.clicked() {
         *console_open = !*console_open;
     }
@@ -157,7 +164,7 @@ pub fn console(ui: &mut Ui, view: &mut ConsoleView, open: &mut bool) {
                 *open = false;
             }
             if ui.button("Clear").clicked() {
-                view.cleared_at = view.entries.len();
+                view.cleared = view.next_seq;
             }
         });
     });
@@ -168,18 +175,19 @@ pub fn console(ui: &mut Ui, view: &mut ConsoleView, open: &mut bool) {
         .stick_to_bottom(true)
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
-            let start = view.cleared_at.min(view.entries.len());
-            if start == view.entries.len() {
-                ui.label(RichText::new("No commands yet.").color(color::text_faint()));
+            let mut any = false;
+            for entry in view.shown() {
+                any = true;
+                entry_row(ui, entry);
             }
-            for (i, entry) in view.entries.iter().enumerate().skip(start) {
-                entry_row(ui, i, entry);
+            if !any {
+                ui.label(RichText::new("No commands yet.").color(color::text_faint()));
             }
         });
 }
 
-fn entry_row(ui: &mut Ui, index: usize, entry: &Entry) {
-    let id = ui.scope_id().with(("console-entry", index, entry.at));
+fn entry_row(ui: &mut Ui, entry: &Entry) {
+    let id = ui.scope_id().with(("console-entry", entry.seq));
     let mut expanded = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
     if response.hovered() {
@@ -192,17 +200,10 @@ fn entry_row(ui: &mut Ui, index: usize, entry: &Entry) {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let clock = jiff::Timestamp::from_second(secs)
-        .map(|t| {
-            t.to_zoned(jiff::tz::TimeZone::system())
-                .strftime("%H:%M:%S")
-                .to_string()
-        })
-        .unwrap_or_default();
     let mut x = rect.left() + 4.0;
-    let time = painter.layout_no_wrap(clock, theme::mono(), color::text_faint());
+    let time = painter.layout_no_wrap(crate::time::clock(secs), theme::mono(), color::text_faint());
     let time_width = time.size().x;
-    paint_galley_left(painter, x, y, time, color::text_faint());
+    paint_galley_left(painter, x, y, time);
     x += time_width + 10.0;
     let (mark, mark_color) = if entry.failed() {
         (format!("exit {}", entry.status), color::removed())
@@ -210,15 +211,18 @@ fn entry_row(ui: &mut Ui, index: usize, entry: &Entry) {
         ("ok".to_owned(), color::added())
     };
     let mark = painter.layout_no_wrap(mark, theme::small(), mark_color);
-    paint_galley_left(painter, x, y, mark, mark_color);
-    x += 48.0;
+    // A column for the usual marks; a long exit code (a Windows crash
+    // code) pushes the command along instead of under it.
+    let mark_width = (mark.size().x + 10.0).max(MARK_COLUMN);
+    paint_galley_left(painter, x, y, mark);
+    x += mark_width;
     let duration = painter.layout_no_wrap(
         format!("{} ms", entry.duration.as_millis()),
         theme::small(),
         color::text_faint(),
     );
     let duration_x = rect.right() - 6.0 - duration.size().x;
-    paint_galley_left(painter, duration_x, y, duration, color::text_faint());
+    paint_galley_left(painter, duration_x, y, duration);
     let command = elided(
         ui,
         &entry.command,
@@ -226,7 +230,7 @@ fn entry_row(ui: &mut Ui, index: usize, entry: &Entry) {
         color::text_mid(),
         duration_x - 10.0 - x,
     );
-    paint_galley_left(painter, x, y, command, color::text_mid());
+    paint_galley_left(painter, x, y, command);
     if response
         .on_hover_text(format!("in {}", entry.cwd))
         .clicked()

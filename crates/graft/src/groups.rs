@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use graft_core::same_path;
+use graft_core::paths::same_path;
 use serde::{Deserialize, Serialize};
 
 pub type GroupId = u64;
@@ -18,7 +18,7 @@ pub type GroupId = u64;
 pub struct TabGroup {
     pub id: GroupId,
     pub name: String,
-    /// Index into the group colors (`theme::color::lanes`).
+    /// Index into the group colors (`theme::color::group`).
     pub color: usize,
     pub collapsed: bool,
     /// Repository roots, open or not.
@@ -48,13 +48,17 @@ pub fn set_group(groups: &mut [TabGroup], root: &Path, group: Option<GroupId>) {
     }
 }
 
-/// A fresh id and the first color no group uses yet.
-pub fn next_id_and_color(groups: &[TabGroup], colors: usize) -> (GroupId, usize) {
-    let id = groups.iter().map(|g| g.id).max().map_or(1, |m| m + 1);
-    let color = (0..colors)
+/// An id no group has.
+pub fn next_id(groups: &[TabGroup]) -> GroupId {
+    groups.iter().map(|g| g.id).max().map_or(1, |m| m + 1)
+}
+
+/// The first of `colors` group colors no group uses yet; with all taken,
+/// one in turn.
+pub fn free_color(groups: &[TabGroup], colors: usize) -> usize {
+    (0..colors)
         .find(|c| groups.iter().all(|g| g.color != *c))
-        .unwrap_or(id as usize % colors.max(1));
-    (id, color)
+        .unwrap_or(next_id(groups) as usize % colors)
 }
 
 /// The tab order with each group's tabs together, where its first tab is,
@@ -329,7 +333,7 @@ mod tests {
             g.color = 1;
             g
         }];
-        assert_eq!(next_id_and_color(&groups, 8), (8, 2));
-        assert_eq!(next_id_and_color(&[], 8), (1, 0));
+        assert_eq!((next_id(&groups), free_color(&groups, 6)), (8, 2));
+        assert_eq!((next_id(&[]), free_color(&[], 6)), (1, 0));
     }
 }

@@ -1,54 +1,38 @@
 //! A modal question before destructive actions (discard, delete).
 
-use egui::{Id, Key, RichText};
+use egui::RichText;
 
-use super::widgets::{ButtonKind, button};
+use super::widgets::dialog::{self, footer};
+use super::widgets::{ButtonKind, title};
 use crate::project::{Action, Confirm};
-use crate::theme::{self, color};
+use crate::theme::color;
+use crate::ui::Actions;
 
-pub fn show(ctx: &egui::Context, confirm: &Confirm, actions: &mut Vec<Action>) {
-    let response = super::widgets::modal(ctx, Id::unique("confirm-modal")).show(ctx, |ui| {
-        ui.set_width(420.0);
-        ui.spacing_mut().item_spacing.y = 8.0;
-        ui.label(
-            RichText::new(&confirm.title)
-                .font(theme::semibold(15.0))
-                .color(color::text()),
-        );
-        ui.add_space(2.0);
-        ui.add(egui::Label::new(RichText::new(&confirm.body).color(color::text_mid())).wrap());
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if danger_button(ui, &confirm.confirm_label).clicked() {
-                    actions.push(Action::ConfirmYes);
-                }
-                if button(ui, "Cancel", ButtonKind::Secondary, true).clicked() {
-                    actions.push(Action::ConfirmNo);
-                }
-            });
-        });
-    });
-    if response.should_close() || ctx.input(|i| i.key_pressed(Key::Escape)) {
-        actions.push(Action::ConfirmNo);
+/// A project's question; the answer goes back as an action.
+pub fn show(ctx: &egui::Context, confirm: &Confirm, actions: &mut Actions) {
+    match ask(ctx, &confirm.title, &confirm.body, &confirm.confirm_label) {
+        Some(true) => actions.push(Action::ConfirmYes),
+        Some(false) => actions.push(Action::ConfirmNo),
+        None => {}
     }
 }
 
-fn danger_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    let text = ui.painter().layout_no_wrap(
-        label.to_owned(),
-        theme::semibold(theme::BODY_SIZE),
-        color::on_accent(),
-    );
-    let size = egui::vec2(text.size().x + 28.0, 30.0);
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    let fill = if response.hovered() {
-        color::removed().gamma_multiply(1.1)
+/// Ask `title`; `Some(true)` once confirmed with `confirm_label`,
+/// `Some(false)` once cancelled, `None` while it is open.
+pub fn ask(ctx: &egui::Context, title_text: &str, body: &str, confirm_label: &str) -> Option<bool> {
+    let shown = dialog::show(ctx, "confirm-modal", 420.0, false, |ui| {
+        ui.spacing_mut().item_spacing.y = 8.0;
+        title(ui, title_text);
+        ui.add_space(2.0);
+        ui.add(egui::Label::new(RichText::new(body).color(color::text_mid())).wrap());
+        footer(ui, confirm_label, ButtonKind::Danger, true, false, None)
+    });
+    let answer = shown.answer();
+    if answer.submit {
+        Some(true)
+    } else if answer.cancel {
+        Some(false)
     } else {
-        color::removed()
-    };
-    ui.painter().rect_filled(rect, theme::RADIUS, fill);
-    ui.painter()
-        .galley(rect.center() - text.size() / 2.0, text, color::on_accent());
-    response
+        None
+    }
 }

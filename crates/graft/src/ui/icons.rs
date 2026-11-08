@@ -1,6 +1,9 @@
 //! Small stroke icons, painted in a 24×24 design grid scaled to the target rect.
 
-use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, vec2};
+use egui::{
+    Color32, Context, Painter, Pos2, Rect, Shape, Stroke, TextureHandle, TextureOptions, Ui, pos2,
+    vec2,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
@@ -186,4 +189,49 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             line(&[(7.0, 7.2), (7.0, 9.0), (14.8, 12.0)]);
         }
     }
+}
+
+/// The app logo, for large sizes.
+pub fn app_logo(ctx: &Context) -> TextureHandle {
+    texture(
+        ctx,
+        "graft-logo",
+        include_bytes!("../../assets/icon/graft-256.png"),
+    )
+}
+
+/// Paint the app icon for small sizes (title bar, About) into `rect`.
+pub fn paint_app_icon(ui: &Ui, rect: Rect) {
+    let icon = texture(
+        ui.ctx(),
+        "graft-app-icon",
+        include_bytes!("../../assets/icon/graft-title.png"),
+    );
+    ui.painter().image(
+        icon.id(),
+        rect,
+        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+        Color32::WHITE,
+    );
+}
+
+/// A bundled PNG as a texture, decoded on first use. Mipmapped, so it stays
+/// crisp at any display scale.
+fn texture(ctx: &Context, name: &'static str, png: &[u8]) -> TextureHandle {
+    let id = egui::Id::unique(("bundled-texture", name));
+    if let Some(texture) = ctx.data(|d| d.get_temp::<TextureHandle>(id)) {
+        return texture;
+    }
+    let icon = eframe::icon_data::from_png_bytes(png).expect("bundled icon is a valid PNG");
+    let image = egui::ColorImage::from_rgba_unmultiplied(
+        [icon.width as usize, icon.height as usize],
+        &icon.rgba,
+    );
+    let texture = ctx.load_texture(
+        name,
+        image,
+        TextureOptions::LINEAR.with_mipmap_mode(Some(egui::TextureFilter::Linear)),
+    );
+    ctx.data_mut(|d| d.insert_temp(id, texture.clone()));
+    texture
 }

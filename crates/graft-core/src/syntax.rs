@@ -88,7 +88,6 @@ fn language(path: &str) -> Option<&'static SyntaxReference> {
         "ts" | "tsx" | "mts" | "cts" | "jsx" | "mjs" | "cjs" => "js",
         "cshtml" | "razor" | "vue" | "svelte" => "html",
         "csproj" | "props" | "targets" | "xaml" | "svg" | "resx" => "xml",
-        "kts" => "kt",
         _ => ext,
     };
     set.find_syntax_by_extension(ext)
@@ -228,7 +227,16 @@ mod tests {
             ..FileDiff::default()
         };
         assert!(highlight(&diff).is_empty());
-        assert!(language("App.tsx").is_some());
-        assert!(language("Program.cs").is_some());
+    }
+
+    #[test]
+    fn close_relatives_borrow_a_syntax() {
+        let name = |path: &str| language(path).map(|s| s.name.as_str());
+        assert_eq!(name("src/App.tsx"), Some("JavaScript"));
+        assert_eq!(name(r"src\Program.cs"), Some("C#"));
+        assert_eq!(name("Views/Index.cshtml"), Some("HTML"));
+        assert_eq!(name("Graft.csproj"), Some("XML"));
+        assert_eq!(name("Makefile"), Some("Makefile"));
+        assert_eq!(name("notes.txt"), None, "plain text is not highlighted");
     }
 }

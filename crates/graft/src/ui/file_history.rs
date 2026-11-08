@@ -3,31 +3,34 @@
 //! change (blame).
 
 use egui::{
-    Align, Frame, Key, Layout, Margin, Modifiers, Panel, Rect, RichText, ScrollArea, Sense, Ui,
-    pos2, vec2,
+    Align, Frame, Key, Layout, Margin, Panel, Rect, RichText, ScrollArea, Sense, Ui, pos2, vec2,
 };
+use graft_core::diff::{display_text, display_width};
 use graft_core::file_log::Blame;
 
+use super::can;
 use super::diff_view;
 use super::widgets::{
-    ButtonKind, button, elided, empty_state, paint_galley_left, paint_row_bg, spinner,
+    ButtonKind, TWO_LINE_HEIGHT, button, elided, empty_state, paint_galley_left, two_line_row,
+    waiting,
 };
+use crate::keys;
 use crate::project::{Action, FileHistoryMode, FileHistoryView, Project};
+use crate::text::plural;
 use crate::theme::{self, color};
+use crate::ui::Actions;
 
-const ROW: f32 = 46.0;
 const LINE: f32 = 18.0;
 const GUTTER: f32 = 250.0;
 
-pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
+pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
     let Some(view) = &project.file_history else {
         return;
     };
     toolbar(ui, view, actions);
     let commits = match &view.commits {
         None => {
-            let rect = ui.available_rect_before_wrap();
-            spinner(ui, rect.center(), 9.0, color::text_weak());
+            waiting(ui);
             return;
         }
         Some(Err(e)) => {
@@ -52,20 +55,18 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
         .frame(Frame::new().fill(color::sidebar_bg()))
         .show(ui, |ui| commit_list(ui, view, commits, actions));
 
-    let busy = project.is_operating();
-    let wrap = project.settings.wrap_lines;
+    let can = can::act(project, "");
+    let wrap = project.settings().wrap_lines;
     match view.mode {
-        FileHistoryMode::Changes => match &project.commit_diff {
-            Some(diff) => diff_view::body(ui, diff, busy, false, wrap, None, actions),
+        FileHistoryMode::Changes => match &view.diff {
+            Some(diff) => diff_view::body(ui, diff, &can, false, wrap, None, actions),
             None => {
-                let rect = ui.available_rect_before_wrap();
-                spinner(ui, rect.center(), 9.0, color::text_weak());
+                waiting(ui);
             }
         },
         FileHistoryMode::Blame => match &view.blame {
             None => {
-                let rect = ui.available_rect_before_wrap();
-                spinner(ui, rect.center(), 9.0, color::text_weak());
+                waiting(ui);
             }
             Some(Err(e)) => empty_state(ui, "Could not annotate the file", e),
             Some(Ok(blame)) if blame.binary => {
@@ -76,7 +77,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
     }
 }
 
-fn toolbar(ui: &mut Ui, view: &FileHistoryView, actions: &mut Vec<Action>) {
+fn toolbar(ui: &mut Ui, view: &FileHistoryView, actions: &mut Actions) {
     Panel::top("file-history-bar")
         .frame(
             Frame::new()
@@ -97,12 +98,7 @@ fn toolbar(ui: &mut Ui, view: &FileHistoryView, actions: &mut Vec<Action>) {
                 if let Some(Ok(commits)) = &view.commits {
                     let n = commits.len();
                     ui.label(
-                        RichText::new(if n == 1 {
-                            "1 commit".to_owned()
-                        } else {
-                            format!("{n} commits")
-                        })
-                        .color(color::text_faint()),
+                        RichText::new(plural(n, "commit", "commits")).color(color::text_faint()),
                     );
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -123,18 +119,11 @@ fn commit_list(
     ui: &mut Ui,
     view: &FileHistoryView,
     commits: &[graft_core::file_log::FileCommit],
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
-    // Arrow keys move through the list unless something else has the keyboard.
-    if !ui.ctx().egui_wants_keyboard_input()
-        && let Some(selected) = view.selected
-    {
-        let (up, down) = ui.input_mut(|i| {
-            (
-                i.consume_key(Modifiers::NONE, Key::ArrowUp),
-                i.consume_key(Modifiers::NONE, Key::ArrowDown),
-            )
-        });
+    if let Some(selected) = view.selected {
+        let up = keys::plain_key(ui.ctx(), Key::ArrowUp);
+        let down = keys::plain_key(ui.ctx(), Key::ArrowDown);
         if up && selected > 0 {
             actions.push(Action::SelectFileCommit(selected - 1));
         } else if down && selected + 1 < commits.len() {
@@ -148,22 +137,10 @@ fn commit_list(
     let now = crate::time::now();
     ScrollArea::vertical()
         .auto_shrink([false, false])
-        .show_rows(ui, ROW, commits.len(), |ui, range| {
+        .show_rows(ui, TWO_LINE_HEIGHT, commits.len(), |ui, range| {
             for i in range {
                 let commit = &commits[i];
-                let (rect, response) =
-                    ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
                 let selected = view.selected == Some(i);
-                paint_row_bg(
-                    ui.painter(),
-                    rect.shrink2(vec2(6.0, 2.0)),
-                    &response,
-                    selected,
-                );
-                let x = rect.left() + 14.0;
-                let width = rect.width() - 28.0;
-                let summary = elided(ui, &commit.summary, theme::body(), color::text(), width);
-                paint_galley_left(ui.painter(), x, rect.top() + 15.0, summary, color::text());
                 let mut meta = format!(
                     "{} · {} · {}",
                     commit.author,
@@ -173,8 +150,7 @@ fn commit_list(
                 if commit.path != view.path {
                     meta.push_str(&format!(" · as {}", commit.path));
                 }
-                let meta = elided(ui, &meta, theme::small(), color::text_weak(), width);
-                paint_galley_left(ui.painter(), x, rect.top() + 33.0, meta, color::text_weak());
+                let response = two_line_row(ui, vec2(6.0, 2.0), selected, &commit.summary, &meta);
                 if response.clicked() {
                     actions.push(Action::SelectFileCommit(i));
                 }
@@ -190,21 +166,21 @@ fn blame_view(
     view: &FileHistoryView,
     commits: &[graft_core::file_log::FileCommit],
     blame: &Blame,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let now = crate::time::now();
-    let digits = blame.lines.len().max(1).to_string().len() as f32;
-    let number_width = digits * 8.0 + 12.0;
     let selected_id = view.selected.and_then(|i| commits.get(i)).map(|c| c.id);
     let char_width = ui
         .painter()
         .layout_no_wrap("0".to_owned(), theme::mono(), color::text())
         .size()
         .x;
+    let digits = blame.lines.len().max(1).to_string().len() as f32;
+    let number_width = digits * char_width + 12.0;
     let longest = blame
         .lines
         .iter()
-        .map(|l| l.text.chars().count() + l.text.matches('\t').count() * 3)
+        .map(|l| display_width(l.text.as_bytes()))
         .max()
         .unwrap_or(0);
     let content_width = GUTTER + number_width + 24.0 + longest as f32 * char_width;
@@ -243,13 +219,7 @@ fn blame_view(
                     );
                     let galley =
                         elided(ui, &text, theme::small(), color::text_weak(), GUTTER - 16.0);
-                    paint_galley_left(
-                        painter,
-                        gutter.left() + 8.0,
-                        rect.center().y,
-                        galley,
-                        color::text_weak(),
-                    );
+                    paint_galley_left(painter, gutter.left() + 8.0, rect.center().y, galley);
                 }
                 let gutter_response = ui.interact(
                     gutter,
@@ -282,7 +252,7 @@ fn blame_view(
                     color::text_faint(),
                 );
                 let text = ui.painter().layout_no_wrap(
-                    line.text.replace('\t', "    "),
+                    display_text(line.text.as_bytes()),
                     theme::mono(),
                     color::text(),
                 );

@@ -3,8 +3,8 @@
 //! minimize / maximize / close at the right, and the window edges resize.
 
 use egui::{
-    Color32, Context, CursorIcon, Rect, ResizeDirection, Sense, Stroke, TextureHandle,
-    TextureOptions, Ui, ViewportCommand, pos2, vec2,
+    Color32, Context, CursorIcon, Rect, ResizeDirection, Sense, Stroke, Ui, ViewportCommand, pos2,
+    vec2,
 };
 
 use crate::theme::color;
@@ -25,38 +25,6 @@ fn maximized(ctx: &Context) -> bool {
 
 fn fullscreen(ctx: &Context) -> bool {
     ctx.input(|i| i.viewport().fullscreen.unwrap_or(false))
-}
-
-/// The app icon, painted from a pre-rendered PNG (mipmapped, so it stays
-/// crisp at any display scale).
-pub fn paint_app_icon(ui: &Ui, rect: Rect) {
-    let id = egui::Id::unique("graft-app-icon");
-    let texture = ui
-        .data_mut(|d| d.get_temp::<TextureHandle>(id))
-        .unwrap_or_else(|| {
-            let image = image_from_png(include_bytes!("../../assets/icon/graft-title.png"));
-            let texture = ui.ctx().load_texture(
-                "graft-app-icon",
-                image,
-                TextureOptions::LINEAR.with_mipmap_mode(Some(egui::TextureFilter::Linear)),
-            );
-            ui.data_mut(|d| d.insert_temp(id, texture.clone()));
-            texture
-        });
-    ui.painter().image(
-        texture.id(),
-        rect,
-        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-        Color32::WHITE,
-    );
-}
-
-fn image_from_png(bytes: &[u8]) -> egui::ColorImage {
-    let icon = eframe::icon_data::from_png_bytes(bytes).expect("bundled icon is a valid PNG");
-    egui::ColorImage::from_rgba_unmultiplied(
-        [icon.width as usize, icon.height as usize],
-        &icon.rgba,
-    )
 }
 
 /// Empty title bar space: drag to move the window, double-click to maximize.

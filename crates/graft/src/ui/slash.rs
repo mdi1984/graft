@@ -1,13 +1,18 @@
 //! The Slash dialog: a preview of the branches and worktrees that can go,
 //! with checkboxes. Nothing is deleted until "Slash N" is clicked.
 
-use egui::{Align, Id, Key, Layout, RichText, ScrollArea, Ui};
-use graft_core::repo::Progress;
+use egui::{Align, Layout, RichText, ScrollArea, Ui};
+use graft_core::Progress;
 use graft_core::slash::{Candidate, Plan, Reason};
 
-use super::widgets::{ButtonKind, button, elided_path, progress_bar, spinner};
+use super::widgets::dialog::{self, footer_row};
+use super::widgets::{
+    ButtonKind, button, elided_path, error_label, hint, inline_spinner, note, progress_bar,
+    section_label, small_text, title, warning_label,
+};
 use crate::project::{Action, SlashView, SlashedBranch};
 use crate::theme::{self, color};
+use crate::ui::Actions;
 
 const WIDTH: f32 = 560.0;
 
@@ -16,56 +21,50 @@ pub fn show(
     view: &SlashView,
     slashed: &[SlashedBranch],
     progress: Option<Progress>,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
-    let response = super::widgets::modal(ctx, Id::unique("slash-modal")).show(ctx, |ui| {
-        ui.set_width(WIDTH);
-        ui.spacing_mut().item_spacing.y = 6.0;
-        ui.label(
-            RichText::new("Slash")
-                .font(theme::semibold(15.0))
-                .color(color::text()),
-        );
-        wrapped(
+    let shown = dialog::show(ctx, "slash-modal", WIDTH, view.running, |ui| {
+        title(ui, "Slash");
+        note(
             ui,
             "Clean up branches and worktrees you are done with. Nothing is deleted until you confirm.",
-            color::text_weak(),
         );
         ui.add_space(4.0);
 
         match &view.plan {
             None => {
                 ui.horizontal(|ui| {
-                    let (rect, _) =
-                        ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-                    spinner(ui, rect.center(), 5.0, color::text_weak());
+                    inline_spinner(ui);
                     let line = progress
                         .as_ref()
                         .map(|p| p.line.clone())
                         .unwrap_or_else(|| "Fetching and scanning…".to_owned());
                     ui.label(RichText::new(line).color(color::text_weak()));
                 });
-                ui.add_space(8.0);
-                footer(ui, |ui| {
-                    if button(ui, "Cancel", ButtonKind::Secondary, true).clicked() {
-                        actions.push(Action::CloseSlash);
-                    }
-                });
+                let (_, cancel) = footer_row(
+                    ui,
+                    |_| {},
+                    |ui| button(ui, "Cancel", ButtonKind::Secondary, true).clicked(),
+                );
+                if cancel {
+                    actions.push(Action::CloseSlash);
+                }
             }
             Some(Err(error)) => {
-                wrapped(ui, &format!("Scanning failed: {error}"), color::removed());
-                ui.add_space(8.0);
-                footer(ui, |ui| {
-                    if button(ui, "Close", ButtonKind::Secondary, true).clicked() {
-                        actions.push(Action::CloseSlash);
-                    }
-                });
+                error_label(ui, &format!("Scanning failed: {error}"));
+                let (_, close) = footer_row(
+                    ui,
+                    |_| {},
+                    |ui| button(ui, "Close", ButtonKind::Secondary, true).clicked(),
+                );
+                if close {
+                    actions.push(Action::CloseSlash);
+                }
             }
             Some(Ok(plan)) => plan_ui(ui, view, plan, slashed, progress.as_ref(), actions),
         }
     });
-    let running = view.running;
-    if !running && (response.should_close() || ctx.input(|i| i.key_pressed(Key::Escape))) {
+    if shown.cancel {
         actions.push(Action::CloseSlash);
     }
 }
@@ -76,14 +75,13 @@ fn plan_ui(
     plan: &Plan,
     slashed: &[SlashedBranch],
     progress: Option<&Progress>,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     if let Some(error) = &plan.fetch_error {
         let first = error.lines().next().unwrap_or_default();
-        wrapped(
+        warning_label(
             ui,
             &format!("Could not fetch, so this uses what was fetched before. {first}"),
-            color::dirty_fg(),
         );
     }
 
@@ -95,54 +93,23 @@ fn plan_ui(
                 ui.add_space(4.0);
                 ui.label(RichText::new("Nothing to clean up.").color(color::text()));
             }
-            let sections = [
-                (
-                    Reason::Gone,
-                    "Upstream gone",
-                    "Deleted on the remote, usually because the pull request was merged.",
-                ),
-                (
-                    Reason::Merged,
-                    "Merged",
-                    "Everything on these branches is already in the default branch.",
-                ),
-                (
-                    Reason::MissingWorktree,
-                    "Missing worktrees",
-                    "Worktrees whose folder was deleted. Only git's record of them goes.",
-                ),
-                (
-                    Reason::NeverPushed,
-                    "Never pushed",
-                    "Not merged and never pushed: their commits exist only on this computer. \
-                     They can still be restored from Recently slashed.",
-                ),
-            ];
-            for (reason, title, detail) in sections {
-                let rows: Vec<(usize, &Candidate)> = plan
-                    .candidates
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, c)| c.reason == reason)
-                    .collect();
-                if rows.is_empty() {
-                    continue;
-                }
+            // One section per reason, in the plan's order: every candidate
+            // shows, since "Slash" acts on every checked one.
+            let mut first = 0;
+            for rows in plan.candidates.chunk_by(|a, b| a.reason == b.reason) {
+                let reason = rows[0].reason;
+                let (title, detail) = section(reason);
                 ui.add_space(6.0);
-                ui.label(
-                    RichText::new(title.to_uppercase())
-                        .color(color::text_faint())
-                        .size(theme::SMALL_SIZE),
-                );
-                let detail_color = if reason == Reason::NeverPushed {
-                    color::dirty_fg()
+                section_label(ui, title);
+                if reason == Reason::NeverPushed {
+                    small_text(ui, detail, color::dirty_fg());
                 } else {
-                    color::text_faint()
-                };
-                small(ui, detail, detail_color);
-                for (i, candidate) in rows {
-                    candidate_row(ui, view, i, candidate, actions);
+                    hint(ui, detail);
                 }
+                for (i, candidate) in rows.iter().enumerate() {
+                    candidate_row(ui, view, first + i, candidate, actions);
+                }
+                first += rows.len();
             }
 
             if !plan.kept.is_empty() {
@@ -155,7 +122,7 @@ fn plan_ui(
                     for (name, why) in &plan.kept {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(name).font(theme::mono()).color(color::text()));
-                            small(ui, why, color::text_faint());
+                            hint(ui, why);
                         });
                     }
                 });
@@ -173,39 +140,64 @@ fn plan_ui(
 
     if let Some(outcome) = &view.outcome {
         for error in &outcome.errors {
-            wrapped(ui, error, color::removed());
+            error_label(ui, error);
         }
     }
 
-    ui.add_space(8.0);
     if view.running {
+        ui.add_space(8.0);
         // Deleting many worktrees takes a while: say where it is.
         let line = progress.map_or("Starting…", |p| p.line.as_str());
         ui.label(RichText::new(line).color(color::text_mid()));
         progress_bar(ui, progress.and_then(|p| p.fraction), WIDTH);
-        ui.add_space(8.0);
     }
     let count = view.checked.iter().filter(|on| **on).count();
-    footer(ui, |ui| {
-        let label = match count {
-            0 => "Slash".to_owned(),
-            n => format!("Slash {n}"),
-        };
-        if button(ui, &label, ButtonKind::Primary, count > 0 && !view.running).clicked() {
-            actions.push(Action::RunSlash);
-        }
-        if view.running {
-            // Stops after the current item; what is done stays restorable.
-            if button(ui, "Stop", ButtonKind::Secondary, true)
-                .on_hover_text("Stop after the current item")
-                .clicked()
-            {
-                actions.push(Action::CancelOperation);
+    let ((), action) = footer_row(
+        ui,
+        |_| {},
+        |ui| {
+            let label = match count {
+                0 => "Slash".to_owned(),
+                n => format!("Slash {n}"),
+            };
+            if button(ui, &label, ButtonKind::Primary, count > 0 && !view.running).clicked() {
+                return Some(Action::RunSlash);
             }
-        } else if button(ui, "Cancel", ButtonKind::Secondary, true).clicked() {
-            actions.push(Action::CloseSlash);
-        }
-    });
+            if view.running {
+                // Stops after the current item; what is done stays restorable.
+                let stop = button(ui, "Stop", ButtonKind::Secondary, true)
+                    .on_hover_text("Stop after the current item");
+                stop.clicked().then_some(Action::CancelOperation)
+            } else {
+                let cancel = button(ui, "Cancel", ButtonKind::Secondary, true);
+                cancel.clicked().then_some(Action::CloseSlash)
+            }
+        },
+    );
+    actions.extend(action);
+}
+
+/// A section's title and what it means.
+fn section(reason: Reason) -> (&'static str, &'static str) {
+    match reason {
+        Reason::Gone => (
+            "Upstream gone",
+            "Deleted on the remote, usually because the pull request was merged.",
+        ),
+        Reason::Merged => (
+            "Merged",
+            "Everything on these branches is already in the default branch.",
+        ),
+        Reason::MissingWorktree => (
+            "Missing worktrees",
+            "Worktrees whose folder was deleted. Only git's record of them goes.",
+        ),
+        Reason::NeverPushed => (
+            "Never pushed",
+            "Not merged and never pushed: their commits exist only on this computer. \
+             They can still be restored from Recently slashed.",
+        ),
+    }
 }
 
 fn candidate_row(
@@ -213,15 +205,12 @@ fn candidate_row(
     view: &SlashView,
     index: usize,
     candidate: &Candidate,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let mut on = view.checked.get(index).copied().unwrap_or(false);
     let name = match (&candidate.branch, &candidate.worktree) {
         (Some(branch), _) => branch.clone(),
-        (None, Some(path)) => path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string()),
+        (None, Some(path)) => graft_core::paths::folder_name(path),
         (None, None) => return,
     };
     ui.add_enabled_ui(!view.running, |ui| {
@@ -239,8 +228,8 @@ fn candidate_row(
         ui.horizontal(|ui| {
             ui.add_space(24.0);
             ui.spacing_mut().item_spacing.x = 0.0;
-            small(ui, prefix, color::text_weak());
-            let full = graft_core::wsl::display(path);
+            small_text(ui, prefix, color::text_weak());
+            let full = graft_core::paths::display(path);
             let galley = elided_path(
                 ui,
                 &full,
@@ -253,8 +242,8 @@ fn candidate_row(
     }
 }
 
-fn recent_ui(ui: &mut Ui, slashed: &[SlashedBranch], running: bool, actions: &mut Vec<Action>) {
-    let now = jiff::Timestamp::now().as_second();
+fn recent_ui(ui: &mut Ui, slashed: &[SlashedBranch], running: bool, actions: &mut Actions) {
+    let now = crate::time::now();
     for (i, entry) in slashed.iter().enumerate() {
         ui.horizontal(|ui| {
             ui.label(
@@ -262,11 +251,10 @@ fn recent_ui(ui: &mut Ui, slashed: &[SlashedBranch], running: bool, actions: &mu
                     .font(theme::mono())
                     .color(color::text()),
             );
-            let sha: String = entry.target.chars().take(8).collect();
-            small(
+            let sha = graft_core::short(&entry.target);
+            hint(
                 ui,
                 &format!("{sha} · {}", crate::time::relative(entry.at, now)),
-                color::text_faint(),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if button(ui, "Restore", ButtonKind::Secondary, !running).clicked() {
@@ -275,18 +263,4 @@ fn recent_ui(ui: &mut Ui, slashed: &[SlashedBranch], running: bool, actions: &mu
             });
         });
     }
-}
-
-fn footer(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
-    ui.horizontal(|ui| {
-        ui.with_layout(Layout::right_to_left(Align::Center), add);
-    });
-}
-
-fn wrapped(ui: &mut Ui, text: &str, color: egui::Color32) {
-    ui.add(egui::Label::new(RichText::new(text).color(color)).wrap());
-}
-
-fn small(ui: &mut Ui, text: &str, color: egui::Color32) {
-    ui.add(egui::Label::new(RichText::new(text).color(color).size(theme::SMALL_SIZE)).wrap());
 }

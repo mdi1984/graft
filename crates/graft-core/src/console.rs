@@ -6,13 +6,14 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use crate::cli::Output;
-
 const MAX_ENTRIES: usize = 500;
 const MAX_OUTPUT_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct Entry {
+    /// Position in the log since Graft started (0, 1, 2, …); stays the
+    /// same when older entries drop out.
+    pub seq: u64,
     pub at: SystemTime,
     pub cwd: String,
     pub command: String,
@@ -30,21 +31,23 @@ impl Entry {
         args: &[OsString],
         status: i32,
         duration: Duration,
-        out: &Output,
+        stdout: &[u8],
+        stderr: &[u8],
     ) -> Self {
         let command = std::iter::once("git".to_owned())
             .chain(args.iter().map(|a| quote(&a.to_string_lossy())))
             .collect::<Vec<_>>()
             .join(" ");
         Self {
+            seq: 0,
             at: SystemTime::now(),
-            cwd: cwd.display().to_string(),
+            cwd: crate::paths::display(cwd),
             command,
             status,
             expected: status == 0,
             duration,
-            stdout: clip(&out.stdout),
-            stderr: clip(&out.stderr),
+            stdout: clip(stdout),
+            stderr: clip(stderr),
         }
     }
 
@@ -79,8 +82,8 @@ pub struct Console {
 #[derive(Default)]
 struct Inner {
     entries: VecDeque<Entry>,
-    /// Increments on every push so the UI can tell when to refresh.
-    generation: u64,
+    /// The `seq` of the next entry.
+    next: u64,
 }
 
 /// `text` with the credentials of any URL in it masked:
@@ -115,12 +118,15 @@ impl Console {
         if inner.entries.len() == MAX_ENTRIES {
             inner.entries.pop_front();
         }
+        entry.seq = inner.next;
+        inner.next += 1;
         inner.entries.push_back(entry);
-        inner.generation += 1;
     }
 
-    pub fn generation(&self) -> u64 {
-        self.inner.lock().expect("console lock").generation
+    /// The `seq` the next entry gets: changes with every new entry, so the
+    /// UI can tell when to read the log again.
+    pub fn next_seq(&self) -> u64 {
+        self.inner.lock().expect("console lock").next
     }
 
     /// Newest last.
@@ -133,17 +139,47 @@ impl Console {
             .cloned()
             .collect()
     }
-
-    pub fn clear(&self) {
-        let mut inner = self.inner.lock().expect("console lock");
-        inner.entries.clear();
-        inner.generation += 1;
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::redact;
+    use super::*;
+
+    #[test]
+    fn entries_keep_their_number_when_old_ones_drop_out() {
+        let console = Console::default();
+        let push = |status: i32, stderr: &[u8]| {
+            console.push(Entry::finished(
+                Path::new("."),
+                &[],
+                status,
+                Duration::ZERO,
+                &[],
+                stderr,
+            ));
+        };
+        for _ in 0..MAX_ENTRIES + 3 {
+            push(0, b"");
+        }
+        let entries = console.snapshot();
+        assert_eq!(entries.len(), MAX_ENTRIES);
+        assert_eq!(entries[0].seq, 3);
+        assert_eq!(entries.last().unwrap().seq, MAX_ENTRIES as u64 + 2);
+        assert_eq!(console.next_seq(), MAX_ENTRIES as u64 + 3);
+
+        // A failure after the log is full is still found by the UI's
+        // "failed since I last looked" check.
+        let seen = console.next_seq();
+        push(128, b"fatal: boom");
+        let new_failures: Vec<Entry> = console
+            .snapshot()
+            .into_iter()
+            .filter(|e| e.seq >= seen && e.failed())
+            .collect();
+        assert_eq!(new_failures.len(), 1);
+        assert_eq!(new_failures[0].stderr, "fatal: boom");
+        assert_eq!(console.snapshot().len(), MAX_ENTRIES);
+    }
 
     #[test]
     fn credentials_in_urls_are_masked() {

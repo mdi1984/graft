@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
 
 use crate::installed;
+use crate::version::{Version, newer};
 
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 pub const REPO_URL: &str = "https://github.com/mdi1984/graft";
@@ -38,6 +39,8 @@ pub enum Status {
     UpToDate,
     Available(Release),
     Installing(Release),
+    /// Downloaded, but something ran when it was done: restart once it ends.
+    Ready(Release, Installed),
     Failed(String),
 }
 
@@ -109,7 +112,7 @@ fn parse_release(text: &str) -> Result<Release> {
     let Some(version) = release
         .tag_name
         .strip_prefix('v')
-        .filter(|v| parse(v).is_some())
+        .filter(|v| Version::parse(v).is_some())
     else {
         bail!(
             "The latest release has an unexpected tag: {}",
@@ -146,12 +149,16 @@ fn allowed(url: &str) -> bool {
 }
 
 /// What [`install`] left ready for [`restart`].
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Installed {
     /// The new program is in place; start it.
     Program(PathBuf),
-    /// Run this setup program for the Graft at `exe`.
-    Setup { setup: PathBuf, exe: PathBuf },
+    /// Run this setup program for the Graft at `exe`; it installs `version`.
+    Setup {
+        setup: PathBuf,
+        exe: PathBuf,
+        version: String,
+    },
 }
 
 /// Download `release` and check it. A Graft installed by the setup program
@@ -163,10 +170,11 @@ pub fn install(release: &Release) -> Result<Installed> {
     {
         let dir = update_dir();
         let setup = fetch_setup(release, url, &dir)?;
-        // Read on the next start, to tell whether the setup finished.
-        std::fs::write(dir.join(PENDING), &release.version)
-            .with_context(|| format!("Could not write to {}", dir.display()))?;
-        return Ok(Installed::Setup { setup, exe });
+        return Ok(Installed::Setup {
+            setup,
+            exe,
+            version: release.version.clone(),
+        });
     }
     install_to(release, &exe)?;
     Ok(Installed::Program(exe))
@@ -215,15 +223,23 @@ pub fn restart(installed: &Installed) -> Result<()> {
     let (mut command, program) = match installed {
         Installed::Program(exe) => {
             let mut command = Command::new(exe);
-            command
-                .arg(AFTER_UPDATE)
-                .arg(std::process::id().to_string());
+            command.args(after_update_args(std::process::id()));
             (command, exe)
         }
-        Installed::Setup { setup, exe } => (
-            setup_command(setup, exe, std::process::id(), &setup.with_file_name(LOG)),
+        Installed::Setup {
             setup,
-        ),
+            exe,
+            version,
+        } => {
+            // Read on the next start, to tell whether the setup finished.
+            let pending = setup.with_file_name(PENDING);
+            std::fs::write(&pending, version)
+                .with_context(|| format!("Could not write {}", pending.display()))?;
+            (
+                setup_command(setup, exe, std::process::id(), &setup.with_file_name(LOG)),
+                setup,
+            )
+        }
     };
     if let Err(e) = command.spawn() {
         if let Installed::Setup { setup, .. } = installed {
@@ -270,7 +286,28 @@ const PENDING: &str = "pending";
 const LOG: &str = "setup.log";
 
 /// The argument a restarted Graft gets, followed by the old one's process id.
-pub const AFTER_UPDATE: &str = "--after-update";
+const AFTER_UPDATE: &str = "--after-update";
+
+/// The arguments for the Graft an update by file swap starts.
+fn after_update_args(old_pid: u32) -> [String; 2] {
+    [AFTER_UPDATE.to_owned(), old_pid.to_string()]
+}
+
+/// Graft was started by an update.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AfterUpdate {
+    /// The old Graft, still closing.
+    pub old_pid: Option<u32>,
+}
+
+/// Whether the command line `args` (without the program) are those of a
+/// Graft an update started.
+pub fn after_update(args: &[PathBuf]) -> Option<AfterUpdate> {
+    let (first, rest) = args.split_first()?;
+    (first.as_os_str() == AFTER_UPDATE).then(|| AfterUpdate {
+        old_pid: rest.first().and_then(|p| p.to_str()?.parse().ok()),
+    })
+}
 
 /// Remove what the last update left behind, and correct the version in
 /// "Installed apps" if an update by file swap left the old one there. Only
@@ -365,32 +402,20 @@ fn expected_hash(sums: &str, name: &str) -> Option<String> {
     })
 }
 
-/// `major.minor.patch`; anything else (pre-releases included) is not a version.
-fn parse(version: &str) -> Option<(u64, u64, u64)> {
-    let mut parts = version.split('.').map(|p| p.parse::<u64>().ok());
-    let v = (parts.next()??, parts.next()??, parts.next()??);
-    parts.next().is_none().then_some(v)
-}
-
-fn newer(candidate: &str, current: &str) -> bool {
-    match (parse(candidate), parse(current)) {
-        (Some(c), Some(cur)) => c > cur,
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn versions_compare_by_number() {
-        assert!(newer("1.0.1", "1.0.0"));
-        assert!(newer("1.10.0", "1.9.3"));
-        assert!(!newer("1.0.0", "1.0.0"));
-        assert!(!newer("0.9.9", "1.0.0"));
-        assert!(!newer("2.0.0-beta", "1.0.0"));
-        assert!(!newer("2.0", "1.0.0"));
+    fn a_restarted_graft_reads_its_arguments_back() {
+        let args: Vec<PathBuf> = after_update_args(42).iter().map(Into::into).collect();
+        assert_eq!(after_update(&args), Some(AfterUpdate { old_pid: Some(42) }));
+        assert_eq!(
+            after_update(&args[..1]),
+            Some(AfterUpdate { old_pid: None })
+        );
+        assert_eq!(after_update(&[PathBuf::from(r"C:\repo")]), None);
+        assert_eq!(after_update(&[]), None);
     }
 
     #[test]
@@ -468,11 +493,7 @@ mod tests {
                 match files.iter().find(|(name, _)| *name == path) {
                     Some((_, body)) => {
                         let head = format!(
-                            "HTTP/1.1 200 OK
-Content-Length: {}
-Connection: close
-
-",
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                             body.len()
                         );
                         stream.write_all(head.as_bytes()).unwrap();
@@ -480,11 +501,7 @@ Connection: close
                     }
                     None => stream
                         .write_all(
-                            b"HTTP/1.1 404 Not Found
-Content-Length: 0
-Connection: close
-
-",
+                            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                         )
                         .unwrap(),
                 }
@@ -508,12 +525,7 @@ Connection: close
     #[test]
     fn an_update_is_downloaded_checked_and_swapped_in() {
         let new = b"the new graft".to_vec();
-        let sums = format!(
-            "{}  graft-x64.exe
-",
-            sha256(&new)
-        )
-        .into_bytes();
+        let sums = format!("{}  graft-x64.exe\n", sha256(&new)).into_bytes();
         // The release document names the server's own address, so it is
         // served from a second server that knows the first one's address.
         let files = serve(vec![
@@ -535,12 +547,7 @@ Connection: close
 
     #[test]
     fn a_damaged_download_changes_nothing() {
-        let sums = format!(
-            "{}  graft-x64.exe
-",
-            sha256(b"what was published")
-        )
-        .into_bytes();
+        let sums = format!("{}  graft-x64.exe\n", sha256(b"what was published")).into_bytes();
         let files = serve(vec![
             ("graft-x64.exe", b"something else".to_vec()),
             ("SHA256SUMS.txt", sums),
@@ -600,24 +607,21 @@ Connection: close
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
+    /// Inno Setup splits its command line at spaces: a path with spaces
+    /// must be quoted inside the argument.
     #[test]
-    fn the_setup_is_told_what_to_wait_for_and_start() {
+    fn setup_paths_with_spaces_are_quoted() {
         let args = setup_args(
             Path::new(r"C:\Users\A B\Programs\Graft\graft.exe"),
             42,
-            Path::new(r"C:\Temp\Graft-update\setup.log"),
+            Path::new(r"C:\Temp\Graft update\setup.log"),
         );
-        assert_eq!(
-            args,
-            [
-                "/SILENT",
-                "/SUPPRESSMSGBOXES",
-                "/NORESTART",
-                "/WAITPID=42",
-                r#"/LAUNCH="C:\Users\A B\Programs\Graft\graft.exe""#,
-                r#"/LOG="C:\Temp\Graft-update\setup.log""#,
-            ]
+        let has = |arg: &str| args.iter().any(|a| a == arg);
+        assert!(
+            has(r#"/LAUNCH="C:\Users\A B\Programs\Graft\graft.exe""#),
+            "{args:?}"
         );
+        assert!(has(r#"/LOG="C:\Temp\Graft update\setup.log""#), "{args:?}");
     }
 
     /// One real update through the setup program: Graft must be installed

@@ -9,7 +9,6 @@
 
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -20,7 +19,9 @@ use anyhow::Result;
 use notify_debouncer_full::notify::{self, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, Debouncer, NoCache, new_debouncer_opt};
 
-use crate::cli;
+use crate::cli::Git;
+use crate::console::Console;
+use crate::model::OPERATION_MARKERS;
 use crate::wsl::Wsl;
 
 const DEBOUNCE: Duration = Duration::from_millis(300);
@@ -33,7 +34,6 @@ pub struct Watcher {
     _debouncer: Option<Debouncer<RecommendedWatcher, NoCache>>,
     /// Dropping it stops the WSL checks.
     _poll: Option<mpsc::Sender<()>>,
-    roots: Vec<PathBuf>,
 }
 
 impl Watcher {
@@ -42,7 +42,7 @@ impl Watcher {
     pub fn new(roots: Vec<PathBuf>, on_change: impl Fn() + Send + Sync + 'static) -> Result<Self> {
         let on_change = Arc::new(on_change);
         let (polled, watched): (Vec<PathBuf>, Vec<PathBuf>) =
-            roots.iter().cloned().partition(|r| Wsl::of(r).is_some());
+            roots.into_iter().partition(|r| Wsl::of(r).is_some());
         let poll = (!polled.is_empty()).then(|| {
             let on_change = on_change.clone();
             let (stop, stopped) = mpsc::channel();
@@ -57,12 +57,7 @@ impl Watcher {
         Ok(Self {
             _debouncer: debouncer,
             _poll: poll,
-            roots,
         })
-    }
-
-    pub fn roots(&self) -> &[PathBuf] {
-        &self.roots
     }
 }
 
@@ -121,11 +116,10 @@ fn poll(roots: &[PathBuf], stop: &mpsc::Receiver<()>, on_change: &dyn Fn()) {
         ; git for-each-ref --format='%(objectname) %(refname)' \
         && ls -a "$(git rev-parse --git-dir)" | grep -v '\.lock$'"#;
     let fingerprint = |root: &Path| {
-        let mut cmd = cli::program(root, "sh");
+        let mut cmd = unlogged(root).command("sh").ok()?;
         cmd.args(["-c", SCRIPT])
             .stdin(Stdio::null())
             .stderr(Stdio::null());
-        cli::share_env(&mut cmd);
         let out = cmd.output().ok()?;
         let mut hasher = DefaultHasher::new();
         out.stdout.hash(&mut hasher);
@@ -251,45 +245,53 @@ fn git_file_matters(inside: &Path) -> bool {
     if text.ends_with(".lock") {
         return false;
     }
-    // A linked worktree's own HEAD and index live in .git/worktrees/<name>/.
+    // Upstreams and remotes (`branch -u`, `remote add`, `remote set-url`).
+    if text == "config" {
+        return true;
+    }
+    // A linked worktree's own HEAD and index live in .git/worktrees/<name>/,
+    // next to `locked`, which `worktree lock` and `unlock` add and remove.
     let text = match text.strip_prefix("worktrees/") {
-        Some(rest) => rest.split_once('/').map_or("", |(_, r)| r).to_owned(),
+        Some(rest) => {
+            let rest = rest.split_once('/').map_or("", |(_, r)| r);
+            if rest == "locked" {
+                return true;
+            }
+            rest.to_owned()
+        }
         None => text,
     };
-    matches!(
-        text.as_str(),
-        "HEAD" | "index" | "packed-refs" | "MERGE_HEAD" | "CHERRY_PICK_HEAD" | "REVERT_HEAD"
-    ) || text.starts_with("refs/")
-        || text.starts_with("rebase-merge")
-        || text.starts_with("rebase-apply")
+    let in_progress = OPERATION_MARKERS.iter().any(|(marker, _)| {
+        text.strip_prefix(marker)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    });
+    in_progress
+        || matches!(text.as_str(), "HEAD" | "index" | "packed-refs")
+        || text.starts_with("refs/")
+}
+
+/// Git for the watcher's own checks, which run all the time and would bury
+/// the user's commands in the console.
+fn unlogged(root: &Path) -> Git {
+    Git::new(root, Console::default())
 }
 
 /// Which of `paths` (relative to `root`) git ignores, or `None` if git could
 /// not tell.
 fn check_ignore(root: &Path, paths: &[PathBuf]) -> Option<HashSet<PathBuf>> {
-    let mut cmd = cli::command(root);
-    cmd.args(["check-ignore", "-z", "--stdin"])
-        // check-ignore refuses literal pathspecs; it reads plain paths anyway.
-        .env_remove("GIT_LITERAL_PATHSPECS")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    cli::share_env(&mut cmd);
-    let mut child = cmd.spawn().ok()?;
     let mut input = Vec::new();
     for p in paths {
         input.extend_from_slice(p.to_string_lossy().replace('\\', "/").as_bytes());
         input.push(0);
     }
-    let mut stdin = child.stdin.take()?;
-    std::thread::spawn(move || {
-        let _ = stdin.write_all(&input);
-    });
-    let out = child.wait_with_output().ok()?;
-    // 0: some ignored, 1: none ignored, anything else: an error.
-    if !matches!(out.status.code(), Some(0 | 1)) {
-        return None;
-    }
+    // check-ignore refuses literal pathspecs; it reads plain paths anyway.
+    // Exit code 0: some ignored, 1: none ignored.
+    let out = unlogged(root)
+        .without_literal_pathspecs()
+        .run_accepting(["check-ignore", "-z", "--stdin"], Some(&input), |o| {
+            matches!(o.status, 0 | 1)
+        })
+        .ok()?;
     Some(
         out.stdout
             .split(|b| *b == 0)
@@ -310,6 +312,8 @@ mod tests {
         assert!(m("worktrees/agent/HEAD") && m("worktrees/agent/index"));
         assert!(!m("objects/ab/cdef") && !m("index.lock") && !m("logs/HEAD"));
         assert!(!m("FETCH_HEAD") && !m("worktrees/agent/logs/HEAD"));
+        assert!(m("config") && m("worktrees/agent/locked"));
+        assert!(!m("config.lock") && !m("locked") && !m("worktrees/agent/gitdir"));
         assert_eq!(
             inside_git_dir(Path::new(".git/refs/heads/x")),
             Some(PathBuf::from("refs/heads/x"))
@@ -386,8 +390,13 @@ mod tests {
             let _ = tx.send(());
         })
         .unwrap();
-        std::thread::sleep(Duration::from_millis(200));
-        std::fs::write(nested.join("new.txt"), "x").unwrap();
-        assert!(rx.recv_timeout(Duration::from_secs(10)).is_ok());
+        // Write until a change is seen, in case the watch takes a moment
+        // to start.
+        let file = nested.join("new.txt");
+        let seen = (0..20).any(|i| {
+            std::fs::write(&file, i.to_string()).unwrap();
+            rx.recv_timeout(Duration::from_millis(500)).is_ok()
+        });
+        assert!(seen);
     }
 }

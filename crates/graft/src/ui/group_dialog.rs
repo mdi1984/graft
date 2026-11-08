@@ -2,12 +2,9 @@
 
 use std::path::PathBuf;
 
-use egui::{Align, Id, Key, Layout, RichText};
-
-use super::project_tabs::color_swatches;
-use super::widgets::{ButtonKind, button, text_field};
+use super::widgets::dialog::{self, footer};
+use super::widgets::{ButtonKind, color_swatches, field_label, note, text_field, title};
 use crate::groups::GroupId;
-use crate::theme::{self, color};
 
 const WIDTH: f32 = 400.0;
 
@@ -33,6 +30,10 @@ impl GroupForm {
             focus: true,
         }
     }
+
+    fn ready(&self) -> bool {
+        !self.name.trim().is_empty()
+    }
 }
 
 pub enum Outcome {
@@ -42,64 +43,33 @@ pub enum Outcome {
 }
 
 pub fn show(ctx: &egui::Context, form: &mut GroupForm) -> Outcome {
-    let mut outcome = Outcome::Open;
     let new = matches!(form.target, GroupTarget::New(_));
-    let response = super::widgets::modal(ctx, Id::unique("group-dialog")).show(ctx, |ui| {
-        ui.set_width(WIDTH);
-        ui.spacing_mut().item_spacing.y = 6.0;
-        let title = if new { "New group" } else { "Rename group" };
-        ui.label(
-            RichText::new(title)
-                .font(theme::semibold(15.0))
-                .color(color::text()),
-        );
+    let shown = dialog::show(ctx, "group-dialog", WIDTH, false, |ui| {
+        title(ui, if new { "New group" } else { "Rename group" });
         if new {
-            ui.add(
-                egui::Label::new(
-                    RichText::new(
-                        "Keeps repositories together, e.g. one customer's. Closing their tabs \
-                         keeps the group, and the start page opens them all again.",
-                    )
-                    .color(color::text_weak()),
-                )
-                .wrap(),
+            note(
+                ui,
+                "Keeps repositories together, e.g. one customer's. Closing their tabs keeps the group, and the start page opens them all again.",
             );
         }
-        ui.add_space(2.0);
-        ui.label(
-            RichText::new("Name")
-                .color(color::text_mid())
-                .size(theme::SMALL_SIZE),
-        );
+        field_label(ui, "Name");
         let field = text_field(ui, &mut form.name, "e.g. the customer's name", WIDTH);
         if std::mem::take(&mut form.focus) {
             field.request_focus();
         }
-        ui.label(
-            RichText::new("Color")
-                .color(color::text_mid())
-                .size(theme::SMALL_SIZE),
-        );
+        field_label(ui, "Color");
         if let Some(c) = color_swatches(ui, form.color) {
             form.color = c;
         }
-        let ready = !form.name.trim().is_empty();
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let label = if new { "Create group" } else { "Rename" };
-                let enter = ui.input(|i| i.key_pressed(Key::Enter));
-                if (button(ui, label, ButtonKind::Primary, ready).clicked() || enter) && ready {
-                    outcome = Outcome::Save;
-                }
-                if button(ui, "Cancel", ButtonKind::Secondary, true).clicked() {
-                    outcome = Outcome::Cancel;
-                }
-            });
-        });
+        let label = if new { "Create group" } else { "Rename" };
+        footer(ui, label, ButtonKind::Primary, form.ready(), false, None)
     });
-    if response.should_close() || ctx.input(|i| i.key_pressed(Key::Escape)) {
-        outcome = Outcome::Cancel;
+    let answer = shown.answer();
+    if answer.cancel {
+        Outcome::Cancel
+    } else if answer.submit {
+        Outcome::Save
+    } else {
+        Outcome::Open
     }
-    outcome
 }

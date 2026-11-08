@@ -4,9 +4,11 @@
 
 use std::ops::Range;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 
-use crate::cli::{Git, Output, failure_message};
+use crate::changes::EMPTY_TREE;
+use crate::cli::{Git, Output};
+use crate::model::Change;
 use crate::model::Oid;
 
 /// Which pair of trees a diff compares.
@@ -24,6 +26,17 @@ pub enum Source {
     Base(Oid),
 }
 
+impl Source {
+    /// What happened to a file, as far as the source alone tells (before
+    /// its diff is loaded).
+    pub fn change(&self) -> Change {
+        match self {
+            Source::Untracked => Change::Added,
+            _ => Change::Modified,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FileDiff {
     pub path: String,
@@ -33,6 +46,8 @@ pub struct FileDiff {
     pub binary: bool,
     pub new_file: bool,
     pub deleted_file: bool,
+    /// The old path of a renamed file.
+    pub renamed_from: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,11 +80,28 @@ pub struct Line {
     pub no_newline: bool,
 }
 
+/// How a tab shows on screen.
+pub const TAB: &str = "    ";
+
+/// How many characters wide `line` shows at most (see [`display_text`]): a
+/// tab is as wide as [`TAB`], and a character of several bytes counts each
+/// byte, so this is never short of the real width.
+pub fn display_width(line: &[u8]) -> usize {
+    let tabs = line.iter().filter(|&&b| b == b'\t').count();
+    line.len() + tabs * (TAB.len() - 1)
+}
+
+/// A line of a file for display: lossy UTF-8, no trailing `\r`, tabs as
+/// spaces.
+pub fn display_text(line: &[u8]) -> String {
+    let bytes = line.strip_suffix(b"\r").unwrap_or(line);
+    String::from_utf8_lossy(bytes).replace('\t', TAB)
+}
+
 impl Line {
-    /// Content for display: lossy UTF-8, no trailing `\r`, tabs as spaces.
+    /// Content for display, see [`display_text`].
     pub fn text(&self) -> String {
-        let bytes = self.content.strip_suffix(b"\r").unwrap_or(&self.content);
-        String::from_utf8_lossy(bytes).replace('\t', "    ")
+        display_text(&self.content)
     }
 
     pub fn is_change(&self) -> bool {
@@ -98,68 +130,112 @@ impl FileDiff {
     pub fn changed_lines(&self) -> usize {
         self.added() + self.removed()
     }
+
+    /// What happened to the file, as far as this diff of `source` tells.
+    pub fn change(&self, source: &Source) -> Change {
+        if self.new_file {
+            Change::Added
+        } else if self.deleted_file {
+            Change::Deleted
+        } else {
+            source.change()
+        }
+    }
+
+    /// What shows instead of the diff of a file that was only moved:
+    /// renamed with its content unchanged (text or binary), so there are no
+    /// lines to show, only where it came from and whether its mode changed.
+    pub fn moved_unchanged(&self) -> Option<String> {
+        let unchanged = self.hunks.is_empty() && !self.binary;
+        let old = self.renamed_from.as_deref().filter(|_| unchanged)?;
+        let mode_changed = self
+            .header
+            .split(|&b| b == b'\n')
+            .any(|line| line.starts_with(b"old mode "));
+        Some(if mode_changed {
+            format!("Moved from {old}, content unchanged, file mode changed.")
+        } else {
+            format!("Moved from {old}, content unchanged.")
+        })
+    }
+
+    /// A combined diff (`diff --cc`), the kind shown for a file with
+    /// conflicts.
+    pub fn is_combined(&self) -> bool {
+        self.header.starts_with(b"diff --cc")
+    }
 }
 
-/// Load the diff of one file.
-pub fn load(git: &Git, source: &Source, path: &str) -> Result<FileDiff> {
-    let mut args: Vec<String> = [
-        "-c",
-        "core.quotepath=false",
-        "diff",
-        "--no-color",
-        "--no-ext-diff",
-        "--histogram",
-        "--src-prefix=a/",
-        "--dst-prefix=b/",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
+/// The path a renamed file had on the old side (its `orig_path` in a file
+/// list), as far as `source` shows renames: commits and reviews do. File
+/// status shows a rename's new path alone, as staging builds patches with
+/// one path.
+fn renamed_from<'a>(source: &Source, old_path: Option<&'a str>) -> Option<&'a str> {
+    old_path.filter(|_| matches!(source, Source::Commit(_) | Source::Base(_)))
+}
+
+/// Load the diff of one file; a renamed file's (`old_path`, see
+/// [`renamed_from`]) shows as a rename, with only the lines that changed.
+pub fn load(git: &Git, source: &Source, path: &str, old_path: Option<&str>) -> Result<FileDiff> {
+    let old_path = renamed_from(source, old_path);
+    let mut args: Vec<String> = ["diff", "--no-color", "--no-ext-diff", "--histogram"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    // Stage and discard build patches from these diffs, which must apply to
+    // the bytes git stores, not to a textconv driver's text.
     match source {
-        Source::Unstaged => {}
-        Source::Staged => args.push("--cached".into()),
-        Source::Untracked => args.push("--no-index".into()),
+        Source::Unstaged => args.push("--no-textconv".into()),
+        Source::Staged => args.extend(["--cached".into(), "--no-textconv".into()]),
+        Source::Untracked => args.extend(["--no-index".into(), "--no-textconv".into()]),
         Source::Commit(id) => {
-            // Against the first parent; a root commit against the empty tree.
-            args.push(parent(git, id)?.unwrap_or_else(|| EMPTY_TREE.to_owned()));
+            args.push(parent(git, id)?.map_or_else(|| EMPTY_TREE.to_owned(), |p| p.to_string()));
             args.push(id.to_string());
         }
         Source::Base(id) => args.push(id.to_string()),
+    }
+    if old_path.is_some() {
+        args.push("-M".into());
     }
     args.push("--".into());
     if *source == Source::Untracked {
         args.push("/dev/null".into());
     }
+    args.extend(old_path.map(str::to_owned));
     args.push(path.to_owned());
 
     // `--no-index` exits with 1 when the files differ, which is the point.
-    let expected = |o: &Output| o.success() || (*source == Source::Untracked && o.status == 1);
-    let out = git.run_expecting(&args, None, expected)?;
-    let ok = expected(&out);
-    if !ok {
-        bail!(failure_message(&out));
-    }
+    let out = git.run_accepting(&args, None, |o: &Output| {
+        o.success() || (*source == Source::Untracked && o.status == 1)
+    })?;
     let mut diff = parse(&out.stdout);
+    // `--no-index` names the file by its path as given, and git quotes
+    // unusual paths: keep the ones asked for.
     diff.path = path.to_owned();
+    if diff.renamed_from.is_some() {
+        diff.renamed_from = old_path.map(str::to_owned);
+    }
     if *source == Source::Untracked {
-        // `--no-index` names the file by its path as given; keep it tidy.
         diff.new_file = true;
     }
     Ok(diff)
 }
 
-const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-
 /// A commit's first parent, or `None` for a root commit.
-fn parent(git: &Git, id: &Oid) -> Result<Option<String>> {
-    let out = git.run_raw(["rev-parse", "-q", "--verify", &format!("{id}^1")])?;
-    Ok(out.success().then(|| out.stdout_str().trim().to_owned()))
+fn parent(git: &Git, id: &Oid) -> Result<Option<Oid>> {
+    git.rev(&format!("{id}^1"))
 }
 
 /// The old version of the file as git stores it (line endings as in the
 /// diff), to fill in the unchanged lines between hunks. `None` when there
 /// is no old version.
-pub fn old_version(git: &Git, source: &Source, path: &str) -> Result<Option<Vec<u8>>> {
+fn old_version(
+    git: &Git,
+    source: &Source,
+    path: &str,
+    old_path: Option<&str>,
+) -> Result<Option<Vec<u8>>> {
+    let path = renamed_from(source, old_path).unwrap_or(path);
     let rev = match source {
         Source::Unstaged => format!(":0:{path}"),
         Source::Staged => format!("HEAD:{path}"),
@@ -211,25 +287,26 @@ impl Gap {
     }
 }
 
-/// Load the diff of one file with more unchanged lines shown as context,
-/// and the gaps that stay hidden. `reveal` and `keep` pick lines by their
-/// (old, new) numbers, see [`expand`]. Gaps are `None` when unchanged lines
-/// cannot be shown: new, deleted or binary files, no old version to take
-/// them from, or one that does not match the diff (a textconv driver, or
-/// the index changed in between).
+/// Load the diff of one file (see [`load`]) with more unchanged lines
+/// shown as context, and the gaps that stay hidden. `reveal` and `keep`
+/// pick lines by their (old, new) numbers, see [`expand`]. Gaps are `None`
+/// when unchanged lines cannot be shown: new, deleted or binary files, no
+/// old version to take them from, or one that does not match the diff (a
+/// textconv driver, or the index changed in between).
 pub fn load_expanded(
     git: &Git,
     source: &Source,
     path: &str,
+    old_path: Option<&str>,
     reveal: impl Fn(u32, u32) -> bool,
     keep: impl Fn(u32, u32) -> bool,
 ) -> Result<(FileDiff, Option<Vec<Gap>>)> {
-    let mut diff = load(git, source, path)?;
+    let mut diff = load(git, source, path, old_path)?;
     if diff.binary || diff.new_file || diff.deleted_file || diff.hunks.is_empty() {
         return Ok((diff, None));
     }
     // Without the old version the diff still shows, just not expandable.
-    let Ok(Some(old)) = old_version(git, source, path) else {
+    let Ok(Some(old)) = old_version(git, source, path, old_path) else {
         return Ok((diff, None));
     };
     if !matches_old(&diff, &old) {
@@ -391,7 +468,6 @@ pub fn relocate(from: &FileDiff, to: &FileDiff, at: (usize, usize)) -> Option<(u
 pub fn parse(bytes: &[u8]) -> FileDiff {
     let mut diff = FileDiff::default();
     let mut lines = split_lines(bytes).peekable();
-    // Header.
     while let Some(line) = lines.peek() {
         if line.starts_with(b"@@") {
             break;
@@ -406,6 +482,9 @@ pub fn parse(bytes: &[u8]) -> FileDiff {
         if line.starts_with(b"deleted file mode") || line == b"+++ /dev/null" {
             diff.deleted_file = true;
         }
+        if let Some(path) = line.strip_prefix(b"rename from ") {
+            diff.renamed_from = Some(String::from_utf8_lossy(path).into_owned());
+        }
         if let Some(path) = line.strip_prefix(b"+++ b/") {
             diff.path = String::from_utf8_lossy(path).into_owned();
         } else if let Some(path) = line.strip_prefix(b"--- a/")
@@ -416,7 +495,6 @@ pub fn parse(bytes: &[u8]) -> FileDiff {
         diff.header.extend_from_slice(line);
         diff.header.push(b'\n');
     }
-    // Hunks.
     let (mut old_no, mut new_no) = (0, 0);
     for line in lines {
         if line.starts_with(b"@@") {
@@ -497,7 +575,7 @@ fn parse_hunk_header(line: &[u8]) -> Option<Hunk> {
 
 /// How a patch will be applied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Direction {
+pub(crate) enum Direction {
     /// `git apply` (staging): unselected `+` lines are dropped, unselected
     /// `-` lines become context.
     Forward,
@@ -506,26 +584,60 @@ pub enum Direction {
     Reverse,
 }
 
-/// A patch containing only the selected lines, or `None` if nothing is
-/// selected. `selected(hunk, line)` says whether a changed line is included.
-pub fn build_patch(
+/// How much of a diff's changed lines a selection takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Chosen {
+    Nothing,
+    Part,
+    All,
+}
+
+/// How much `selected(hunk, line)` takes of the changed lines of `diff`.
+pub(crate) fn chosen(diff: &FileDiff, selected: impl Fn(usize, usize) -> bool) -> Chosen {
+    let (mut any, mut all) = (false, true);
+    for (h, hunk) in diff.hunks.iter().enumerate() {
+        for (l, line) in hunk.lines.iter().enumerate() {
+            if line.is_change() {
+                if selected(h, l) {
+                    any = true;
+                } else {
+                    all = false;
+                }
+            }
+        }
+    }
+    match (any, all) {
+        (false, _) => Chosen::Nothing,
+        (true, true) => Chosen::All,
+        (true, false) => Chosen::Part,
+    }
+}
+
+/// A patch containing only the selected lines, or `None` if it would change
+/// nothing. `selected(hunk, line)` says whether a changed line is included.
+pub(crate) fn build_patch(
     diff: &FileDiff,
     direction: Direction,
     selected: impl Fn(usize, usize) -> bool,
 ) -> Option<Vec<u8>> {
+    let chosen = chosen(diff, &selected);
+    if chosen == Chosen::Nothing {
+        return None;
+    }
     let mut body = Vec::new();
-    let mut all = true;
-    let mut any = false;
     for (h, hunk) in diff.hunks.iter().enumerate() {
-        let mut lines: Vec<(u8, &Line)> = Vec::new();
-        let mut hunk_any = false;
+        let mut take: Vec<bool> = (hunk.lines.iter().enumerate())
+            .map(|(l, line)| line.is_change() && selected(h, l))
+            .collect();
+        let made_up = tie_final_newline(hunk, &mut take, direction);
+        let made_up = made_up.as_ref();
+        if !take.contains(&true) {
+            continue;
+        }
+        // (marker, content, followed by "\ No newline at end of file")
+        let mut lines: Vec<(u8, &[u8], bool)> = Vec::new();
         for (l, line) in hunk.lines.iter().enumerate() {
-            let take = line.is_change() && selected(h, l);
-            if line.is_change() && !take {
-                all = false;
-            }
-            hunk_any |= take;
-            let marker = match (line.kind, take, direction) {
+            let marker = match (line.kind, take[l], direction) {
                 (Kind::Context, ..) => Some(b' '),
                 (Kind::Added, true, _) => Some(b'+'),
                 (Kind::Removed, true, _) => Some(b'-'),
@@ -535,15 +647,20 @@ pub fn build_patch(
                 (Kind::Removed, false, Direction::Reverse) => None,
             };
             if let Some(m) = marker {
-                lines.push((m, line));
+                lines.push((m, &line.content, line.no_newline));
+            }
+            if let Some((at, content)) = made_up
+                && *at == l
+            {
+                lines.push((b'+', content, false));
             }
         }
-        if !hunk_any {
-            continue;
-        }
-        any = true;
-        let old_count = lines.iter().filter(|(m, _)| *m != b'+').count();
-        let new_count = lines.iter().filter(|(m, _)| *m != b'-').count();
+        // "No newline" belongs only on the last line of its side: anywhere
+        // else git would glue the next line on. Without it git refuses.
+        let last_old = lines.iter().rposition(|(m, ..)| *m != b'+');
+        let last_new = lines.iter().rposition(|(m, ..)| *m != b'-');
+        let old_count = lines.iter().filter(|(m, ..)| *m != b'+').count();
+        let new_count = lines.iter().filter(|(m, ..)| *m != b'-').count();
         body.extend_from_slice(
             format!(
                 "@@ -{},{} +{},{} @@\n",
@@ -551,25 +668,70 @@ pub fn build_patch(
             )
             .as_bytes(),
         );
-        for (m, line) in lines {
+        for (i, &(m, content, no_newline)) in lines.iter().enumerate() {
             body.push(m);
-            body.extend_from_slice(&line.content);
+            body.extend_from_slice(content);
             body.push(b'\n');
-            if line.no_newline {
+            let last = (m == b'+' || last_old == Some(i)) && (m == b'-' || last_new == Some(i));
+            if no_newline && last {
                 body.extend_from_slice(b"\\ No newline at end of file\n");
             }
         }
     }
-    if !any {
+    if body.is_empty() {
         return None;
     }
-    let mut patch = if all {
+    let mut patch = if chosen == Chosen::All {
         diff.header.clone()
     } else {
         partial_header(diff, direction)
     };
     patch.extend_from_slice(&body);
     Some(patch)
+}
+
+/// The old version's last line without a newline ("-b" and "\ No newline")
+/// and the lines added after it go together: they need b to get its newline
+/// (git shows "+b"). Staging any of them stages that newline too; unstaging
+/// or discarding the newline needs all of them. In a CRLF file the newline
+/// is "\r\n" (git shows "+b\r"). Returns the line after which to write the
+/// "+b" when the diff has none (b changed as well), and that line.
+fn tie_final_newline(
+    hunk: &Hunk,
+    take: &mut [bool],
+    direction: Direction,
+) -> Option<(usize, Vec<u8>)> {
+    let lines = &hunk.lines;
+    let last = lines
+        .iter()
+        .position(|l| l.kind == Kind::Removed && l.no_newline)?;
+    let after: Vec<usize> = (last + 1..lines.len())
+        .filter(|&l| lines[l].kind == Kind::Added)
+        .collect();
+    let old = &lines[last].content;
+    let with_newline = after.iter().copied().find(|&l| {
+        let new = &lines[l].content;
+        new == old || new.strip_suffix(b"\r") == Some(old)
+    });
+    let pair = match direction {
+        Direction::Forward if !take[last] && after.iter().any(|&l| take[l]) => true,
+        Direction::Reverse if take[last] && after.iter().any(|&l| !take[l]) => false,
+        _ => return None,
+    };
+    take[last] = pair;
+    match with_newline {
+        Some(l) => {
+            take[l] = pair;
+            None
+        }
+        None => pair.then(|| {
+            let mut content = old.clone();
+            if after.iter().any(|&l| lines[l].content.ends_with(b"\r")) {
+                content.push(b'\r');
+            }
+            (last, content)
+        }),
+    }
 }
 
 /// A header for a patch that only takes part of a file's change. A partial
@@ -587,7 +749,7 @@ fn partial_header(diff: &FileDiff, direction: Direction) -> Vec<u8> {
 /// Character ranges that differ between a removed and an added line, for
 /// word-level highlights: the part between the common prefix and suffix,
 /// widened to word boundaries.
-pub fn changed_ranges(old: &str, new: &str) -> (Range<usize>, Range<usize>) {
+fn changed_ranges(old: &str, new: &str) -> (Range<usize>, Range<usize>) {
     if old == new {
         return (0..0, 0..0);
     }
@@ -673,6 +835,13 @@ pub fn word_highlights(diff: &FileDiff) -> Vec<Vec<Option<Range<usize>>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tab_is_as_wide_as_it_shows() {
+        let line = b"\t\tfn main() {}";
+        assert_eq!(display_width(line), display_text(line).chars().count());
+        assert!(display_width("été".as_bytes()) >= 3);
+    }
 
     const SAMPLE: &[u8] = b"diff --git a/src/a.rs b/src/a.rs
 index 111..222 100644

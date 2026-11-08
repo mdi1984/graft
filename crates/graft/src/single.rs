@@ -101,7 +101,6 @@ fn decode(bytes: &[u8]) -> Vec<PathBuf> {
 mod win {
     use std::fs::File;
     use std::io::{Read, Write};
-    use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use std::ptr::{null, null_mut};
     use std::sync::Arc;
@@ -134,6 +133,7 @@ mod win {
     use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 
     use super::MAX_MESSAGE;
+    use crate::native::wide;
 
     pub struct Handle(HANDLE);
 
@@ -145,13 +145,6 @@ mod win {
             // SAFETY: the handle came from a Create/Open call and is closed once.
             unsafe { CloseHandle(self.0) };
         }
-    }
-
-    fn wide(s: &str) -> Vec<u16> {
-        std::ffi::OsStr::new(s)
-            .encode_wide()
-            .chain(Some(0))
-            .collect()
     }
 
     /// Open (or create) the named mutex; `true` if it existed already.

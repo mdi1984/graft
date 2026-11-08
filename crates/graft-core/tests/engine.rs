@@ -1,48 +1,23 @@
 //! End-to-end checks against real throwaway repositories.
 
+mod common;
+
 use std::path::Path;
-use std::process::Command;
 
+use common::{commit, sh};
+use graft_core::console::Console;
 use graft_core::history::{self, History};
-use graft_core::{CancelToken, Console, Git, details, repo, snapshot};
-
-/// Run git directly to build fixtures, with a fixed identity.
-fn sh(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .env("GIT_AUTHOR_NAME", "Ada")
-        .env("GIT_AUTHOR_EMAIL", "ada@example.com")
-        .env("GIT_COMMITTER_NAME", "Ada")
-        .env("GIT_COMMITTER_EMAIL", "ada@example.com")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .expect("git runs");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_owned()
-}
-
-fn commit_file(dir: &Path, name: &str, content: &str, message: &str) {
-    std::fs::write(dir.join(name), content).unwrap();
-    sh(dir, &["add", name]);
-    sh(dir, &["commit", "-q", "-m", message]);
-}
+use graft_core::{CancelToken, Git, details, is_cancelled, repo, snapshot};
 
 fn fixture() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path().join("demo");
-    std::fs::create_dir(&dir).unwrap();
-    sh(&dir, &["init", "-q", "-b", "main"]);
-    commit_file(&dir, "a.txt", "one\n", "First");
-    commit_file(&dir, "b.txt", "two\n", "Second\n\nWith a body.");
+    let dir = common::init(&tmp.path().join("demo"));
+    commit(&dir, "a.txt", "one\n", "First");
+    commit(&dir, "b.txt", "two\n", "Second\n\nWith a body.");
     sh(&dir, &["switch", "-q", "-c", "feature"]);
-    commit_file(&dir, "c.txt", "three\n", "Feature work");
+    commit(&dir, "c.txt", "three\n", "Feature work");
     sh(&dir, &["switch", "-q", "main"]);
-    commit_file(&dir, "a.txt", "one\nmore\n", "Main work");
+    commit(&dir, "a.txt", "one\nmore\n", "Main work");
     sh(
         &dir,
         &["merge", "-q", "--no-ff", "-m", "Merge feature", "feature"],
@@ -79,12 +54,11 @@ fn locate_snapshot_history_details() {
     let names: Vec<_> = snap.branches.iter().map(|b| b.name.as_str()).collect();
     assert_eq!(names, ["agent", "feature", "main"]);
     assert_eq!(snap.tags.len(), 1);
-    assert!(snap.tags[0].annotated);
 
     // History over all branches: 5 commits, merge on top, two lanes.
     let tips: Vec<_> = snap.branches.iter().map(|b| b.target).collect();
     let commits = history::walk(&loc.root, &tips, 1000, &CancelToken::default()).unwrap();
-    assert_eq!(commits.list.len(), 5);
+    assert_eq!(commits.len(), 5);
     let head = snap.worktrees[0].head.unwrap();
     let h = History::build(&commits, Some(head));
     assert!(h.commits[0].is_worktree());
@@ -103,9 +77,6 @@ fn locate_snapshot_history_details() {
     let second = h.commits.iter().find(|c| c.summary == "Second").unwrap();
     let d = details::load(&git, second.id).unwrap();
     assert_eq!(d.body(), "With a body.");
-
-    // Every command went through the console.
-    assert!(!console.snapshot().is_empty());
 }
 
 #[test]
@@ -132,6 +103,7 @@ fn init_and_clone() {
     )
     .unwrap();
     assert!(same(&loc.root, &dest));
+    assert!(!phases.is_empty(), "git's progress reaches the caller");
     let snap = snapshot::load(&Git::new(&loc.root, console.clone())).unwrap();
     assert_eq!(snap.remotes.len(), 1);
     assert_eq!(snap.remotes[0].name, "origin");
@@ -154,6 +126,27 @@ fn init_and_clone() {
     assert!(dest.join("a.txt").exists());
 
     assert!(repo::locate(tmp.path(), &console).is_err());
+}
+
+/// Cancelling a clone stops git, reports it as cancelled (not as a
+/// failure) and leaves no half-cloned folder behind.
+#[test]
+fn a_cancelled_clone_leaves_nothing_behind() {
+    let tmp = fixture();
+    let source = tmp.path().join("demo");
+    let dest = tmp.path().join("cancelled");
+    let cancel = CancelToken::default();
+    cancel.cancel();
+    let err = repo::clone(
+        source.to_str().unwrap(),
+        &dest,
+        &Console::default(),
+        &cancel,
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(is_cancelled(&err), "{err:#}");
+    assert!(!dest.exists());
 }
 
 fn same(a: &Path, b: &Path) -> bool {
@@ -188,5 +181,5 @@ fn tags_on_files_and_folders_do_not_break_history() {
 
     let tips: Vec<_> = snap.tags.iter().map(|t| t.target).collect();
     let commits = history::walk(&dir, &tips, 1000, &CancelToken::default()).unwrap();
-    assert_eq!(commits.list.len(), 5);
+    assert_eq!(commits.len(), 5);
 }

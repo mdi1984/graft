@@ -3,20 +3,25 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
-use egui::{Align2, Rect, ScrollArea, Sense, Stroke, StrokeKind, TextureHandle, Ui, pos2, vec2};
-use graft_core::CancelToken;
-use graft_core::repo::{Progress, clone_folder_name, native};
+use egui::{
+    Align, Align2, Color32, Layout, Rect, ScrollArea, Sense, Stroke, StrokeKind, Ui, pos2, vec2,
+};
+use graft_core::paths::{self, native};
+use graft_core::repo::clone_folder_name;
 use graft_core::wsl::Wsl;
 
+use super::confirm;
 use super::icons::{self, Icon};
-use super::project_tabs::group_color;
 use super::widgets::{
-    ButtonKind, button, elided, elided_path, paint_galley_left, paint_icon_button, progress_bar,
-    section_heading, text_field,
+    ButtonKind, button, elided, elided_path, error_label, field_label, hint, paint_galley_left,
+    paint_icon_button, paint_placeholder_left, progress_bar, section_heading, small_text,
+    text_field,
 };
 use crate::groups::{GroupId, TabGroup};
+use crate::keys::{Command, Keymap};
+use crate::running::Running;
+use crate::text::plural;
 use crate::theme::{self, RADIUS, color};
 
 const WIDTH: f32 = 600.0;
@@ -51,48 +56,54 @@ fn place_of(path: &Path) -> Place {
     }
 }
 
-/// A clone or init in progress.
-pub struct Busy {
-    pub label: String,
-    pub progress: Arc<Mutex<Progress>>,
-    pub cancel: Option<CancelToken>,
-}
-
 pub struct StartPage {
-    pub mode: Mode,
-    pub url: String,
-    pub clone_parent: String,
-    pub folder_name: String,
+    mode: Mode,
+    url: String,
+    clone_parent: String,
+    folder_name: String,
     /// The user typed a folder name, so stop deriving it from the URL.
     folder_name_edited: bool,
-    pub init_path: String,
-    pub busy: Option<Busy>,
-    pub error: Option<String>,
-    logo: Option<TextureHandle>,
-    pub place: Place,
-    /// Installed WSL distros; `None` until asked for.
-    distros: Option<Vec<String>>,
+    init_path: String,
+    /// A clone or init in progress.
+    busy: Option<Running>,
+    error: Option<String>,
+    place: Place,
+    distros: Distros,
     homes: HashMap<String, Home>,
     /// The clone folder and new repository folder typed for other places.
     other_fields: HashMap<Place, (String, String)>,
     /// The clone folder Graft started with, kept while the field does not
     /// resolve (e.g. `~` before the home folder is known).
     saved_clone_parent: PathBuf,
+    /// The group whose Delete waits for the user's OK, with its name.
+    delete_group: Option<(GroupId, String)>,
 }
 
-/// A recently opened repository; `exists` is checked when the list changes,
-/// not every frame.
+/// The installed WSL distros, listed in the background once.
+enum Distros {
+    NotAsked,
+    Asked,
+    Known(Vec<String>),
+}
+
+/// A recently opened repository. `exists` is checked in the background
+/// (see [`Recent::is_there`]) when the list is shown, not every frame.
 pub struct Recent {
     pub path: PathBuf,
     pub exists: bool,
 }
 
 impl Recent {
+    /// Assumed to exist until it was checked.
     pub fn new(path: PathBuf) -> Self {
+        Self { path, exists: true }
+    }
+
+    /// Whether the folder at `path` is still there. Reads the disk.
+    pub fn is_there(path: &Path) -> bool {
         // Looking into WSL would start a stopped distro, and this runs when
         // Graft starts: assume it is there; opening says if it is not.
-        let exists = graft_core::wsl::Wsl::of(&path).is_some() || path.is_dir();
-        Self { path, exists }
+        graft_core::wsl::Wsl::of(path).is_some() || path.is_dir()
     }
 }
 
@@ -129,12 +140,12 @@ impl StartPage {
             init_path: String::new(),
             busy: None,
             error: None,
-            logo: None,
             place: place_of(&clone_parent),
-            distros: None,
+            distros: Distros::NotAsked,
             homes: HashMap::new(),
             other_fields: HashMap::new(),
             saved_clone_parent: clone_parent.clone(),
+            delete_group: None,
         };
         page.clone_parent = page.show_path(&clone_parent);
         page
@@ -199,7 +210,7 @@ impl StartPage {
                 .remove(&place)
                 .unwrap_or_else(|| match place {
                     Place::Windows => (
-                        self.show_path(&crate::app::default_clone_parent()),
+                        self.show_path(&crate::settings::default_clone_parent()),
                         String::new(),
                     ),
                     Place::Wsl(_) => ("~".to_owned(), String::new()),
@@ -231,7 +242,7 @@ impl StartPage {
                 None => self.set_place(Place::Windows),
             }
         }
-        self.distros = Some(distros);
+        self.distros = Distros::Known(distros);
     }
 
     /// A home folder arrived: show folders under it with `~`.
@@ -289,8 +300,8 @@ impl StartPage {
     /// list, then the home folder of the chosen distro. Asked for apart from
     /// the page's own actions, so a click in the same frame cannot drop it.
     pub fn take_load(&mut self) -> Option<StartAction> {
-        if self.distros.is_none() {
-            self.distros = Some(Vec::new());
+        if let Distros::NotAsked = self.distros {
+            self.distros = Distros::Asked;
             return Some(StartAction::LoadDistros);
         }
         if let Place::Wsl(name) = &self.place
@@ -303,14 +314,49 @@ impl StartPage {
         None
     }
 
-    /// Forget the forms after a repository was opened.
-    pub fn reset(&mut self) {
+    pub fn is_busy(&self) -> bool {
+        self.busy.is_some()
+    }
+
+    /// A clone or init started.
+    pub fn begin(&mut self, running: Running) {
+        self.error = None;
+        self.busy = Some(running);
+    }
+
+    /// The clone or init ended (or none runs); `error` is shown.
+    pub fn stop(&mut self, error: Option<String>) {
+        self.busy = None;
+        self.error = error;
+    }
+
+    pub fn cancel(&self) {
+        if let Some(busy) = &self.busy {
+            busy.cancel();
+        }
+    }
+
+    pub fn busy_status(&self) -> Option<String> {
+        self.busy.as_ref().map(Running::status)
+    }
+
+    /// While a clone or init runs: what to wait for before closing, see
+    /// [`Running::wait_text`].
+    pub fn wait_before_closing(&self) -> Option<String> {
+        self.busy.as_ref().map(Running::wait_text)
+    }
+
+    /// A repository was opened: forget the forms, unless a clone or init
+    /// runs. That one ends with [`StartPage::stop`] and opens its own.
+    pub fn opened(&mut self) {
+        if self.busy.is_some() {
+            return;
+        }
         self.mode = Mode::Home;
         self.url.clear();
         self.folder_name.clear();
         self.folder_name_edited = false;
         self.init_path.clear();
-        self.busy = None;
         self.error = None;
     }
 
@@ -326,6 +372,7 @@ impl StartPage {
         ui: &mut Ui,
         recent: &[Recent],
         groups: &[TabGroup],
+        keys: &Keymap,
     ) -> Option<StartAction> {
         let mut action = None;
         ScrollArea::vertical()
@@ -348,51 +395,45 @@ impl StartPage {
                         match self.mode {
                             Mode::Home => {}
                             Mode::Clone => self.clone_form(ui, width, &mut action),
-                            Mode::Init => self.init_form(ui, width, &mut action),
+                            Mode::Init => self.init_form(ui, &mut action),
                         }
                         if let Some(busy) = &self.busy {
-                            busy_panel(ui, busy, width, &mut action);
+                            busy_panel(ui, busy, &mut action);
                         }
                         if let Some(error) = &self.error {
                             ui.add_space(4.0);
-                            ui.label(egui::RichText::new(error).color(color::removed()));
+                            error_label(ui, error);
                         }
                         ui.add_space(24.0);
                         if !groups.is_empty() {
-                            group_list(ui, groups, width, &mut action);
+                            let ask = &mut self.delete_group;
+                            group_list(ui, groups, width, ask, &mut action);
                             ui.add_space(16.0);
                         }
                         self.recent_list(ui, recent, width, &mut action);
                         ui.add_space(16.0);
-                        ui.label(
-                            egui::RichText::new(
-                                "Tip: drop a folder onto this window to open it. Ctrl+O opens, Ctrl+T shows this page.",
-                            )
-                            .color(color::text_faint())
-                            .size(theme::SMALL_SIZE),
-                        );
+                        hint(ui, &tip(keys));
                     });
                 });
             });
+        if let Some((id, name)) = &self.delete_group {
+            let body = "Only the group goes away: its repositories are not touched, and \
+                        open tabs stay open.";
+            let title = format!("Delete group {name}?");
+            match confirm::ask(ui.ctx(), &title, body, "Delete group") {
+                Some(true) => {
+                    action = Some(StartAction::DeleteGroup(*id));
+                    self.delete_group = None;
+                }
+                Some(false) => self.delete_group = None,
+                None => {}
+            }
+        }
         action
     }
 
     fn header(&mut self, ui: &mut Ui) {
-        let logo = self
-            .logo
-            .get_or_insert_with(|| {
-                let icon = eframe::icon_data::from_png_bytes(include_bytes!(
-                    "../../assets/icon/graft-256.png"
-                ))
-                .expect("bundled icon is a valid PNG");
-                let image = egui::ColorImage::from_rgba_unmultiplied(
-                    [icon.width as usize, icon.height as usize],
-                    &icon.rgba,
-                );
-                ui.ctx()
-                    .load_texture("graft-logo", image, egui::TextureOptions::LINEAR)
-            })
-            .clone();
+        let logo = icons::app_logo(ui.ctx());
         ui.horizontal(|ui| {
             ui.add(egui::Image::new(&logo).fit_to_exact_size(vec2(52.0, 52.0)));
             ui.add_space(8.0);
@@ -413,8 +454,9 @@ impl StartPage {
 
     /// "Location: This PC | WSL distros", only when WSL has distros.
     fn places(&mut self, ui: &mut Ui) {
-        let Some(distros) = self.distros.clone().filter(|d| !d.is_empty()) else {
-            return;
+        let distros = match &self.distros {
+            Distros::Known(distros) if !distros.is_empty() => distros.clone(),
+            _ => return,
         };
         let idle = self.busy.is_none();
         ui.horizontal(|ui| {
@@ -521,14 +563,14 @@ impl StartPage {
                 Place::Windows => r"C:\dev",
                 Place::Wsl(_) => "~/projects",
             };
-            ui.horizontal(|ui| {
-                if text_field(ui, &mut self.clone_parent, hint, inner - 96.0).changed() {
-                    self.error = None;
-                }
-                if button(ui, "Browse…", ButtonKind::Secondary, self.busy.is_none()).clicked() {
-                    *action = Some(StartAction::PickCloneParent);
-                }
-            });
+            let (browse, edited) =
+                browse_row(ui, &mut self.clone_parent, hint, self.busy.is_none());
+            if edited {
+                self.error = None;
+            }
+            if browse {
+                *action = Some(StartAction::PickCloneParent);
+            }
             ui.add_space(4.0);
             field_label(ui, "Folder name");
             if text_field(ui, &mut self.folder_name, "repo", inner).changed() {
@@ -541,11 +583,7 @@ impl StartPage {
                 && !self.folder_name.trim().is_empty()
                 && self.busy.is_none();
             if let Some(problem) = self.folder_problem(&self.clone_parent) {
-                ui.label(
-                    egui::RichText::new(problem)
-                        .color(color::text_weak())
-                        .size(theme::SMALL_SIZE),
-                );
+                small_text(ui, &problem, color::text_weak());
             } else if let Some(dest) = dest.as_deref().filter(|_| ready) {
                 let (rect, _) = ui.allocate_exact_size(vec2(inner, 16.0), Sense::hover());
                 let prefix = ui.painter().layout_no_wrap(
@@ -555,7 +593,7 @@ impl StartPage {
                 );
                 let prefix_width = prefix.size().x;
                 let y = rect.center().y;
-                paint_galley_left(ui.painter(), rect.left(), y, prefix, color::text_faint());
+                paint_galley_left(ui.painter(), rect.left(), y, prefix);
                 let dest = self.describe(dest);
                 let dest = elided_path(
                     ui,
@@ -564,13 +602,7 @@ impl StartPage {
                     color::text_weak(),
                     inner - prefix_width,
                 );
-                paint_galley_left(
-                    ui.painter(),
-                    rect.left() + prefix_width,
-                    y,
-                    dest,
-                    color::text_weak(),
-                );
+                paint_galley_left(ui.painter(), rect.left() + prefix_width, y, dest);
             }
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -593,26 +625,19 @@ impl StartPage {
         });
     }
 
-    fn init_form(&mut self, ui: &mut Ui, width: f32, action: &mut Option<StartAction>) {
+    fn init_form(&mut self, ui: &mut Ui, action: &mut Option<StartAction>) {
         form_frame(ui, |ui| {
-            let inner = width - 32.0;
             field_label(ui, "New repository folder (created if missing)");
             let hint = match self.place {
                 Place::Windows => r"C:\dev\my-project",
                 Place::Wsl(_) => "~/projects/my-project",
             };
-            ui.horizontal(|ui| {
-                text_field(ui, &mut self.init_path, hint, inner - 96.0);
-                if button(ui, "Browse…", ButtonKind::Secondary, self.busy.is_none()).clicked() {
-                    *action = Some(StartAction::PickInitFolder);
-                }
-            });
+            let (browse, _) = browse_row(ui, &mut self.init_path, hint, self.busy.is_none());
+            if browse {
+                *action = Some(StartAction::PickInitFolder);
+            }
             if let Some(problem) = self.folder_problem(&self.init_path) {
-                ui.label(
-                    egui::RichText::new(problem)
-                        .color(color::text_weak())
-                        .size(theme::SMALL_SIZE),
-                );
+                small_text(ui, &problem, color::text_weak());
             }
             ui.add_space(6.0);
             let target = self.resolve(&self.init_path);
@@ -633,6 +658,20 @@ impl StartPage {
     }
 }
 
+/// A folder field with "Browse…" at its right. Returns whether Browse was
+/// clicked and whether the field changed.
+fn browse_row(ui: &mut Ui, text: &mut String, hint: &str, enabled: bool) -> (bool, bool) {
+    ui.horizontal(|ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let browse = button(ui, "Browse…", ButtonKind::Secondary, enabled).clicked();
+            let width = ui.available_width();
+            (browse, text_field(ui, text, hint, width).changed())
+        })
+        .inner
+    })
+    .inner
+}
+
 fn form_frame(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     egui::Frame::new()
         .fill(color::sidebar_bg())
@@ -646,14 +685,6 @@ fn form_frame(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
         });
 }
 
-fn field_label(ui: &mut Ui, text: &str) {
-    ui.label(
-        egui::RichText::new(text)
-            .color(color::text_weak())
-            .size(theme::SMALL_SIZE),
-    );
-}
-
 fn card(
     ui: &mut Ui,
     width: f32,
@@ -665,10 +696,7 @@ fn card(
     let (rect, response) = ui.allocate_exact_size(vec2(width, 92.0), Sense::click());
     let painter = ui.painter();
     let (fill, border) = if active {
-        (
-            color::selected_row_bg(),
-            color::accent().gamma_multiply(0.6),
-        )
+        (color::selected_row_bg(), color::selected_outline())
     } else if response.hovered() {
         (color::control_hover_bg(), color::control_border())
     } else {
@@ -691,53 +719,37 @@ fn card(
         color::text_weak(),
         rect.width() - 28.0,
     );
-    paint_galley_left(
-        painter,
-        rect.left() + 14.0,
-        rect.top() + 72.0,
-        detail,
-        color::text_weak(),
-    );
+    paint_galley_left(painter, rect.left() + 14.0, rect.top() + 72.0, detail);
     response
 }
 
-fn busy_panel(ui: &mut Ui, busy: &Busy, width: f32, action: &mut Option<StartAction>) {
-    let progress = busy.progress.lock().map(|p| p.clone()).unwrap_or_default();
+/// The running clone or init: what it is doing, a progress bar and Cancel.
+/// Each progress report from git wakes the UI, so this needs no polling.
+fn busy_panel(ui: &mut Ui, busy: &Running, action: &mut Option<StartAction>) {
     ui.add_space(6.0);
+    ui.label(egui::RichText::new(busy.status()).color(color::text()));
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(&busy.label).color(color::text()));
-        if !progress.phase.is_empty() {
-            let pct = progress
-                .fraction
-                .map(|f| format!(" {:.0}%", f * 100.0))
-                .unwrap_or_default();
-            ui.label(
-                egui::RichText::new(format!("· {}{pct}", progress.phase)).color(color::text_weak()),
-            );
-        }
-    });
-    ui.horizontal(|ui| {
-        progress_bar(ui, progress.fraction, width - 96.0);
-        // Progress arrives from git in the background; look again soon.
-        ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(100));
-        if busy.cancel.is_some() && button(ui, "Cancel", ButtonKind::Secondary, true).clicked() {
-            *action = Some(StartAction::Cancel);
-        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if busy.can_cancel() && button(ui, "Cancel", ButtonKind::Secondary, true).clicked() {
+                *action = Some(StartAction::Cancel);
+            }
+            let width = ui.available_width();
+            progress_bar(ui, busy.progress().fraction, width);
+        });
     });
 }
 
 /// A toggle in the Location row.
 fn place_button(ui: &mut Ui, label: &str, selected: bool) -> egui::Response {
-    let galley = ui
-        .painter()
-        .layout_no_wrap(label.to_owned(), theme::small(), color::text());
+    let galley =
+        ui.painter()
+            .layout_no_wrap(label.to_owned(), theme::small(), Color32::PLACEHOLDER);
     let size = vec2(galley.size().x + 20.0, 24.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let (fill, border, fg) = if selected {
         (
             color::selected_row_bg(),
-            color::accent().gamma_multiply(0.6),
+            color::selected_outline(),
             color::text(),
         )
     } else if response.hovered() {
@@ -755,7 +767,7 @@ fn place_button(ui: &mut Ui, label: &str, selected: bool) -> egui::Response {
     };
     ui.painter()
         .rect(rect, 6, fill, Stroke::new(1.0, border), StrokeKind::Inside);
-    paint_galley_left(
+    paint_placeholder_left(
         ui.painter(),
         rect.left() + 10.0,
         rect.center().y,
@@ -796,10 +808,7 @@ impl StartPage {
             if hovered {
                 painter.rect_filled(rect, RADIUS, color::hover_row_bg());
             }
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.display().to_string());
+            let name = paths::folder_name(path);
             let fg = if exists {
                 color::text()
             } else {
@@ -812,7 +821,7 @@ impl StartPage {
                 fg,
                 width - 60.0,
             );
-            paint_galley_left(painter, rect.left() + 10.0, rect.top() + 14.0, name, fg);
+            paint_galley_left(painter, rect.left() + 10.0, rect.top() + 14.0, name);
             let detail = if exists {
                 self.describe(path)
             } else {
@@ -825,13 +834,7 @@ impl StartPage {
                 color::text_weak(),
                 width - 60.0,
             );
-            paint_galley_left(
-                painter,
-                rect.left() + 10.0,
-                rect.top() + 31.0,
-                detail,
-                color::text_weak(),
-            );
+            paint_galley_left(painter, rect.left() + 10.0, rect.top() + 31.0, detail);
             if hovered {
                 paint_icon_button(ui, close, &close_response, Icon::Close);
             }
@@ -845,7 +848,14 @@ impl StartPage {
 }
 
 /// Tab groups: click one to open all of its repositories.
-fn group_list(ui: &mut Ui, groups: &[TabGroup], width: f32, action: &mut Option<StartAction>) {
+/// "Delete group…" puts the group into `ask`, to confirm first.
+fn group_list(
+    ui: &mut Ui,
+    groups: &[TabGroup],
+    width: f32,
+    ask: &mut Option<(GroupId, String)>,
+    action: &mut Option<StartAction>,
+) {
     let (rect, _) = ui.allocate_exact_size(vec2(width, 20.0), Sense::hover());
     section_heading(ui, ui.painter(), rect.left(), rect.center().y, "GROUPS");
     for group in groups {
@@ -855,12 +865,11 @@ fn group_list(ui: &mut Ui, groups: &[TabGroup], width: f32, action: &mut Option<
         if response.hovered() {
             painter.rect_filled(rect, RADIUS, color::hover_row_bg());
         }
-        let fg = group_color(group.color);
+        let fg = color::group(group.color);
         painter.circle_filled(pos2(rect.left() + 14.0, rect.top() + 14.0), 4.0, fg);
         let count = match group.repos.len() {
             0 => "no repositories yet".to_owned(),
-            1 => "1 repository".to_owned(),
-            n => format!("{n} repositories"),
+            n => plural(n, "repository", "repositories"),
         };
         let name = elided(
             ui,
@@ -870,30 +879,10 @@ fn group_list(ui: &mut Ui, groups: &[TabGroup], width: f32, action: &mut Option<
             width - 200.0,
         );
         let name_right = rect.left() + 26.0 + name.size().x;
-        paint_galley_left(
-            painter,
-            rect.left() + 26.0,
-            rect.top() + 14.0,
-            name,
-            color::text(),
-        );
+        paint_galley_left(painter, rect.left() + 26.0, rect.top() + 14.0, name);
         let count = elided(ui, &count, theme::small(), color::text_weak(), 160.0);
-        paint_galley_left(
-            painter,
-            name_right + 8.0,
-            rect.top() + 14.0,
-            count,
-            color::text_weak(),
-        );
-        let names: Vec<String> = group
-            .repos
-            .iter()
-            .map(|p| {
-                p.file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| p.display().to_string())
-            })
-            .collect();
+        paint_galley_left(painter, name_right + 8.0, rect.top() + 14.0, count);
+        let names: Vec<String> = group.repos.iter().map(|p| paths::folder_name(p)).collect();
         let names = elided(
             ui,
             &names.join(" · "),
@@ -901,13 +890,7 @@ fn group_list(ui: &mut Ui, groups: &[TabGroup], width: f32, action: &mut Option<
             color::text_weak(),
             width - 120.0,
         );
-        paint_galley_left(
-            painter,
-            rect.left() + 26.0,
-            rect.top() + 31.0,
-            names,
-            color::text_weak(),
-        );
+        paint_galley_left(painter, rect.left() + 26.0, rect.top() + 31.0, names);
         if response.hovered() {
             painter.text(
                 pos2(rect.right() - 12.0, rect.center().y),
@@ -930,12 +913,29 @@ fn group_list(ui: &mut Ui, groups: &[TabGroup], width: f32, action: &mut Option<
                 ui.close();
             }
             ui.separator();
-            if ui.button("Delete group").clicked() {
-                *action = Some(StartAction::DeleteGroup(group.id));
+            if ui.button("Delete group…").clicked() {
+                *ask = Some((group.id, group.name.clone()));
                 ui.close();
             }
         });
     }
+}
+
+/// The tip under the lists: drop a folder to open it, plus the keys that
+/// open a folder and this page, as they are set.
+fn tip(keys: &Keymap) -> String {
+    let mut tip = "Tip: drop a folder onto this window to open it.".to_owned();
+    if let Some(key) = keys.text(Command::OpenFolder) {
+        tip += &format!(" {key} opens");
+    }
+    if let Some(key) = keys.text(Command::NewTab) {
+        let and = if tip.ends_with("opens") { "," } else { "" };
+        tip += &format!("{and} {key} shows this page");
+    }
+    if !tip.ends_with('.') {
+        tip.push('.');
+    }
+    tip
 }
 
 #[cfg(test)]
@@ -1009,10 +1009,47 @@ mod tests {
         assert_eq!(page.clone_parent_path(), PathBuf::from(PROJECTS));
     }
 
+    /// Opening another repository while a clone runs leaves the clone (its
+    /// progress, Cancel and form) alone; once it ends, an open clears the form.
+    #[test]
+    fn an_open_during_a_clone_leaves_the_clone_alone() {
+        let mut page = StartPage::new(PathBuf::from(r"C:\dev"));
+        page.mode = Mode::Clone;
+        page.url = "https://example.com/x.git".into();
+        page.begin(Running::new("Cloning"));
+        page.opened();
+        assert!(page.is_busy());
+        assert_eq!(page.mode, Mode::Clone);
+        assert_eq!(page.url, "https://example.com/x.git");
+
+        page.stop(Some("failed".into()));
+        assert!(!page.is_busy());
+        assert_eq!(page.error.as_deref(), Some("failed"));
+        page.opened();
+        assert_eq!(page.mode, Mode::Home);
+        assert!(page.url.is_empty() && page.error.is_none());
+    }
+
+    /// Quitting or updating waits for a running clone, as for an operation
+    /// in a tab.
+    #[test]
+    fn quitting_waits_for_a_clone() {
+        let mut page = StartPage::new(PathBuf::from(r"C:\dev"));
+        assert_eq!(page.wait_before_closing(), None);
+        let (running, _cancel) = Running::cancellable("Cloning https://example.com/x.git");
+        page.begin(running);
+        assert_eq!(
+            page.wait_before_closing().as_deref(),
+            Some("Wait for \"Cloning https://example.com/x.git\" to finish (or cancel it)")
+        );
+        page.stop(None);
+        assert_eq!(page.wait_before_closing(), None);
+    }
+
     #[test]
     fn recent_wsl_entries_are_not_looked_up() {
         // A stopped distro must not start just to draw the start page.
-        assert!(Recent::new(PathBuf::from(r"\\wsl.localhost\Gone\home\x")).exists);
-        assert!(!Recent::new(PathBuf::from(r"C:\graft-no-such-folder-x")).exists);
+        assert!(Recent::is_there(Path::new(r"\\wsl.localhost\Gone\home\x")));
+        assert!(!Recent::is_there(Path::new(r"C:\graft-no-such-folder-x")));
     }
 }

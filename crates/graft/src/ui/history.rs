@@ -3,24 +3,30 @@
 
 use egui::epaint::CubicBezierShape;
 use egui::{
-    Align2, Color32, Frame, Id, Key, Margin, Panel, Pos2, Rect, Response, RichText, ScrollArea,
-    Sense, Stroke, Ui, pos2, vec2,
+    Align2, Color32, Frame, Id, Key, Margin, Panel, Pos2, Rect, RichText, ScrollArea, Sense,
+    Stroke, Ui, pos2, vec2,
 };
-use graft_core::details::{CommitDetails, FileChange};
+use graft_core::details::CommitDetails;
 use graft_core::diff::Source;
-use graft_core::history::{Commit, GraphRow, History, LineKind};
+use graft_core::history::{self, Commit, GraphRow, History, LineKind};
 use graft_core::refs::ResetMode;
-use graft_core::status::Change;
-use graft_core::{same_path, short};
+use graft_core::short;
 
+use super::branch_menu::{self, can_item, checkout_color};
+use super::can::{self, Can};
 use super::diff_view;
+use super::file_row::{self, Extras, file_row, paint_file};
 use super::icons::Icon;
 use super::widgets::{
-    ButtonKind, button, chip, elided, empty_state, icon_button, paint_galley_left, spinner,
+    ButtonKind, button, chip, chip_size, elided, empty_state, icon_button, loading,
+    paint_galley_left,
 };
-use crate::project::{Action, CheckedOut, DialogKind, FileKey, Project, RefKind, RefLabel};
+use crate::keys;
+use crate::project::{Action, DialogKind, FileKey, Project, RefKind, RefLabel};
+use crate::text::plural;
 use crate::theme::{self, color};
 use crate::time;
+use crate::ui::Actions;
 
 const ROW_HEIGHT: f32 = 26.0;
 const LANE_WIDTH: f32 = 14.0;
@@ -31,7 +37,7 @@ const DATE_COL: f32 = 116.0;
 const AUTHOR_COL: f32 = 150.0;
 const MIN_DESCRIPTION: f32 = 180.0;
 
-pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
+pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
     Panel::right("commit-details")
         .resizable(true)
         .default_size(400.0)
@@ -65,22 +71,16 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
             .exact_size((height * 0.55).max(160.0))
             .frame(Frame::new().fill(color::app_bg()))
             .show(ui, |ui| {
-                diff_view::show_view(ui, view, project.is_operating(), &project.settings, actions)
+                diff_view::show_view(
+                    ui,
+                    view,
+                    &can::act(project, ""),
+                    project.settings(),
+                    actions,
+                )
             });
     }
     commit_list(ui, project, history, actions);
-}
-
-fn loading(ui: &mut Ui, text: &str) {
-    let rect = ui.available_rect_before_wrap();
-    spinner(ui, rect.center() - vec2(0.0, 16.0), 9.0, color::text_weak());
-    ui.painter().text(
-        rect.center() + vec2(0.0, 10.0),
-        Align2::CENTER_CENTER,
-        text,
-        theme::body(),
-        color::text_weak(),
-    );
 }
 
 /// Column widths; 0 hides a column.
@@ -118,9 +118,35 @@ impl Columns {
         }
         cols
     }
+
+    /// Where each column starts in `rect` (the header or a row); `None`
+    /// for a hidden one.
+    fn xs(&self, rect: Rect) -> ColumnXs {
+        let commit = rect.right() - self.commit;
+        let date = commit - self.date;
+        let author = date - self.author;
+        let shown = |width: f32, x: f32| (width > 0.0).then_some(x);
+        ColumnXs {
+            description: rect.left() + self.graph + 6.0,
+            description_end: author,
+            author: shown(self.author, author),
+            date: shown(self.date, date),
+            commit: shown(self.commit, commit),
+        }
+    }
 }
 
-fn commit_list(ui: &mut Ui, project: &Project, history: &History, actions: &mut Vec<Action>) {
+/// The left edges of the columns in one row, from [`Columns::xs`].
+struct ColumnXs {
+    description: f32,
+    /// Where the next column (or the row) starts.
+    description_end: f32,
+    author: Option<f32>,
+    date: Option<f32>,
+    commit: Option<f32>,
+}
+
+fn commit_list(ui: &mut Ui, project: &Project, history: &History, actions: &mut Actions) {
     let width = ui.available_width();
     // Big repos can have dozens of lanes: by default the graph gets at most a
     // quarter of the list, the rest is clipped. Dragging the header divider
@@ -139,13 +165,18 @@ fn commit_list(ui: &mut Ui, project: &Project, history: &History, actions: &mut 
     let selected = project
         .selected
         .and_then(|id| history.index.get(&id).copied());
-    keyboard_nav(ui, history, selected, project, actions);
+    keyboard_nav(ui, history, selected, actions);
 
     let list_id = Id::unique(("history-list", &project.root));
     let mut scroll = ScrollArea::vertical()
         .id_salt(list_id)
         .auto_shrink([false, false]);
-    if project.scroll_to_selected.take()
+    // The project bumps its scroll request; the list remembers the last one
+    // it followed.
+    let seen_id = list_id.with("scroll-request");
+    let seen = ui.data(|d| d.get_temp::<u64>(seen_id)).unwrap_or(0);
+    ui.data_mut(|d| d.insert_temp(seen_id, project.scroll_request));
+    if seen != project.scroll_request
         && let Some(i) = selected
     {
         let (offset, height) = ui
@@ -183,7 +214,10 @@ fn commit_list(ui: &mut Ui, project: &Project, history: &History, actions: &mut 
                 worktree_dirty,
             );
             if response.clicked() {
-                actions.push(Action::Select(commit.id));
+                actions.push(Action::Select {
+                    id: commit.id,
+                    scroll: false,
+                });
             }
             if response.double_clicked() && commit.is_worktree() {
                 actions.push(Action::ShowFileStatus);
@@ -218,26 +252,16 @@ fn scroll_target(i: usize, offset: f32, height: f32) -> Option<f32> {
     }
 }
 
-fn keyboard_nav(
-    ui: &Ui,
-    history: &History,
-    selected: Option<usize>,
-    project: &Project,
-    actions: &mut Vec<Action>,
-) {
-    if ui.memory(|m| m.focused().is_some()) {
-        return;
-    }
-    let (up, down, page_up, page_down, home, end) = ui.input(|i| {
-        (
-            i.key_pressed(Key::ArrowUp),
-            i.key_pressed(Key::ArrowDown),
-            i.key_pressed(Key::PageUp),
-            i.key_pressed(Key::PageDown),
-            i.key_pressed(Key::Home),
-            i.key_pressed(Key::End),
-        )
-    });
+fn keyboard_nav(ui: &Ui, history: &History, selected: Option<usize>, actions: &mut Actions) {
+    let key = |key| keys::plain_key(ui.ctx(), key);
+    let (up, down, page_up, page_down, home, end) = (
+        key(Key::ArrowUp),
+        key(Key::ArrowDown),
+        key(Key::PageUp),
+        key(Key::PageDown),
+        key(Key::Home),
+        key(Key::End),
+    );
     let last = history.commits.len().saturating_sub(1);
     let current = selected.unwrap_or(0);
     let page = 20;
@@ -257,8 +281,10 @@ fn keyboard_nav(
         return;
     };
     if Some(next) != selected {
-        actions.push(Action::Select(history.commits[next].id));
-        project.scroll_to_selected.set(true);
+        actions.push(Action::Select {
+            id: history.commits[next].id,
+            scroll: true,
+        });
     }
 }
 
@@ -305,17 +331,16 @@ fn header_row(ui: &mut Ui, cols: &mut Columns, width_id: Id) {
     if cols.graph >= 50.0 {
         label(rect.left() + 10.0, "Graph");
     }
-    label(rect.left() + cols.graph + 6.0, "Description");
-    let mut x = rect.right() - cols.commit;
-    if cols.commit > 0.0 {
-        label(x, "Commit");
-    }
-    x -= cols.date;
-    if cols.date > 0.0 {
-        label(x, "Date");
-    }
-    if cols.author > 0.0 {
-        label(x - cols.author, "Author");
+    let xs = cols.xs(rect);
+    label(xs.description, "Description");
+    for (x, text) in [
+        (xs.commit, "Commit"),
+        (xs.date, "Date"),
+        (xs.author, "Author"),
+    ] {
+        if let Some(x) = x {
+            label(x, text);
+        }
     }
 }
 
@@ -349,26 +374,24 @@ fn paint_row(
     paint_graph(ui, graph_rect, row, commit, is_head, bg);
 
     let y = rect.center().y;
-    let mut right = rect.right() - cols.commit;
-    if cols.commit > 0.0 && !commit.is_worktree() {
-        let sha = painter.layout_no_wrap(short(&commit.id), theme::mono(), color::text_faint());
-        paint_galley_left(painter, right, y, sha, color::text_faint());
-    }
-    right -= cols.date;
-    if cols.date > 0.0 && !commit.is_worktree() {
-        let date = time::relative(commit.time, now);
-        let date = elided(
-            ui,
-            &date,
-            theme::body(),
-            color::text_weak(),
-            cols.date - 8.0,
-        );
-        paint_galley_left(painter, right, y, date, color::text_weak());
-    }
-    if cols.author > 0.0 {
-        right -= cols.author;
-        if !commit.is_worktree() {
+    let xs = cols.xs(rect);
+    if !commit.is_worktree() {
+        if let Some(x) = xs.commit {
+            let sha = painter.layout_no_wrap(short(&commit.id), theme::mono(), color::text_faint());
+            paint_galley_left(painter, x, y, sha);
+        }
+        if let Some(x) = xs.date {
+            let date = time::relative(commit.time, now);
+            let date = elided(
+                ui,
+                &date,
+                theme::body(),
+                color::text_weak(),
+                cols.date - 8.0,
+            );
+            paint_galley_left(painter, x, y, date);
+        }
+        if let Some(x) = xs.author {
             let author = elided(
                 ui,
                 &commit.author,
@@ -376,12 +399,12 @@ fn paint_row(
                 color::text_mid(),
                 cols.author - 10.0,
             );
-            paint_galley_left(painter, right, y, author, color::text_mid());
+            paint_galley_left(painter, x, y, author);
         }
     }
 
-    let mut x = rect.left() + cols.graph + 6.0;
-    let desc_right = right - 10.0;
+    let mut x = xs.description;
+    let desc_right = xs.description_end - 10.0;
     let chips_max = ((desc_right - x) * 0.5).max(0.0);
     let chips_end = x + chips_max;
     for (n, label) in labels.iter().enumerate() {
@@ -405,8 +428,8 @@ fn paint_row(
 
     if commit.is_worktree() {
         let text = format!(
-            "Uncommitted changes · {worktree_dirty} file{}",
-            if worktree_dirty == 1 { "" } else { "s" }
+            "Uncommitted changes · {}",
+            plural(worktree_dirty, "file", "files")
         );
         let galley = elided(
             ui,
@@ -415,7 +438,7 @@ fn paint_row(
             color::dirty_fg(),
             desc_right - x,
         );
-        paint_galley_left(painter, x, y, galley, color::dirty_fg());
+        paint_galley_left(painter, x, y, galley);
     } else {
         let fg = if commit.parents.len() > 1 {
             color::text_weak()
@@ -423,28 +446,20 @@ fn paint_row(
             color::text()
         };
         let summary = elided(ui, &commit.summary, theme::body(), fg, desc_right - x);
-        paint_galley_left(painter, x, y, summary, fg);
+        paint_galley_left(painter, x, y, summary);
     }
 }
 
 /// Like the sidebar: green is checked out in the main folder, orange in a
 /// linked worktree; the viewed worktree's HEAD is bold.
-pub fn label_style(label: &RefLabel) -> (Color32, egui::FontId) {
-    let branch_color = match label.checked_out {
-        CheckedOut::Main => color::accent(),
-        CheckedOut::Worktree => color::branch_dot_agent(),
-        CheckedOut::Nowhere => color::ahead_fg(),
-    };
+fn label_style(label: &RefLabel) -> (Color32, egui::FontId) {
+    let branch_color = checkout_color(label.checked_out);
     match label.kind {
         RefKind::Head => (branch_color, theme::semibold(theme::SMALL_SIZE + 0.5)),
         RefKind::Local => (branch_color, theme::small()),
         RefKind::Remote => (color::text_weak(), theme::small()),
         RefKind::Tag => (color::tag(), theme::small()),
     }
-}
-
-fn lane_color(index: u8) -> Color32 {
-    color::lanes()[index as usize % color::lanes().len()]
 }
 
 fn paint_graph(ui: &Ui, rect: Rect, row: &GraphRow, commit: &Commit, is_head: bool, bg: Color32) {
@@ -458,7 +473,7 @@ fn paint_graph(ui: &Ui, rect: Rect, row: &GraphRow, commit: &Commit, is_head: bo
         let color = if commit.is_worktree() {
             color::text_faint()
         } else {
-            lane_color(line.color)
+            color::lane(line.color.into())
         };
         let stroke = Stroke::new(width, color);
         let x = lane_x(line.lane);
@@ -475,7 +490,7 @@ fn paint_graph(ui: &Ui, rect: Rect, row: &GraphRow, commit: &Commit, is_head: bo
         }
     }
 
-    let color = lane_color(row.color);
+    let color = color::lane(row.color.into());
     if commit.is_worktree() {
         painter.circle(node, 4.5, bg, Stroke::new(1.6, color::dirty_fg()));
     } else if is_head {
@@ -508,54 +523,19 @@ fn curve(painter: &egui::Painter, from: Pos2, to: Pos2, vertical_first: bool, st
     ));
 }
 
-fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Vec<Action>) {
-    let busy = project.is_operating();
+fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Actions) {
+    let act = can::act(project, "");
     let wt = project.worktree();
     let branch = wt.and_then(|wt| wt.branch.clone());
     let is_head = wt.and_then(|wt| wt.head) == Some(commit.id);
     let short_id = short(&commit.id);
     let in_main = project.in_main_suffix();
     let main_head = project.main_worktree().and_then(|wt| wt.head);
-    let mut item = |ui: &mut Ui, label: &str, enabled: bool, action: Action| {
-        if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
-            actions.push(action);
-            ui.close();
-        }
-    };
-
     // The branches on this commit, like the sidebar offers them.
     if let Some(repo) = &project.snapshot {
         let mut offered = false;
         for b in repo.branches.iter().filter(|b| b.target == commit.id) {
-            let name = &b.name;
-            match repo.worktree_for_branch(name) {
-                Some(wt) if same_path(&wt.path, &project.nav.worktree) => continue,
-                Some(wt) => item(
-                    ui,
-                    &if wt.is_main {
-                        format!("Go to {name} in the main folder")
-                    } else {
-                        format!("Open the worktree of {name}")
-                    },
-                    true,
-                    Action::OpenWorktree(wt.path.clone()),
-                ),
-                None => {
-                    item(
-                        ui,
-                        &format!("Check out {name}{in_main}"),
-                        !busy,
-                        Action::Checkout(name.clone()),
-                    );
-                    item(
-                        ui,
-                        &format!("New worktree for {name}…"),
-                        !busy,
-                        Action::NewWorktree(Some(name.clone())),
-                    );
-                }
-            }
-            offered = true;
+            offered |= branch_menu::local_items(ui, project, repo, &b.name, true, actions);
         }
         let mut tracked: Vec<&str> = Vec::new();
         for r in repo
@@ -563,49 +543,42 @@ fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Ve
             .iter()
             .filter(|r| r.target == commit.id)
         {
-            // A local branch of that name is offered above, or points
-            // elsewhere; origin/HEAD is no branch to check out.
+            // Two remotes can have a branch of the same name: offer one.
             let local = r.branch_name();
-            if local == "HEAD" || repo.branch(local).is_some() || tracked.contains(&local) {
-                continue;
+            if !tracked.contains(&local)
+                && branch_menu::tracking_items(ui, project, repo, r, true, actions)
+            {
+                tracked.push(local);
+                offered = true;
             }
-            tracked.push(local);
-            item(
-                ui,
-                &format!("Check out {} as {local}{in_main}", r.name),
-                !busy,
-                Action::CheckoutRemote {
-                    local: local.to_owned(),
-                    remote: r.name.clone(),
-                },
-            );
-            item(
-                ui,
-                &format!("New worktree for {}…", r.name),
-                !busy,
-                Action::NewWorktree(Some(r.name.clone())),
-            );
-            offered = true;
         }
         if offered {
             ui.separator();
         }
     }
+    let mut item = |ui: &mut Ui, label: &str, can: &Can, action: Action| {
+        can_item(ui, label, can, actions, action);
+    };
+    let moves = can::moves_head(project, &project.nav.worktree, "");
+    // Not on the commit the branch is on already.
+    let not_head = if is_head {
+        can::no("This is the current commit")
+    } else {
+        moves.clone()
+    };
     item(
         ui,
         "New branch here…",
-        !busy,
-        Action::OpenDialog(DialogKind::NewBranch {
-            name: String::new(),
-            start: commit.id.to_string(),
-            start_label: format!("{short_id} {}", commit.summary),
-            checkout: true,
-        }),
+        &act,
+        Action::OpenDialog(DialogKind::new_branch(
+            commit.id.to_string(),
+            format!("{short_id} {}", commit.summary),
+        )),
     );
     item(
         ui,
         "New tag here…",
-        !busy,
+        &act,
         Action::OpenDialog(DialogKind::NewTag {
             name: String::new(),
             message: String::new(),
@@ -616,23 +589,40 @@ fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Ve
     item(
         ui,
         &format!("Check out this commit (detached){in_main}"),
-        !busy && main_head != Some(commit.id),
+        &if main_head == Some(commit.id) {
+            can::no("The main folder is on this commit already")
+        } else {
+            can::checkout(project)
+        },
         Action::CheckoutDetached(commit.id),
     );
     ui.separator();
     let onto = branch.as_deref().unwrap_or("HEAD");
+    // Picking one side of a merge (-m) is not offered.
+    let not_merge = |done: &str, can: &Can| {
+        if commit.parents.len() > 1 {
+            can::no(format!("Merge commits can't be {done} here"))
+        } else {
+            can.clone()
+        }
+    };
     item(
         ui,
         &format!("Cherry-pick onto {onto}"),
-        !busy && !is_head,
+        &not_merge("cherry-picked", &not_head),
         Action::CherryPick(commit.id),
     );
-    item(ui, "Revert this commit", !busy, Action::Revert(commit.id));
+    item(
+        ui,
+        "Revert this commit",
+        &not_merge("reverted", &moves),
+        Action::Revert(commit.id),
+    );
     if let Some(branch) = &branch {
         item(
             ui,
             &format!("Reset {branch} to here…"),
-            !busy && !is_head,
+            &not_head,
             Action::OpenDialog(DialogKind::Reset {
                 target: commit.id.to_string(),
                 target_label: short_id.clone(),
@@ -645,7 +635,7 @@ fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Ve
         item(
             ui,
             "Undo this commit (keep changes)",
-            !busy,
+            &moves,
             Action::UndoCommit,
         );
     }
@@ -667,12 +657,12 @@ fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Ve
 // ---------------------------------------------------------------------------
 // Details pane
 
-fn details_pane(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
+fn details_pane(ui: &mut Ui, project: &Project, actions: &mut Actions) {
     let Some(id) = project.selected else {
         empty_state(ui, "No commit selected", "Pick a commit on the left.");
         return;
     };
-    if id.is_null() {
+    if history::is_worktree_id(&id) {
         uncommitted(ui, project, actions);
         return;
     }
@@ -690,12 +680,12 @@ fn details_pane(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
     }
 }
 
-fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &mut Vec<Action>) {
+fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &mut Actions) {
     ui.spacing_mut().item_spacing.y = 6.0;
     ui.add(
         egui::Label::new(
             RichText::new(d.summary())
-                .font(theme::semibold(15.0))
+                .font(theme::title())
                 .color(color::text()),
         )
         .wrap(),
@@ -711,15 +701,14 @@ fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &m
             for label in labels {
                 let (fg, font) = label_style(label);
                 let galley = ui.painter().layout_no_wrap(label.name.clone(), font, fg);
-                let width = galley.size().x + 10.0;
-                let (rect, _) = ui.allocate_exact_size(vec2(width, 18.0), Sense::hover());
+                let (rect, _) = ui.allocate_exact_size(chip_size(&galley), Sense::hover());
                 chip(
                     ui.painter(),
                     rect.left(),
                     rect.center().y,
                     galley,
                     fg,
-                    width,
+                    rect.width(),
                 );
             }
         });
@@ -809,9 +798,8 @@ fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &m
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(format!(
-                "{} file{} changed",
-                d.files.len(),
-                if d.files.len() == 1 { "" } else { "s" }
+                "{} changed",
+                plural(d.files.len(), "file", "files")
             ))
             .font(theme::semibold(theme::BODY_SIZE))
             .color(color::text()),
@@ -828,21 +816,9 @@ fn commit_details(ui: &mut Ui, d: &CommitDetails, project: &Project, actions: &m
     }
     let open = project.commit_diff.as_ref().map(|v| &v.key);
     for file in &d.files {
-        let key = FileKey {
-            source: Source::Commit(d.id),
-            path: file.path.clone(),
-        };
-        let response = file_row(ui, file, open == Some(&key), None);
-        response.context_menu(|ui| {
-            if ui.button("File history").clicked() {
-                actions.push(Action::OpenFileHistory(file.path.clone()));
-                ui.close();
-            }
-            if ui.button("Copy path").clicked() {
-                ui.ctx().copy_text(file.path.clone());
-                ui.close();
-            }
-        });
+        let key = FileKey::changed(Source::Commit(d.id), file);
+        let response = file_row(ui, file, open == Some(&key), Extras::default());
+        response.context_menu(|ui| file_row::menu_items(ui, &file.path, actions));
         if response.clicked() {
             actions.push(Action::SelectCommitFile(key));
         }
@@ -861,91 +837,15 @@ fn person(ui: &mut Ui, name: &str, email: &str) {
     });
 }
 
-pub fn change_color(change: Change) -> Color32 {
-    match change {
-        Change::Added => color::added(),
-        Change::Deleted | Change::Unmerged => color::removed(),
-        Change::Renamed | Change::Copied => color::lanes()[3],
-        Change::TypeChanged => color::text_weak(),
-        Change::Modified | Change::None => color::dirty_fg(),
-    }
-}
-
-/// A file path as "name" in front and the folder faint behind it.
-pub fn paint_path(ui: &Ui, x: f32, y: f32, path: &str, max_width: f32) {
-    let (dir, name) = match path.rsplit_once('/') {
-        Some((dir, name)) => (dir, name),
-        None => ("", path),
-    };
-    let name = elided(ui, name, theme::body(), color::text(), max_width);
-    let name_width = name.size().x;
-    paint_galley_left(ui.painter(), x, y, name, color::text());
-    let room = max_width - name_width - 8.0;
-    if !dir.is_empty() && room > 30.0 {
-        let dir = elided(ui, dir, theme::small(), color::text_faint(), room);
-        paint_galley_left(
-            ui.painter(),
-            x + name_width + 8.0,
-            y,
-            dir,
-            color::text_faint(),
-        );
-    }
-}
-
-pub fn paint_change_letter(ui: &Ui, x: f32, y: f32, change: Change) {
-    let c = change_color(change);
-    let rect = Rect::from_min_size(pos2(x, y - 8.0), vec2(16.0, 16.0));
-    ui.painter().rect_filled(rect, 3, c.gamma_multiply(0.16));
-    ui.painter().text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        change.letter(),
-        theme::semibold(theme::SMALL_SIZE),
-        c,
-    );
-}
-
-/// A changed file of a commit or stash; `note` replaces the line counts.
-pub fn file_row(ui: &mut Ui, file: &FileChange, selected: bool, note: Option<&str>) -> Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
-    if selected {
-        ui.painter().rect_filled(rect, 4, color::selected_row_bg());
-    } else if response.hovered() {
-        ui.painter().rect_filled(rect, 4, color::hover_row_bg());
-    }
-    let y = rect.center().y;
-    paint_change_letter(ui, rect.left() + 4.0, y, file.change);
-
-    let stats = match (note, file.added, file.removed) {
-        (Some(note), _, _) => note.to_owned(),
-        (None, Some(a), Some(r)) => format!("+{a} −{r}"),
-        _ => "binary".to_owned(),
-    };
-    let stats = ui
-        .painter()
-        .layout_no_wrap(stats, theme::small(), color::text_faint());
-    let stats_x = rect.right() - 4.0 - stats.size().x;
-    paint_galley_left(ui.painter(), stats_x, y, stats, color::text_faint());
-
-    let x = rect.left() + 28.0;
-    paint_path(ui, x, y, &file.path, stats_x - 8.0 - x);
-    let tip = match &file.orig_path {
-        Some(orig) => format!("{orig} → {}", file.path),
-        None => file.path.clone(),
-    };
-    response.on_hover_text(tip)
-}
-
-fn uncommitted(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
+fn uncommitted(ui: &mut Ui, project: &Project, actions: &mut Actions) {
     ui.spacing_mut().item_spacing.y = 6.0;
     ui.label(
         RichText::new("Uncommitted changes")
-            .font(theme::semibold(15.0))
+            .font(theme::title())
             .color(color::text()),
     );
     let Some(wt) = project.worktree() else { return };
-    ui.label(RichText::new(graft_core::wsl::display(&wt.path)).color(color::text_weak()));
+    ui.label(RichText::new(graft_core::paths::display(&wt.path)).color(color::text_weak()));
     let Some(status) = &wt.status else { return };
     let staged = status.staged().count();
     let unstaged = status.unstaged().count();
@@ -967,22 +867,45 @@ fn uncommitted(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for entry in &status.entries {
-                let (rect, response) =
-                    ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
-                if response.hovered() {
-                    ui.painter().rect_filled(rect, 4, color::hover_row_bg());
-                }
-                let change = if entry.is_conflicted() {
-                    Change::Unmerged
-                } else if entry.is_staged() {
-                    entry.index
-                } else {
-                    entry.unstaged_change()
-                };
+                let (rect, _) = file_row::allocate(ui, false, Sense::hover());
+                let change = entry.shown_change();
                 let y = rect.center().y;
-                paint_change_letter(ui, rect.left() + 4.0, y, change);
-                let x = rect.left() + 28.0;
-                paint_path(ui, x, y, &entry.path, rect.right() - x - 4.0);
+                paint_file(
+                    ui,
+                    rect.left() + 4.0,
+                    y,
+                    change,
+                    &entry.path,
+                    rect.right() - 4.0,
+                );
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Header and rows place the columns from one method: right to left
+    /// commit, date, author; a hidden column takes no room.
+    #[test]
+    fn columns_line_up_from_the_right() {
+        let rect = Rect::from_min_max(pos2(0.0, 0.0), pos2(1000.0, 20.0));
+        let mut cols = Columns {
+            graph: 100.0,
+            author: 120.0,
+            date: 90.0,
+            commit: 70.0,
+        };
+        let xs = cols.xs(rect);
+        assert_eq!(xs.description, 106.0);
+        assert_eq!(xs.commit, Some(930.0));
+        assert_eq!(xs.date, Some(840.0));
+        assert_eq!(xs.author, Some(720.0));
+        assert_eq!(xs.description_end, 720.0);
+        cols.author = 0.0;
+        let xs = cols.xs(rect);
+        assert_eq!(xs.author, None);
+        assert_eq!(xs.description_end, 840.0);
+    }
 }

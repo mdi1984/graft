@@ -1,8 +1,41 @@
+//! The plain data a repository snapshot is made of. Only data and the rules
+//! that read it; loading and changing it live in the feature modules.
+
 use std::path::{Path, PathBuf};
 
 pub use gix::ObjectId as Oid;
 
-use crate::status::WorktreeStatus;
+use crate::paths::same_path;
+
+/// Names taken as the default branch, in this order, when origin/HEAD does
+/// not name one that exists locally.
+pub(crate) const DEFAULT_BRANCHES: [&str; 4] = ["main", "master", "trunk", "develop"];
+
+/// The remote `git clone` sets up: the one to use when there is a choice.
+pub const ORIGIN: &str = "origin";
+
+/// A local branch as a revision, by its full name: git takes a short name
+/// for a tag when a tag is named the same (and `:short` names then read
+/// `heads/x`), so branches are always passed this way and read back with
+/// [`branch_name`].
+pub fn local_ref(branch: &str) -> String {
+    format!("refs/heads/{branch}")
+}
+
+/// A remote branch (`origin/x`) as a revision; see [`local_ref`].
+pub fn remote_ref(branch: &str) -> String {
+    format!("refs/remotes/{branch}")
+}
+
+/// The branch a full ref names: `refs/heads/x` is `x`,
+/// `refs/remotes/origin/x` is `origin/x`.
+pub(crate) fn branch_name(full: &str) -> Option<&str> {
+    full.strip_prefix("refs/heads/")
+        .or_else(|| full.strip_prefix("refs/remotes/"))
+}
+
+/// Why main must stay as it is while it shows a preview.
+const PREVIEW_SHOWN: &str = "The main folder shows a preview. Restore main first.";
 
 /// Everything the sidebar, toolbar and tabs need to know about one repository.
 #[derive(Clone, Debug, Default)]
@@ -19,7 +52,7 @@ pub struct RepoSnapshot {
     pub remote_default: Option<String>,
     pub stash_count: usize,
     /// Another worktree shown in the main worktree ("Preview in main").
-    pub preview: Option<crate::preview::Preview>,
+    pub preview: Option<Preview>,
 }
 
 impl RepoSnapshot {
@@ -27,38 +60,115 @@ impl RepoSnapshot {
         self.worktrees.iter().find(|wt| wt.is_main)
     }
 
+    /// The worktree at `path`.
+    pub fn worktree_at(&self, path: &Path) -> Option<&Worktree> {
+        self.worktrees.iter().find(|wt| same_path(&wt.path, path))
+    }
+
     pub fn branch(&self, name: &str) -> Option<&Branch> {
         self.branches.iter().find(|b| b.name == name)
     }
 
-    /// Worktree that has `branch` checked out, if any.
-    pub fn worktree_for_branch(&self, branch: &str) -> Option<&Worktree> {
-        self.worktrees
-            .iter()
-            .find(|wt| wt.branch.as_deref() == Some(branch))
+    /// Why git must not move HEAD (commit, check out, reset, cherry-pick,
+    /// merge, …) in the worktree at `path` now: main shows a preview, and
+    /// Restore main would leave what that made behind.
+    pub fn head_blocked(&self, path: &Path) -> Option<&'static str> {
+        let main = self.main_worktree()?;
+        (self.preview.is_some() && same_path(&main.path, path)).then_some(PREVIEW_SHOWN)
     }
 
-    /// The default branch: origin/HEAD's target if it exists locally, else
-    /// the first of main, master, trunk, develop.
-    pub fn default_branch(&self) -> Option<&str> {
-        let remote = self.remote_default.as_deref();
-        remote
-            .into_iter()
-            .chain(["main", "master", "trunk", "develop"])
-            .find(|name| self.branch(name).is_some())
+    /// Why the branch `name` must not be renamed now: Restore main goes
+    /// back to it by name.
+    pub fn rename_blocked(&self, name: &str) -> Option<&'static str> {
+        (self.preview.is_some() && self.main_branch() == Some(name)).then_some(PREVIEW_SHOWN)
     }
 
-    /// The remote branch that `branch` tracks, if it still exists.
-    pub fn upstream_of(&self, branch: &str) -> Option<&str> {
-        match &self.branch(branch)?.upstream {
-            Upstream::Tracking { name, .. } => Some(name),
-            Upstream::None | Upstream::Gone { .. } => None,
+    /// The branch the main worktree is on (see [`Worktree::on_branch`]).
+    /// During a preview git sees main detached, but it is still on the
+    /// branch Restore main goes back to.
+    pub fn main_branch(&self) -> Option<&str> {
+        match &self.preview {
+            Some(preview) => match &preview.restore {
+                Restore::Branch(branch) => Some(branch),
+                Restore::Detached(_) => None,
+            },
+            None => self.main_worktree()?.on_branch(),
         }
+    }
+
+    /// Worktree that has `branch` checked out, if any (main's branch as
+    /// [`Self::main_branch`] sees it, a rebased one included).
+    pub fn worktree_for_branch(&self, branch: &str) -> Option<&Worktree> {
+        self.worktrees.iter().find(|wt| {
+            let on = if wt.is_main {
+                self.main_branch()
+            } else {
+                wt.on_branch()
+            };
+            on == Some(branch)
+        })
+    }
+
+    /// A branch, remote branch or tag picked from one of Graft's lists by
+    /// name, as a revision (see [`local_ref`]); anything else (a commit id)
+    /// as it is. A local branch wins over a remote branch or tag of the
+    /// same name.
+    pub fn rev(&self, name: &str) -> String {
+        if self.branch(name).is_some() {
+            local_ref(name)
+        } else if self.remote_branches.iter().any(|b| b.name == name) {
+            remote_ref(name)
+        } else if self.tags.iter().any(|t| t.name == name) {
+            format!("refs/tags/{name}")
+        } else {
+            name.to_owned()
+        }
+    }
+
+    /// What can be merged into the branch `into`: the other local branches,
+    /// then the remote branches.
+    pub fn merge_choices<'a>(&'a self, into: &'a str) -> impl Iterator<Item = &'a str> {
+        self.branches
+            .iter()
+            .map(|b| b.name.as_str())
+            .filter(move |name| *name != into)
+            .chain(self.remote_branches.iter().map(|b| b.name.as_str()))
+    }
+
+    /// Local branches that could be the default branch, best first:
+    /// origin/HEAD's target, then [`DEFAULT_BRANCHES`].
+    pub(crate) fn default_branches(&self) -> impl Iterator<Item = &str> {
+        self.remote_default
+            .as_deref()
+            .into_iter()
+            .chain(DEFAULT_BRANCHES)
+            .filter(|name| self.branch(name).is_some())
+    }
+
+    /// The default branch: the first of [`Self::default_branches`].
+    pub fn default_branch(&self) -> Option<&str> {
+        self.default_branches().next()
     }
 
     /// True if any worktree has uncommitted changes.
     pub fn is_dirty(&self) -> bool {
-        self.worktrees.iter().any(|wt| wt.dirty() > 0)
+        self.worktrees.iter().any(Worktree::is_dirty)
+    }
+
+    /// Every commit a ref or worktree points at, sorted, without
+    /// duplicates: where the history walk starts.
+    pub fn tips(&self) -> Vec<Oid> {
+        let mut tips: Vec<Oid> = self
+            .branches
+            .iter()
+            .map(|b| b.target)
+            .chain(self.remote_branches.iter().map(|b| b.target))
+            .chain(self.tags.iter().map(|t| t.target))
+            .chain(self.worktrees.iter().filter_map(|wt| wt.head))
+            .collect();
+        tips.sort();
+        tips.dedup();
+        tips
     }
 }
 
@@ -75,7 +185,10 @@ pub struct Worktree {
     /// `None` if status could not be read (e.g. prunable worktree).
     pub status: Option<WorktreeStatus>,
     /// A merge, cherry-pick, revert or rebase that stopped part-way.
-    pub in_progress: Option<crate::conflicts::InProgress>,
+    pub in_progress: Option<InProgress>,
+    /// Files deleted here can go to the Recycle Bin, see
+    /// [`crate::paths::has_recycle_bin`].
+    pub recycle_bin: bool,
 }
 
 impl Worktree {
@@ -87,9 +200,20 @@ impl Worktree {
         }
     }
 
+    /// The branch the worktree is on: the checked-out one, or the one a
+    /// stopped rebase works on.
+    pub fn on_branch(&self) -> Option<&str> {
+        let rebased = || self.in_progress.as_ref()?.branch.as_deref();
+        self.branch.as_deref().or_else(rebased)
+    }
+
     /// Number of changed files (staged, unstaged, untracked, conflicted).
     pub fn dirty(&self) -> usize {
         self.status.as_ref().map_or(0, |s| s.entries.len())
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.dirty() > 0
     }
 
     pub fn ahead(&self) -> usize {
@@ -99,6 +223,88 @@ impl Worktree {
     pub fn behind(&self) -> usize {
         self.status.as_ref().map_or(0, |s| s.behind)
     }
+}
+
+/// An operation that stopped part-way, usually because of conflicts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Operation {
+    Merge,
+    CherryPick,
+    Revert,
+    Rebase,
+}
+
+impl Operation {
+    /// The git command that runs, continues and aborts it.
+    pub(crate) fn command(self) -> &'static str {
+        match self {
+            Operation::Merge => "merge",
+            Operation::CherryPick => "cherry-pick",
+            Operation::Revert => "revert",
+            Operation::Rebase => "rebase",
+        }
+    }
+
+    pub fn noun(self) -> &'static str {
+        match self {
+            Operation::Merge => "Merge",
+            Operation::CherryPick => "Cherry-pick",
+            Operation::Revert => "Revert",
+            Operation::Rebase => "Rebase",
+        }
+    }
+}
+
+/// The files and folders in a git dir that mark an operation in progress,
+/// checked in this order.
+pub(crate) const OPERATION_MARKERS: [(&str, Operation); 5] = [
+    ("rebase-merge", Operation::Rebase),
+    ("rebase-apply", Operation::Rebase),
+    ("MERGE_HEAD", Operation::Merge),
+    ("CHERRY_PICK_HEAD", Operation::CherryPick),
+    ("REVERT_HEAD", Operation::Revert),
+];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InProgress {
+    pub kind: Operation,
+    /// What is being done, e.g. "Merge branch 'feature/x'".
+    pub title: String,
+    /// The branch a rebase works on: git sees the worktree detached until
+    /// the rebase ends on that branch.
+    pub branch: Option<String>,
+}
+
+/// What the main worktree goes back to after a preview.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Restore {
+    Branch(String),
+    Detached(Oid),
+}
+
+impl Restore {
+    /// The branch name, or the short commit id.
+    pub fn label(&self) -> String {
+        match self {
+            Restore::Branch(branch) => branch.clone(),
+            Restore::Detached(id) => short(id),
+        }
+    }
+}
+
+/// Another worktree shown in the main worktree ("Preview in main").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Preview {
+    pub restore: Restore,
+    /// The worktree being previewed.
+    pub source: PathBuf,
+    /// Its commit, now checked out (detached) in main.
+    pub head: Oid,
+    /// Files the preview created in main, removed again on restore.
+    pub added: Vec<String>,
+    /// The tree of main's files as the preview left them (untracked files
+    /// included): whether main changed since. `None` if unknown.
+    pub shown: Option<Oid>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -144,14 +350,181 @@ pub struct Tag {
     pub name: String,
     /// The commit the tag points at (annotated tags are peeled).
     pub target: Oid,
-    pub annotated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Remote {
     pub name: String,
-    pub fetch_url: String,
-    pub push_url: String,
+    /// Its (first) URL, or its push URL when it has only that.
+    pub url: String,
+    /// `url` is a push URL: the remote has no fetch URL.
+    pub push_only: bool,
+}
+
+/// A worktree's uncommitted changes and how far it is ahead of and behind
+/// its upstream.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorktreeStatus {
+    pub ahead: usize,
+    pub behind: usize,
+    pub entries: Vec<StatusEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StatusEntry {
+    pub path: String,
+    /// Source path of a rename or copy.
+    pub orig_path: Option<String>,
+    /// Change between HEAD and the index (the "staged" side).
+    pub index: Change,
+    /// Change between the index and the working tree (the "unstaged" side).
+    pub worktree: Change,
+    pub kind: EntryKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryKind {
+    Tracked,
+    Untracked,
+    /// Merge conflict.
+    Conflicted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Change {
+    None,
+    Modified,
+    TypeChanged,
+    Added,
+    Deleted,
+    Renamed,
+    Copied,
+    Unmerged,
+}
+
+impl Change {
+    /// A status letter as git prints it (porcelain `XY`, `--name-status`).
+    pub(crate) fn from_code(c: u8) -> Self {
+        match c {
+            b'M' => Self::Modified,
+            b'T' => Self::TypeChanged,
+            b'A' => Self::Added,
+            b'D' => Self::Deleted,
+            b'R' => Self::Renamed,
+            b'C' => Self::Copied,
+            b'U' => Self::Unmerged,
+            _ => Self::None,
+        }
+    }
+
+    /// One-letter badge as shown in the file lists.
+    pub fn letter(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Modified => "M",
+            Self::TypeChanged => "T",
+            Self::Added => "A",
+            Self::Deleted => "D",
+            Self::Renamed => "R",
+            Self::Copied => "C",
+            Self::Unmerged => "U",
+        }
+    }
+}
+
+impl StatusEntry {
+    pub fn is_staged(&self) -> bool {
+        self.kind == EntryKind::Tracked && self.index != Change::None
+    }
+
+    pub fn is_unstaged(&self) -> bool {
+        match self.kind {
+            EntryKind::Untracked => true,
+            EntryKind::Tracked => self.worktree != Change::None,
+            EntryKind::Conflicted => false,
+        }
+    }
+
+    pub fn is_conflicted(&self) -> bool {
+        self.kind == EntryKind::Conflicted
+    }
+
+    /// Badge for the unstaged list ("?" counts as added).
+    pub(crate) fn unstaged_change(&self) -> Change {
+        match self.kind {
+            EntryKind::Untracked => Change::Added,
+            _ => self.worktree,
+        }
+    }
+
+    /// Badge where the file is listed once: its badge in the first
+    /// [`FileList`] it is in.
+    pub fn shown_change(&self) -> Change {
+        if self.is_conflicted() {
+            Change::Unmerged
+        } else if self.is_staged() {
+            self.index
+        } else {
+            self.unstaged_change()
+        }
+    }
+}
+
+/// The lists of changed files in File status, top to bottom. A file with
+/// staged and unstaged changes is in both of those.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileList {
+    Conflicts,
+    Staged,
+    Unstaged,
+}
+
+impl FileList {
+    /// In display order.
+    pub const ALL: [FileList; 3] = [FileList::Conflicts, FileList::Staged, FileList::Unstaged];
+
+    pub fn contains(self, entry: &StatusEntry) -> bool {
+        match self {
+            FileList::Conflicts => entry.is_conflicted(),
+            FileList::Staged => entry.is_staged(),
+            FileList::Unstaged => entry.is_unstaged(),
+        }
+    }
+
+    /// The badge `entry` shows in this list.
+    pub fn change(self, entry: &StatusEntry) -> Change {
+        match self {
+            FileList::Conflicts => Change::Unmerged,
+            FileList::Staged => entry.index,
+            FileList::Unstaged => entry.unstaged_change(),
+        }
+    }
+}
+
+impl WorktreeStatus {
+    pub fn in_list(&self, list: FileList) -> impl Iterator<Item = &StatusEntry> {
+        self.entries.iter().filter(move |e| list.contains(e))
+    }
+
+    pub fn staged(&self) -> impl Iterator<Item = &StatusEntry> {
+        self.in_list(FileList::Staged)
+    }
+
+    pub fn unstaged(&self) -> impl Iterator<Item = &StatusEntry> {
+        self.in_list(FileList::Unstaged)
+    }
+
+    pub fn conflicted(&self) -> impl Iterator<Item = &StatusEntry> {
+        self.in_list(FileList::Conflicts)
+    }
+
+    /// Every row of File status in display order: each list in
+    /// [`FileList::ALL`] order, entries in status order within a list.
+    pub fn listed(&self) -> impl Iterator<Item = (FileList, &StatusEntry)> {
+        FileList::ALL
+            .into_iter()
+            .flat_map(move |list| self.in_list(list).map(move |e| (list, e)))
+    }
 }
 
 /// First 7 hex digits of an object id.
@@ -161,34 +534,7 @@ pub fn short(oid: &Oid) -> String {
     s
 }
 
-/// The all-zero id. In the history it stands for "uncommitted changes".
+/// The all-zero id: no object has it.
 pub fn null_oid() -> Oid {
     Oid::null(gix::hash::Kind::Sha1)
-}
-
-/// Whether `rel` under `root` passes through a symlink or junction (or is
-/// one). Writing there could land outside the repository.
-pub fn through_link(root: &Path, rel: &Path) -> bool {
-    let mut at = root.to_path_buf();
-    rel.components().any(|part| {
-        at.push(part);
-        std::fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink())
-    })
-}
-
-/// Compare paths the way Windows does: case-insensitive, either slash, no
-/// trailing separator, `\\wsl$` and `\\wsl.localhost` alike.
-pub fn same_path(a: &Path, b: &Path) -> bool {
-    let norm = |p: &Path| {
-        let text = p
-            .to_string_lossy()
-            .replace('/', "\\")
-            .trim_end_matches('\\')
-            .to_lowercase();
-        match text.strip_prefix(r"\\wsl$\") {
-            Some(rest) => format!(r"\\wsl.localhost\{rest}"),
-            None => text,
-        }
-    };
-    norm(a) == norm(b)
 }

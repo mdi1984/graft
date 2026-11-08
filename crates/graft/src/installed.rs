@@ -3,6 +3,8 @@
 
 use std::path::Path;
 
+use crate::version::Version;
+
 /// The record Inno Setup keeps for Graft's AppId (see installer/graft.iss).
 pub const KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{F50FBE64-D67E-4FC3-A67B-CF64F3A8535F}_is1";
 
@@ -39,9 +41,8 @@ pub fn record_version(key: &str, exe: &Path, version: &str) -> bool {
     if !by_setup(key, exe) {
         return false;
     }
-    if let Some(recorded) = self::version(key)
-        && numbers(&recorded) >= numbers(version)
-    {
+    let recorded = self::version(key).and_then(|v| Version::parse(&v));
+    if recorded.is_some() && recorded >= Version::parse(version) {
         return false;
     }
     match reg::set(key, "DisplayVersion", version) {
@@ -53,27 +54,16 @@ pub fn record_version(key: &str, exe: &Path, version: &str) -> bool {
     }
 }
 
-/// "1.0.10" as [1, 0, 10], so versions compare by number; anything that is
-/// not a number counts as 0.
-fn numbers(version: &str) -> Vec<u64> {
-    version
-        .split('.')
-        .map(|part| part.trim().parse().unwrap_or(0))
-        .collect()
-}
-
 /// Strings under HKEY_CURRENT_USER.
 #[cfg(windows)]
 mod reg {
     use std::ptr::null_mut;
 
+    use crate::native::wide;
+
     use windows_sys::Win32::System::Registry::{
         HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegGetValueW, RegSetKeyValueW,
     };
-
-    fn wide(text: &str) -> Vec<u16> {
-        text.encode_utf16().chain(Some(0)).collect()
-    }
 
     pub fn get(key: &str, name: &str) -> Option<String> {
         let (key, name) = (wide(key), wide(name));
@@ -135,6 +125,8 @@ mod reg {
     #[cfg(test)]
     pub fn delete(key: &str) {
         use windows_sys::Win32::System::Registry::RegDeleteTreeW;
+
+        use crate::native::wide;
         let key = wide(key);
         // SAFETY: as in `get`.
         unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, key.as_ptr()) };

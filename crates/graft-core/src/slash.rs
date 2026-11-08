@@ -1,23 +1,32 @@
 //! Slash: clean up branches and worktrees that are done. Fetch with prune,
-//! then propose branches whose upstream is gone, branches merged into the
-//! default branch, branches never pushed (not pre-selected), and worktree
-//! entries whose folder is missing. Worktrees go before their branches.
+//! then propose branches whose upstream is gone, branches whose own commits
+//! are merged into the default branch, branches never pushed (not
+//! pre-selected), and worktree entries whose folder is missing. Worktrees go before their branches.
 //! Never touched: the main worktree's branch, the default branch, protected
 //! names, locked or dirty worktrees. Every deleted branch is reported with its
 //! commit so it can be restored.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow, bail};
 
-use crate::cli::{CancelToken, Git};
-use crate::model::{Oid, RepoSnapshot, Upstream};
-use crate::repo::Progress;
-use crate::worktree::glob_match;
-use crate::{remote, snapshot, worktree};
+use crate::cli::{Git, Progress};
+use crate::jobs::CancelToken;
+use crate::model::{
+    Branch, DEFAULT_BRANCHES, Oid, RepoSnapshot, Upstream, Worktree, branch_name, local_ref,
+};
+use crate::paths::{display, folder_name, glob_match, pattern_list};
+use crate::{refs, remote, repo, snapshot, worktree};
 
-/// Branch names Slash never proposes, besides the default branch.
-pub const PROTECTED: &str = "main, master, develop, trunk, release/*";
+/// The branch name patterns Slash never proposes unless the user changes
+/// them, besides the default branch: the usual default branch names and
+/// release branches.
+pub fn default_protected() -> String {
+    let mut patterns = DEFAULT_BRANCHES.to_vec();
+    patterns.push("release/*");
+    patterns.join(", ")
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reason {
@@ -71,11 +80,75 @@ pub struct Outcome {
 }
 
 fn protected(name: &str, patterns: &str) -> bool {
-    patterns
-        .split(',')
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .any(|p| glob_match(p, name))
+    pattern_list(patterns).any(|p| glob_match(p, name))
+}
+
+/// How a branch started: the oldest entry of its reflog, when that is the
+/// branch's creation.
+struct Created {
+    /// The commit it was created at.
+    at: Oid,
+    /// What it was created from, as git wrote it: `origin/x`,
+    /// `refs/remotes/origin/x`, `HEAD`, …
+    from: String,
+}
+
+impl Created {
+    /// Checked out from its own remote branch (`x` from `origin/x`, which
+    /// it tracks), rather than started as new work.
+    fn checked_out_from_upstream(&self, branch: &Branch) -> bool {
+        let Upstream::Tracking { name: upstream, .. } = &branch.upstream else {
+            return false;
+        };
+        let from = branch_name(&self.from).unwrap_or(&self.from);
+        from == upstream && upstream.ends_with(&format!("/{}", branch.name))
+    }
+}
+
+/// How each of `branches` started. Left out: branches without a reflog
+/// (expired, or never written), and those whose oldest entries expired
+/// while newer ones stayed (gc), where the oldest left can be any commit.
+fn created(git: &Git, branches: &[String]) -> Result<HashMap<String, Created>> {
+    if branches.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let input: String = branches.iter().map(|b| local_ref(b) + "\n").collect();
+    // On stdin: hundreds of merged branches do not fit on the command line.
+    let args = [
+        "log",
+        "-g",
+        "--ignore-missing",
+        "--stdin",
+        "--format=%gD%x00%H%x00%gs",
+    ];
+    let out = git.run_input(args, input.as_bytes())?.stdout_str();
+    let mut oldest: HashMap<String, (u32, Option<Created>)> = HashMap::new();
+    for line in out.lines() {
+        let parsed = line.splitn(3, '\0').collect::<Vec<_>>();
+        let [selector, oid, subject] = parsed[..] else {
+            continue;
+        };
+        let Some((branch, index)) = selector.rsplit_once("@{").and_then(|(full, index)| {
+            Some((branch_name(full)?, index.strip_suffix('}')?.parse().ok()?))
+        }) else {
+            continue;
+        };
+        let created = subject
+            .strip_prefix("branch: Created from ")
+            .zip(Oid::from_hex(oid.as_bytes()).ok())
+            .map(|(from, at)| Created {
+                at,
+                from: from.to_owned(),
+            });
+        let entry = oldest.entry(branch.to_owned()).or_insert((index, None));
+        if index >= entry.0 {
+            *entry = (index, created);
+        }
+    }
+    Ok(oldest
+        .into_iter()
+        .filter_map(|(branch, (_, created))| Some((branch, created?)))
+        .collect())
 }
 
 /// Fetch (with prune) and work out what could go. `git` points at the main
@@ -88,15 +161,13 @@ pub fn scan(
 ) -> Result<Plan> {
     let has_remotes = !git.read(["remote"])?.trim().is_empty();
     let fetch_error = if has_remotes {
-        remote::fetch_prune(git, cancel, on_progress)
+        remote::fetch(git, true, cancel, on_progress)
             .err()
             .map(|e| format!("{e:#}"))
     } else {
         None
     };
-    if cancel.is_cancelled() {
-        anyhow::bail!("Cancelled");
-    }
+    cancel.check()?;
     let snap = snapshot::load(git)?;
     let mut plan = plan(git, &snap, patterns)?;
     plan.fetch_error = fetch_error;
@@ -110,17 +181,18 @@ pub fn plan(git: &Git, snap: &RepoSnapshot, patterns: &str) -> Result<Plan> {
         Some(d) => git
             .read([
                 "for-each-ref",
-                "--format=%(refname:short)",
+                "--format=%(refname)",
                 "--merged",
-                d,
+                &local_ref(d),
                 "refs/heads",
             ])?
             .lines()
-            .map(str::to_owned)
+            .filter_map(|full| Some(branch_name(full)?.to_owned()))
             .collect(),
         None => Vec::new(),
     };
-    let main_branch = snap.main_worktree().and_then(|wt| wt.branch.clone());
+    let created = created(git, &merged)?;
+    let main_branch = snap.main_branch();
 
     let mut out = Plan {
         default_branch: default.clone(),
@@ -142,7 +214,7 @@ pub fn plan(git: &Git, snap: &RepoSnapshot, patterns: &str) -> Result<Plan> {
             }
             continue;
         }
-        if main_branch.as_deref() == Some(name) {
+        if main_branch == Some(name) {
             if reason != Reason::NeverPushed {
                 out.kept.push(keep("checked out in the main worktree"));
             }
@@ -154,8 +226,10 @@ pub fn plan(git: &Git, snap: &RepoSnapshot, patterns: &str) -> Result<Plan> {
                 out.kept.push(keep("its worktree is locked"));
                 continue;
             }
-            Some(wt) if wt.dirty() > 0 => {
-                out.kept.push(keep("its worktree has uncommitted changes"));
+            // Unknown is not clean: removing it could lose work.
+            Some(wt) if wt.status.is_none() => {
+                out.kept
+                    .push(keep("the status of its worktree could not be read"));
                 continue;
             }
             Some(wt) if wt.in_progress.is_some() => {
@@ -163,15 +237,36 @@ pub fn plan(git: &Git, snap: &RepoSnapshot, patterns: &str) -> Result<Plan> {
                     .push(keep("its worktree has a merge or rebase in progress"));
                 continue;
             }
+            Some(wt) if wt.is_dirty() => {
+                out.kept.push(keep("its worktree has uncommitted changes"));
+                continue;
+            }
             Some(wt) => Some(wt.path.clone()),
             None => None,
+        };
+        // A branch created from the default branch is "merged" before it has
+        // commits of its own: a new worktree an agent has not committed in
+        // yet, with its ignored .env and build output. One checked out from
+        // its own remote branch is not new work. Without its start in the
+        // reflog (expired on old branches), a lone branch is pre-selected
+        // (undo brings it back) but a worktree, whose folder undo can't
+        // restore, is not.
+        let suggested = match (reason, created.get(name)) {
+            (Reason::Merged, Some(start))
+                if start.at == branch.target && !start.checked_out_from_upstream(branch) =>
+            {
+                out.kept.push(keep("it has no commits of its own yet"));
+                continue;
+            }
+            (Reason::Merged, created) => created.is_some() || worktree.is_none(),
+            (reason, _) => reason != Reason::NeverPushed,
         };
         out.candidates.push(Candidate {
             reason,
             branch: Some(name.to_owned()),
             target: Some(branch.target),
             worktree,
-            suggested: reason != Reason::NeverPushed,
+            suggested,
         });
     }
     for wt in snap.worktrees.iter().filter(|wt| wt.prunable && !wt.locked) {
@@ -196,7 +291,8 @@ pub fn plan(git: &Git, snap: &RepoSnapshot, patterns: &str) -> Result<Plan> {
 
 /// Delete the chosen candidates: worktrees first, then branches. Keeps going
 /// after an error and reports everything. Reports each step to
-/// `on_progress`; `cancel` stops before the next one.
+/// `on_progress`; `cancel` stops before the next one. A branch that moved
+/// since the scan (new commits) is kept, and so is its worktree.
 pub fn execute(
     git: &Git,
     chosen: &[Candidate],
@@ -204,10 +300,9 @@ pub fn execute(
     mut on_progress: impl FnMut(Progress),
 ) -> Outcome {
     let mut outcome = Outcome::default();
-    let removals: Vec<&PathBuf> = chosen
+    let removals: Vec<&Candidate> = chosen
         .iter()
-        .filter(|c| c.reason != Reason::MissingWorktree)
-        .filter_map(|c| c.worktree.as_ref())
+        .filter(|c| c.reason != Reason::MissingWorktree && c.worktree.is_some())
         .collect();
     let prune = chosen.iter().any(|c| c.reason == Reason::MissingWorktree);
     let deletions = chosen
@@ -221,31 +316,32 @@ pub fn execute(
             return false;
         }
         done += 1;
-        let line = format!("{what} ({done} of {total})");
-        on_progress(Progress {
-            phase: line.clone(),
-            fraction: Some((done - 1) as f32 / total.max(1) as f32),
-            line,
-        });
+        on_progress(Progress::step(
+            format!("{what} ({done} of {total})"),
+            (done - 1) as f32 / total.max(1) as f32,
+        ));
         true
     };
 
     let mut failed_worktrees = Vec::new();
-    for path in removals {
-        let name = path
-            .file_name()
-            .unwrap_or(path.as_os_str())
-            .to_string_lossy();
-        if !step(format!("Removing worktree {name}")) {
+    for c in removals {
+        let path = c.worktree.as_ref().expect("filtered");
+        if !step(format!("Removing worktree {}", folder_name(path))) {
             outcome.cancelled = true;
             return outcome;
         }
-        match worktree::remove(git, path, false) {
+        let removed = match (&c.branch, c.target) {
+            (Some(branch), Some(target)) if moved(git, branch, target) => Err(anyhow!(
+                "its branch {branch} moved since the scan (new commits?), so both were kept."
+            )),
+            _ => worktree::remove(git, path, false),
+        };
+        match removed {
             Ok(()) => outcome.worktrees_removed += 1,
             Err(e) => {
                 outcome
                     .errors
-                    .push(format!("Worktree {}: {e:#}", path.display()));
+                    .push(format!("Worktree {}: {e:#}", display(path)));
                 failed_worktrees.push(path.clone());
             }
         }
@@ -286,8 +382,8 @@ pub fn execute(
         if kept {
             continue;
         }
-        match git.run(["branch", "-D", "--end-of-options", branch]) {
-            Ok(_) => outcome.slashed.push(Slashed {
+        match delete_branch(git, branch, target) {
+            Ok(()) => outcome.slashed.push(Slashed {
                 branch: branch.clone(),
                 target,
             }),
@@ -297,8 +393,62 @@ pub fn execute(
     outcome
 }
 
+/// Whether `branch` no longer points at `target`, the commit the scan saw
+/// (or cannot be read).
+fn moved(git: &Git, branch: &str, target: Oid) -> bool {
+    !matches!(git.rev(&local_ref(branch)), Ok(Some(at)) if at == target)
+}
+
+const MOVED: &str = "it moved since the scan (new commits?), so it was kept.";
+
+/// Delete `branch` only while it is still at `target` (git checks and
+/// deletes in one step) and no worktree has it checked out or is rebasing
+/// it, then drop its settings (upstream and the like) as `git branch -D`
+/// would.
+fn delete_branch(git: &Git, branch: &str, target: Oid) -> Result<()> {
+    if moved(git, branch, target) {
+        bail!(MOVED);
+    }
+    let full = local_ref(branch);
+    let checked_out = git.read(["for-each-ref", "--format=%(worktreepath)", &full])?;
+    if !checked_out.trim().is_empty() {
+        bail!("it is checked out in a worktree, so it was kept.");
+    }
+    // Git sees a worktree detached while it rebases the branch.
+    let worktrees = snapshot::load_worktrees(git, git.cwd())?;
+    let rebased = |wt: &Worktree| repo::in_progress(&wt.path)?.branch;
+    if worktrees
+        .iter()
+        .any(|wt| rebased(wt).as_deref() == Some(branch))
+    {
+        bail!("a worktree is rebasing it, so it was kept.");
+    }
+    if let Err(e) = git.run(["update-ref", "-d", &full, &target.to_string()]) {
+        if moved(git, branch, target) {
+            bail!(MOVED);
+        }
+        return Err(e);
+    }
+    let section = format!("branch.{branch}");
+    git.run_accepting(["config", "--remove-section", &section], None, |_| true)?;
+    Ok(())
+}
+
 /// Bring back a slashed branch at its old commit.
 pub fn restore(git: &Git, slashed: &Slashed) -> Result<()> {
-    git.run(["branch", &slashed.branch, &slashed.target.to_string()])?;
-    Ok(())
+    refs::create_branch(git, &slashed.branch, &slashed.target.to_string(), false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protected_patterns_in_every_list_form() {
+        for list in ["main, release/*", "main; release/*", "main\nrelease/*"] {
+            assert!(protected("release/1", list), "{list:?}");
+            assert!(protected("main", list), "{list:?}");
+        }
+        assert!(!protected("feature/x", "main; release/*"));
+    }
 }

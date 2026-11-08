@@ -1,32 +1,15 @@
 //! Review against the merge-base, with uncommitted and untracked files.
 
-use std::path::Path;
-use std::process::Command;
+mod common;
 
+use common::sh;
 use graft_core::diff::{self, Source};
-use graft_core::status::Change;
-use graft_core::{Console, Git, review};
-
-fn sh(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("git runs");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
+use graft_core::{Change, review};
 
 #[test]
 fn branch_changes_since_fork_including_uncommitted() {
     let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path();
-    sh(dir, &["init", "-q", "-b", "main"]);
-    sh(dir, &["config", "user.name", "Ada"]);
-    sh(dir, &["config", "user.email", "ada@example.com"]);
+    let dir = &common::init(&tmp.path().join("r"));
     std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
     std::fs::write(dir.join("c.txt"), "keep\n").unwrap();
     std::fs::write(dir.join("gone.txt"), "bye\n").unwrap();
@@ -48,13 +31,8 @@ fn branch_changes_since_fork_including_uncommitted() {
     std::fs::write(dir.join("c.txt"), "keep\nmore\n").unwrap();
     std::fs::write(dir.join("d.txt"), "draft\nnotes\n").unwrap();
 
-    let git = Git::new(dir, Console::default());
-    let branches = vec!["feature".to_owned(), "main".to_owned()];
-    assert_eq!(
-        review::default_base(&git, &branches, Some("feature")).as_deref(),
-        Some("main")
-    );
-    let r = review::load(&git, "main").unwrap();
+    let git = common::git(dir);
+    let r = review::load(&git, "main", "refs/heads/main").unwrap();
     assert_eq!(r.commits, 1);
     let paths: Vec<&str> = r.files.iter().map(|f| f.change.path.as_str()).collect();
     assert_eq!(paths, ["a.txt", "b.txt", "c.txt", "d.txt", "gone.txt"]);
@@ -65,34 +43,41 @@ fn branch_changes_since_fork_including_uncommitted() {
     assert_eq!(get("gone.txt").change.change, Change::Deleted);
     assert!(get("gone.txt").content.is_empty());
     assert!(get("d.txt").untracked);
+    assert!(get("d.txt").uncommitted && get("c.txt").uncommitted);
+    assert!(!get("a.txt").uncommitted, "committed on the branch");
     assert_eq!(get("d.txt").change.added, Some(2));
     assert_eq!(r.added(), 2 + 1 + 1 + 2);
 
     // The diff of a file goes from the merge-base to the working tree.
-    let d = diff::load(&git, &Source::Base(r.merge_base), "c.txt").unwrap();
+    let d = diff::load(&git, &Source::Base(r.merge_base), "c.txt", None).unwrap();
     assert_eq!(d.added(), 1);
 
     // Viewed marks follow the content.
     let before = get("a.txt").viewed_key();
-    let again = review::load(&git, "main").unwrap();
+    let again = review::load(&git, "main", "refs/heads/main").unwrap();
     assert_eq!(again.files[0].viewed_key(), before);
     std::fs::write(dir.join("a.txt"), "changed again\n").unwrap();
-    let after = review::load(&git, "main").unwrap();
+    let after = review::load(&git, "main", "refs/heads/main").unwrap();
     assert_ne!(after.files[0].viewed_key(), before);
 
-    assert!(review::load(&git, "nope").is_err());
+    assert!(review::load(&git, "nope", "refs/heads/nope").is_err());
 }
 
 #[test]
-fn default_branch_follows_the_remote() {
+fn review_base_follows_the_remote_default_branch() {
     let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path();
-    sh(dir, &["init", "-q", "-b", "main"]);
-    sh(dir, &["config", "user.name", "Ada"]);
-    sh(dir, &["config", "user.email", "ada@example.com"]);
+    let dir = &common::init(&tmp.path().join("r"));
     sh(dir, &["commit", "-q", "--allow-empty", "-m", "base"]);
     sh(dir, &["branch", "development"]);
     sh(dir, &["switch", "-q", "-c", "feature"]);
+    let git = common::git(dir);
+    let base = |current: &str| {
+        let snap = graft_core::snapshot::load(&git).unwrap();
+        review::default_base(&snap, Some(current))
+    };
+    // No remote: the usual names.
+    assert_eq!(base("feature").as_deref(), Some("main"));
+
     // As after cloning a repository whose default branch is development.
     sh(
         dir,
@@ -106,18 +91,176 @@ fn default_branch_follows_the_remote() {
             "refs/remotes/origin/development",
         ],
     );
+    assert_eq!(base("feature").as_deref(), Some("development"));
+    // Reviewing the default branch itself: the next candidate.
+    assert_eq!(base("development").as_deref(), Some("main"));
 
-    let git = Git::new(dir, Console::default());
-    let snap = graft_core::snapshot::load(&git).unwrap();
-    assert_eq!(snap.remote_default.as_deref(), Some("development"));
-    assert_eq!(snap.default_branch(), Some("development"));
-    let branches = vec![
-        "development".to_owned(),
-        "feature".to_owned(),
-        "main".to_owned(),
-    ];
-    assert_eq!(
-        review::default_base(&git, &branches, Some("feature")).as_deref(),
-        Some("development")
+    // Without a local copy of it, origin/HEAD itself.
+    sh(dir, &["switch", "-q", "development"]);
+    sh(dir, &["branch", "-q", "-D", "main", "feature"]);
+    assert_eq!(base("development").as_deref(), Some("origin/development"));
+}
+
+/// Blank lines of an untracked file count as added lines, as git counts
+/// them for a committed file.
+#[test]
+fn untracked_blank_lines_count() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = &common::init(&tmp.path().join("r"));
+    common::commit(dir, "a.txt", "a\n", "base");
+    sh(dir, &["switch", "-q", "-c", "feature"]);
+    std::fs::write(dir.join("new.txt"), "one\n\ntwo\n\n").unwrap();
+    common::commit(dir, "committed.txt", "one\n\ntwo\n\n", "same text");
+
+    let r = review::load(&common::git(dir), "main", "refs/heads/main").unwrap();
+    let get = |p: &str| r.files.iter().find(|f| f.change.path == p).unwrap();
+    assert_eq!(get("committed.txt").change.added, Some(4));
+    assert_eq!(get("new.txt").change.added, Some(4));
+}
+
+/// A submodule (a folder in the list) and an untracked repository inside
+/// the worktree do not break the review.
+#[test]
+fn folders_do_not_break_the_review() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = &common::init(&tmp.path().join("r"));
+    common::commit(dir, "a.txt", "a\n", "base");
+    sh(dir, &["switch", "-q", "-c", "feature"]);
+    // A nested repository committed as a gitlink, like a submodule.
+    let sub = common::init(&dir.join("sub"));
+    common::commit(&sub, "s.txt", "s\n", "sub");
+    sh(dir, &["add", "sub"]);
+    sh(dir, &["commit", "-q", "-m", "add sub"]);
+    // An untracked repository: git lists it as `nested/`.
+    let nested = common::init(&dir.join("nested"));
+    common::commit(&nested, "n.txt", "n\n", "nested");
+    std::fs::write(dir.join("b.txt"), "b\n").unwrap();
+
+    let r = review::load(&common::git(dir), "main", "refs/heads/main").unwrap();
+    let paths: Vec<&str> = r.files.iter().map(|f| f.change.path.as_str()).collect();
+    assert_eq!(paths, ["b.txt", "sub"]);
+    let b = r.files.iter().find(|f| f.change.path == "b.txt").unwrap();
+    assert!(!b.content.is_empty(), "files still get their content hash");
+}
+
+/// Merge merges what was reviewed: once the branch moved on (an agent
+/// committed after the review), nothing is merged until it is reviewed
+/// again.
+#[test]
+fn merge_takes_only_the_reviewed_commits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main = &common::init(&tmp.path().join("r"));
+    common::commit(main, "a.txt", "a\n", "base");
+    // A tag named like the branch does not hide that main is checked out.
+    sh(main, &["tag", "main"]);
+    let agent = tmp.path().join("agent");
+    let agent_arg = agent.to_str().unwrap();
+    sh(main, &["worktree", "add", "-q", "-b", "feature", agent_arg]);
+    common::commit(&agent, "b.txt", "b\n", "reviewed");
+
+    let r = review::load(&common::git(&agent), "main", "refs/heads/main").unwrap();
+    assert_eq!(r.head.to_string(), common::rev(&agent, "HEAD"));
+    common::commit(&agent, "c.txt", "c\n", "after the review");
+    let before = common::rev(main, "HEAD");
+    let err = review::merge(&common::git(main), "feature", "main", r.head).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("moved since you reviewed it"),
+        "{err:#}"
     );
+    assert_eq!(common::rev(main, "HEAD"), before);
+
+    let r = review::load(&common::git(&agent), "main", "refs/heads/main").unwrap();
+    let stopped = review::merge(&common::git(main), "feature", "main", r.head).unwrap();
+    assert!(!stopped);
+    assert_eq!(common::rev(main, "HEAD"), common::rev(&agent, "HEAD"));
+}
+
+/// Merge lands on the base it was asked for: if the worktree switched to
+/// another branch or started a merge while the question was open, nothing
+/// is merged.
+#[test]
+fn merge_refuses_when_the_target_changed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main = &common::init(&tmp.path().join("r"));
+    common::commit(
+        main, "a.txt", "a
+", "base",
+    );
+    let agent = tmp.path().join("agent");
+    sh(
+        main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            agent.to_str().unwrap(),
+        ],
+    );
+    common::commit(
+        &agent, "b.txt", "b
+", "reviewed",
+    );
+    let r = review::load(&common::git(&agent), "main", "refs/heads/main").unwrap();
+    let merge = || review::merge(&common::git(main), "feature", "main", r.head);
+
+    sh(main, &["checkout", "-q", "-b", "other"]);
+    let err = format!("{:#}", merge().unwrap_err());
+    assert!(err.contains("main is no longer checked out"), "{err}");
+    assert_eq!(common::rev(main, "other"), common::rev(main, "main"));
+
+    sh(main, &["checkout", "-q", "main"]);
+    sh(main, &["branch", "-q", "side"]);
+    sh(main, &["checkout", "-q", "side"]);
+    std::fs::write(
+        main.join("a.txt"),
+        "side
+",
+    )
+    .unwrap();
+    sh(main, &["commit", "-q", "-am", "side"]);
+    sh(main, &["checkout", "-q", "main"]);
+    std::fs::write(
+        main.join("a.txt"),
+        "main
+",
+    )
+    .unwrap();
+    sh(main, &["commit", "-q", "-am", "main"]);
+    assert!(graft_core::conflicts::merge(&common::git(main), "side", false).unwrap());
+    let err = format!("{:#}", merge().unwrap_err());
+    assert!(err.contains("a merge is in progress"), "{err}");
+}
+
+/// A file moved and edited on the branch (not yet committed) shows as a
+/// rename with the line that changed, not as a whole new file.
+#[test]
+fn a_moved_file_shows_as_a_rename() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = &common::init(&tmp.path().join("r"));
+    common::commit(dir, "a.txt", "one\ntwo\nthree\nfour\nfive\n", "base");
+    sh(dir, &["switch", "-q", "-c", "feature"]);
+    sh(dir, &["mv", "a.txt", "b.txt"]);
+    std::fs::write(dir.join("b.txt"), "one\ntwo\nTHREE\nfour\nfive\n").unwrap();
+
+    let git = common::git(dir);
+    let r = review::load(&git, "main", "refs/heads/main").unwrap();
+    let file = &r.files[0].change;
+    assert_eq!(
+        (file.path.as_str(), file.orig_path.as_deref()),
+        ("b.txt", Some("a.txt"))
+    );
+    let (d, gaps) = diff::load_expanded(
+        &git,
+        &Source::Base(r.merge_base),
+        "b.txt",
+        Some("a.txt"),
+        |_, _| true,
+        |_, _| false,
+    )
+    .unwrap();
+    assert!(!d.new_file);
+    assert_eq!((d.added(), d.removed()), (1, 1));
+    assert_eq!(gaps, Some(Vec::new()), "every unchanged line shows");
 }

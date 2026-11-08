@@ -1,44 +1,38 @@
 //! Slash against a real repository with a remote.
 
+mod common;
+
 use std::path::Path;
-use std::process::Command;
 
-use graft_core::slash::{self, PROTECTED, Reason};
+use common::sh;
+use graft_core::slash::{self, Reason, default_protected};
 use graft_core::worktree::{self, Start};
-use graft_core::{CancelToken, Console, Git, snapshot};
-
-fn sh(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("git runs");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
+use graft_core::{CancelToken, Git, preview, snapshot};
 
 fn commit(dir: &Path, file: &str, text: &str) {
-    std::fs::write(dir.join(file), text).unwrap();
-    sh(dir, &["add", "."]);
-    sh(dir, &["commit", "-q", "-m", file]);
+    common::commit(dir, file, text, file);
+}
+
+/// A branch with a commit of its own, merged into main (checked out in
+/// `dir`).
+fn merged_branch(dir: &Path, name: &str) {
+    sh(dir, &["switch", "-q", "-c", name]);
+    commit(
+        dir,
+        &format!("{}.txt", name.replace('/', "-")),
+        "done
+",
+    );
+    sh(dir, &["switch", "-q", "main"]);
+    sh(dir, &["merge", "-q", "--ff-only", name]);
 }
 
 #[test]
 fn scan_execute_and_restore() {
     let tmp = tempfile::tempdir().unwrap();
     let remote = tmp.path().join("remote.git");
-    let main = tmp.path().join("app");
-    std::fs::create_dir(&main).unwrap();
-    sh(
-        tmp.path(),
-        &["init", "-q", "--bare", "-b", "main", "remote.git"],
-    );
-    sh(&main, &["init", "-q", "-b", "main"]);
-    sh(&main, &["config", "user.name", "Ada"]);
-    sh(&main, &["config", "user.email", "ada@example.com"]);
+    common::init_bare(&remote);
+    let main = common::init(&tmp.path().join("app"));
     sh(
         &main,
         &["remote", "add", "origin", remote.to_str().unwrap()],
@@ -56,10 +50,10 @@ fn scan_execute_and_restore() {
     commit(&main, "idea.txt", "idea\n");
     sh(&main, &["switch", "-q", "main"]);
     // merged into main, in a clean worktree / in a dirty worktree.
-    sh(&main, &["branch", "merged-clean"]);
+    merged_branch(&main, "merged-clean");
     sh(&main, &["branch", "merged-dirty"]);
     sh(&main, &["branch", "release/1"]);
-    let git = Git::new(&main, Console::default());
+    let git = common::git(&main);
     let clean = tmp.path().join("wt-clean");
     let dirty = tmp.path().join("wt-dirty");
     let gone_folder = tmp.path().join("wt-missing");
@@ -77,7 +71,7 @@ fn scan_execute_and_restore() {
     .unwrap();
     std::fs::remove_dir_all(&gone_folder).unwrap();
 
-    let plan = slash::scan(&git, PROTECTED, &CancelToken::default(), |_| {}).unwrap();
+    let plan = slash::scan(&git, &default_protected(), &CancelToken::default(), |_| {}).unwrap();
     assert_eq!(plan.default_branch.as_deref(), Some("main"));
     assert_eq!(plan.fetch_error, None);
     let find = |name: &str| {
@@ -141,6 +135,148 @@ fn scan_execute_and_restore() {
     );
 }
 
+/// A new worktree for an agent starts at main, so its branch is "merged"
+/// until the agent commits: Slash must not offer to remove its folder (and
+/// the ignored files in it, which Recently slashed cannot bring back).
+#[test]
+fn branches_without_commits_of_their_own_are_not_merged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main = common::init(&tmp.path().join("app"));
+    commit(
+        &main,
+        ".gitignore",
+        ".env
+",
+    );
+    let git = common::git(&main);
+    let agent = tmp.path().join("agent");
+    let start = Start::NewBranch {
+        name: "agent/x".into(),
+        base: "main".into(),
+    };
+    worktree::add(&git, &agent, &start).unwrap();
+    std::fs::write(
+        agent.join(".env"),
+        "SECRET=1
+",
+    )
+    .unwrap();
+    sh(&main, &["branch", "fresh"]);
+    merged_branch(&main, "done");
+    // Merged, but its reflog (where it started) is gone: with no worktree
+    // to lose, it is still pre-selected.
+    merged_branch(&main, "old");
+    sh(
+        &main,
+        &["reflog", "expire", "--expire=now", "refs/heads/old"],
+    );
+    commit(
+        &main,
+        "a.txt",
+        "main moved on
+",
+    );
+
+    let snap = snapshot::load(&git).unwrap();
+    let plan = slash::plan(&git, &snap, &default_protected()).unwrap();
+    let find = |name: &str| {
+        plan.candidates
+            .iter()
+            .find(|c| c.branch.as_deref() == Some(name))
+    };
+    for fresh in ["agent/x", "fresh"] {
+        assert!(find(fresh).is_none(), "{plan:?}");
+        assert!(
+            plan.kept
+                .iter()
+                .any(|(b, why)| b == fresh && why.contains("no commits of its own")),
+            "{plan:?}"
+        );
+    }
+    let done = find("done").unwrap();
+    assert_eq!((done.reason, done.suggested), (Reason::Merged, true));
+    let old = find("old").unwrap();
+    assert_eq!((old.reason, old.suggested), (Reason::Merged, true));
+
+    let chosen: Vec<_> = plan
+        .candidates
+        .into_iter()
+        .filter(|c| c.suggested)
+        .collect();
+    let outcome = slash::execute(&git, &chosen, &CancelToken::default(), |_| {});
+    assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+    assert!(agent.join(".env").exists());
+    assert!(snapshot::load(&git).unwrap().branch("agent/x").is_some());
+}
+
+/// "No commits of its own" needs to know where a branch started: not
+/// after gc dropped the start from its reflog, and not for a branch checked
+/// out from its own remote branch.
+#[test]
+fn only_branches_started_as_new_work_count_as_having_no_commits_yet() {
+    let tmp = tempfile::tempdir().unwrap();
+    let remote = common::init_bare(&tmp.path().join("remote.git"));
+    let main = common::init(&tmp.path().join("app"));
+    sh(
+        &main,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    commit(&main, "a.txt", "a\n");
+    sh(&main, &["push", "-q", "-u", "origin", "main"]);
+    let git = common::git(&main);
+
+    // Merged, but gc dropped the reflog entry of its start: the oldest
+    // left is its commit, which is also its tip.
+    merged_branch(&main, "trimmed");
+    sh(&main, &["reflog", "delete", "refs/heads/trimmed@{1}"]);
+    // Work pushed by someone else, checked out here (Graft's tracking
+    // checkout), then merged into main.
+    sh(&main, &["switch", "-q", "-c", "pr"]);
+    commit(&main, "pr.txt", "pr\n");
+    sh(&main, &["push", "-q", "origin", "pr"]);
+    sh(&main, &["switch", "-q", "main"]);
+    sh(&main, &["branch", "-q", "-D", "pr"]);
+    graft_core::refs::switch_tracking(&git, "pr", "origin/pr").unwrap();
+    sh(&main, &["switch", "-q", "main"]);
+    sh(&main, &["merge", "-q", "--ff-only", "origin/pr"]);
+    // A new agent worktree from the remote's main, tracking it (git's
+    // default for a remote start): still new work.
+    let agent = tmp.path().join("agent");
+    sh(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "agent/y",
+            agent.to_str().unwrap(),
+            "origin/main",
+        ],
+    );
+    sh(&main, &["push", "-q", "origin", "main"]);
+    sh(&main, &["fetch", "-q", "origin"]);
+
+    let snap = snapshot::load(&git).unwrap();
+    let plan = slash::plan(&git, &snap, &default_protected()).unwrap();
+    let find = |name: &str| {
+        plan.candidates
+            .iter()
+            .find(|c| c.branch.as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("{name}: {plan:?}"))
+    };
+    for name in ["trimmed", "pr"] {
+        let c = find(name);
+        assert_eq!((c.reason, c.suggested), (Reason::Merged, true), "{name}");
+    }
+    assert!(
+        plan.kept
+            .iter()
+            .any(|(b, why)| b == "agent/y" && why.contains("no commits of its own")),
+        "{plan:?}"
+    );
+}
+
 /// Ignored build output (node_modules, target…) nested deeper than Windows'
 /// old 260-character limit.
 fn deep_ignored_files(worktree: &Path) {
@@ -153,14 +289,10 @@ fn deep_ignored_files(worktree: &Path) {
 }
 
 fn repo_with_merged_branch(tmp: &Path) -> (Git, std::path::PathBuf) {
-    let main = tmp.join("app");
-    std::fs::create_dir(&main).unwrap();
-    sh(&main, &["init", "-q", "-b", "main"]);
-    sh(&main, &["config", "user.name", "Ada"]);
-    sh(&main, &["config", "user.email", "ada@example.com"]);
+    let main = common::init(&tmp.join("app"));
     commit(&main, ".gitignore", "node_modules/\n");
-    sh(&main, &["branch", "merged-deep"]);
-    let git = Git::new(&main, Console::default());
+    merged_branch(&main, "merged-deep");
+    let git = common::git(&main);
     let wt = tmp.join("wt-deep");
     worktree::add(&git, &wt, &Start::Existing("merged-deep".into())).unwrap();
     deep_ignored_files(&wt);
@@ -173,7 +305,7 @@ fn worktrees_with_very_long_paths_are_slashed() {
     let (git, wt) = repo_with_merged_branch(tmp.path());
 
     let snap = snapshot::load(&git).unwrap();
-    let plan = slash::plan(&git, &snap, PROTECTED).unwrap();
+    let plan = slash::plan(&git, &snap, &default_protected()).unwrap();
     let chosen: Vec<_> = plan
         .candidates
         .into_iter()
@@ -194,7 +326,7 @@ fn a_worktree_that_cannot_be_removed_keeps_its_branch() {
     let tmp = tempfile::tempdir().unwrap();
     let (git, wt) = repo_with_merged_branch(tmp.path());
     let snap = snapshot::load(&git).unwrap();
-    let plan = slash::plan(&git, &snap, PROTECTED).unwrap();
+    let plan = slash::plan(&git, &snap, &default_protected()).unwrap();
     let chosen: Vec<_> = plan
         .candidates
         .into_iter()
@@ -220,18 +352,16 @@ fn a_worktree_that_cannot_be_removed_keeps_its_branch() {
 }
 
 fn repo_with_merged_branches(tmp: &Path, count: usize) -> (Git, Vec<slash::Candidate>) {
-    let main = tmp.join("app");
-    std::fs::create_dir(&main).unwrap();
-    sh(&main, &["init", "-q", "-b", "main"]);
-    sh(&main, &["config", "user.name", "Ada"]);
-    sh(&main, &["config", "user.email", "ada@example.com"]);
+    let main = common::init(&tmp.join("app"));
     commit(&main, "a.txt", "a\n");
     for i in 0..count {
-        sh(&main, &["branch", &format!("done/{i}")]);
+        merged_branch(&main, &format!("done/{i}"));
     }
-    let git = Git::new(&main, Console::default());
+    let git = common::git(&main);
     let snap = snapshot::load(&git).unwrap();
-    let mut chosen = slash::plan(&git, &snap, PROTECTED).unwrap().candidates;
+    let mut chosen = slash::plan(&git, &snap, &default_protected())
+        .unwrap()
+        .candidates;
     chosen.sort_by(|a, b| a.branch.cmp(&b.branch));
     assert_eq!(chosen.len(), count);
     (git, chosen)
@@ -275,4 +405,153 @@ fn cancelling_stops_after_the_current_step() {
     assert_eq!(outcome.slashed.len(), 2);
     let left = git.read(["branch", "--list", "done/*"]).unwrap();
     assert_eq!(left.lines().count(), 3);
+}
+
+#[test]
+fn branches_that_moved_since_the_scan_are_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (git, wt) = repo_with_merged_branch(tmp.path());
+    let main = git.read(["rev-parse", "--show-toplevel"]).unwrap();
+    let main = Path::new(main.trim());
+    merged_branch(main, "done/plain");
+    sh(main, &["config", "branch.done/gone.remote", "origin"]);
+    merged_branch(main, "done/gone");
+    let snap = snapshot::load(&git).unwrap();
+    let chosen = slash::plan(&git, &snap, &default_protected())
+        .unwrap()
+        .candidates;
+    assert_eq!(chosen.len(), 3);
+
+    // An agent commits in the worktree and on the plain branch meanwhile.
+    commit(&wt, "agent.txt", "work\n");
+    sh(main, &["switch", "-q", "done/plain"]);
+    commit(main, "agent2.txt", "more work\n");
+    sh(main, &["switch", "-q", "main"]);
+    let moved_to = git.read(["rev-parse", "done/plain"]).unwrap();
+
+    let outcome = slash::execute(&git, &chosen, &CancelToken::default(), |_| {});
+    assert_eq!(outcome.errors.len(), 2, "{:?}", outcome.errors);
+    assert!(
+        outcome
+            .errors
+            .iter()
+            .all(|e| e.contains("moved since the scan")),
+        "{:?}",
+        outcome.errors
+    );
+    assert_eq!(outcome.worktrees_removed, 0);
+    assert!(wt.join("agent.txt").exists());
+    assert_eq!(git.read(["rev-parse", "done/plain"]).unwrap(), moved_to);
+    // The one that did not move goes, settings and all.
+    let slashed: Vec<_> = outcome.slashed.iter().map(|s| s.branch.as_str()).collect();
+    assert_eq!(slashed, ["done/gone"]);
+    assert!(
+        git.read(["branch", "--list", "done/gone"])
+            .unwrap()
+            .is_empty()
+    );
+    let settings = std::fs::read_to_string(main.join(".git/config")).unwrap();
+    assert!(!settings.contains("done/gone"), "{settings}");
+}
+
+/// During a preview the main folder is detached, but Restore main goes back
+/// to its branch: Slash keeps that branch, like any checked-out one.
+#[test]
+fn the_branch_main_returns_to_after_a_preview_is_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main = common::init(&tmp.path().join("app"));
+    commit(&main, "a.txt", "a\n");
+    sh(&main, &["switch", "-q", "-c", "topic"]);
+    let git = common::git(&main);
+    let agent = tmp.path().join("agent");
+    let start = Start::NewBranch {
+        name: "agent/x".into(),
+        base: "main".into(),
+    };
+    worktree::add(&git, &agent, &start).unwrap();
+    std::fs::write(agent.join("b.txt"), "b\n").unwrap();
+    preview::start(&git, &git.at(&agent)).unwrap();
+
+    let snap = snapshot::load(&git).unwrap();
+    assert!(snap.preview.is_some());
+    assert_eq!(snap.main_worktree().unwrap().branch, None);
+    assert_eq!(snap.main_branch(), Some("topic"));
+    assert!(snap.worktree_for_branch("topic").unwrap().is_main);
+    let plan = slash::plan(&git, &snap, &default_protected()).unwrap();
+    let topic = Some("topic");
+    assert!(plan.candidates.iter().all(|c| c.branch.as_deref() != topic));
+    assert!(plan.kept.iter().any(|(branch, _)| branch == "topic"));
+    preview::restore_main(&git).unwrap();
+    assert_eq!(sh(&main, &["symbolic-ref", "--short", "HEAD"]), "topic");
+}
+
+/// While a rebase stops, git sees the worktree detached, but the rebase
+/// ends on its branch: Slash keeps that branch, in the main folder and in
+/// a linked worktree, even when the scan's plan is out of date.
+#[test]
+fn a_branch_being_rebased_is_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main = common::init(&tmp.path().join("app"));
+    commit(&main, "a.txt", "a\n");
+    for branch in ["fix", "feat"] {
+        sh(&main, &["branch", branch]);
+        // Its upstream was deleted (a merged PR): Slash would suggest it.
+        sh(&main, &["config", &format!("branch.{branch}.remote"), "."]);
+        let merge = format!("refs/heads/gone/{branch}");
+        sh(
+            &main,
+            &["config", &format!("branch.{branch}.merge"), &merge],
+        );
+    }
+    commit(&main, "a.txt", "main\n");
+    let git = common::git(&main);
+    let feat = tmp.path().join("feat");
+    worktree::add(&git, &feat, &Start::Existing("feat".into())).unwrap();
+    sh(&main, &["switch", "-q", "fix"]);
+    for dir in [&main, &feat] {
+        commit(dir, "a.txt", "mine\n");
+        let rebase = std::process::Command::new("git")
+            .args(["rebase", "main"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(!rebase.status.success(), "the rebase must stop");
+    }
+
+    let snap = snapshot::load(&git).unwrap();
+    assert_eq!(snap.main_branch(), Some("fix"));
+    assert!(!snap.worktree_for_branch("feat").unwrap().is_main);
+    let plan = slash::plan(&git, &snap, &default_protected()).unwrap();
+    for branch in ["fix", "feat"] {
+        let name = Some(branch);
+        assert!(plan.candidates.iter().all(|c| c.branch.as_deref() != name));
+        assert!(plan.kept.iter().any(|(b, _)| b == branch), "{plan:?}");
+    }
+    assert!(
+        plan.kept
+            .iter()
+            .any(|(b, why)| b == "feat" && why.contains("rebase in progress")),
+        "{plan:?}"
+    );
+
+    // Chosen anyway (a plan from before the rebase): still kept.
+    let chosen: Vec<_> = ["fix", "feat"]
+        .map(|branch| slash::Candidate {
+            reason: Reason::Gone,
+            branch: Some(branch.to_owned()),
+            target: Some(snap.branch(branch).unwrap().target),
+            worktree: None,
+            suggested: true,
+        })
+        .into();
+    let outcome = slash::execute(&git, &chosen, &CancelToken::default(), |_| {});
+    assert!(outcome.slashed.is_empty(), "{:?}", outcome.slashed);
+    assert_eq!(outcome.errors.len(), 2, "{:?}", outcome.errors);
+    assert!(
+        outcome.errors.iter().all(|e| e.contains("rebasing it")),
+        "{:?}",
+        outcome.errors
+    );
+    let after = snapshot::load(&git).unwrap();
+    assert!(after.branch("fix").is_some() && after.branch("feat").is_some());
 }

@@ -1,4 +1,4 @@
-//! The toolbar search (Ctrl+K): type to find worktrees, branches, tags,
+//! The toolbar search: type to find worktrees, branches, tags,
 //! commits and changed files in every open project; Enter or a click jumps
 //! there (switching to that project's tab).
 
@@ -10,24 +10,64 @@ use egui::{
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use graft_core::history::History;
+use graft_core::{RepoSnapshot, WorktreeStatus};
+
 use super::icons::{self, Icon};
 use crate::keys::Command;
 use crate::project::{Action, FileKey, Project};
 use crate::theme::{self, RADIUS, color};
+use crate::ui::{Actions, AppAction};
 
-/// One search result.
+/// A search result, and what choosing it does.
 struct Hit {
-    kind: &'static str,
+    kind: Kind,
     title: String,
     detail: String,
     /// The other project's tab index and name, for a hit outside the
     /// active project.
     project: Option<(usize, String)>,
+    /// What choosing it does, in its project.
     actions: Vec<Action>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Worktree,
+    Branch,
+    Remote,
+    Tag,
+    Changed,
+    Commit,
+}
+
+impl Kind {
+    fn label(self) -> &'static str {
+        match self {
+            Kind::Worktree => "Worktree",
+            Kind::Branch => "Branch",
+            Kind::Remote => "Remote",
+            Kind::Tag => "Tag",
+            Kind::Changed => "Changed",
+            Kind::Commit => "Commit",
+        }
+    }
+
+    /// Ref names show in the code font; commit summaries and file paths
+    /// read better in the text font.
+    fn font(self) -> egui::FontId {
+        match self {
+            Kind::Commit | Kind::Changed => theme::body(),
+            _ => theme::mono(),
+        }
+    }
 }
 
 const LIMIT: usize = 8;
 const HEADER_HEIGHT: f32 = 24.0;
+const ROW_HEIGHT: f32 = 30.0;
+/// The popup scrolls beyond this.
+const MAX_POPUP_HEIGHT: f32 = 420.0;
 
 /// What a list of hits was computed from: while it stays the same, the
 /// popup reuses the hits instead of searching every project each frame.
@@ -61,26 +101,90 @@ fn cached_hits(ui: &Ui, id: Id, projects: &[Project], active: usize, text: &str)
     results
 }
 
-/// Hits in every open project: the active project's first, then one group
-/// per other project in tab order. A hit elsewhere switches to its project
-/// when chosen.
+/// Hits in every open project, grouped as [`grouped`] says.
 fn hits(projects: &[Project], active: usize, text: &str) -> Vec<Hit> {
-    let order = std::iter::once(active).chain((0..projects.len()).filter(|&i| i != active));
+    let found = projects.iter().map(|project| {
+        let hits = match project.snapshot.as_deref() {
+            Some(snap) => project_hits(
+                snap,
+                project.worktree().and_then(|wt| wt.status.as_ref()),
+                project.history.as_ref(),
+                text,
+            ),
+            None => Vec::new(),
+        };
+        (project.name.clone(), hits)
+    });
+    grouped(found.collect(), active)
+}
+
+/// Each project's hits (by tab, with its name) in one list: the active
+/// project's first, then one group per other project in tab order. Hits
+/// elsewhere are marked with their project, which choosing them switches to.
+fn grouped(per_project: Vec<(String, Vec<Hit>)>, active: usize) -> Vec<Hit> {
+    let mut per_project: Vec<Option<(String, Vec<Hit>)>> =
+        per_project.into_iter().map(Some).collect();
+    let order = std::iter::once(active).chain((0..per_project.len()).filter(|&i| i != active));
     order
-        .filter_map(|i| Some((i, projects.get(i)?)))
-        .flat_map(|(i, project)| {
-            project_hits(project, text).into_iter().map(move |mut hit| {
+        .filter_map(|i| Some((i, per_project.get_mut(i)?.take()?)))
+        .flat_map(|(i, (name, hits))| {
+            hits.into_iter().map(move |mut hit| {
                 if i != active {
-                    hit.project = Some((i, project.name.clone()));
-                    hit.actions = vec![Action::InProject {
-                        project: i,
-                        actions: hit.actions,
-                    }];
+                    hit.project = Some((i, name.clone()));
                 }
                 hit
             })
         })
         .collect()
+}
+
+/// A line of the result popup, top to bottom.
+#[derive(Debug, PartialEq)]
+enum Line<'a> {
+    /// A project's name above its hits; `first` gets no line above it.
+    Header {
+        name: &'a str,
+        first: bool,
+    },
+    /// Under the active project's header when only other projects matched.
+    NoMatches,
+    Hit(usize),
+}
+
+impl Line<'_> {
+    fn height(&self) -> f32 {
+        match self {
+            Line::Header { .. } | Line::NoMatches => HEADER_HEIGHT,
+            Line::Hit(_) => ROW_HEIGHT,
+        }
+    }
+}
+
+/// The popup's lines for `results`; the active project is `active_name`.
+/// A header goes where a new project's hits start; the active project gets
+/// one only when other projects have hits too.
+fn popup_lines<'a>(results: &'a [Hit], active_name: &'a str) -> Vec<Line<'a>> {
+    let elsewhere = results.iter().any(|hit| hit.project.is_some());
+    // The active project found nothing, but others did: say so on top.
+    let none_here = results.first().is_some_and(|hit| hit.project.is_some());
+    let mut lines = Vec::new();
+    if none_here {
+        lines.push(Line::Header {
+            name: active_name,
+            first: true,
+        });
+        lines.push(Line::NoMatches);
+    }
+    for i in 0..results.len() {
+        if let Some(name) = header(results, i, elsewhere, active_name) {
+            lines.push(Line::Header {
+                name,
+                first: i == 0 && !none_here,
+            });
+        }
+        lines.push(Line::Hit(i));
+    }
+    lines
 }
 
 /// The group header to draw above `results[i]`: the project name where a
@@ -110,15 +214,19 @@ fn matches(query: &[String], fields: &[&str]) -> bool {
     })
 }
 
-fn project_hits(project: &Project, text: &str) -> Vec<Hit> {
+/// The hits in one project: its refs and worktrees, the changed files of
+/// the selected worktree (`status`), and the loaded commits.
+fn project_hits(
+    snap: &RepoSnapshot,
+    status: Option<&WorktreeStatus>,
+    history: Option<&History>,
+    text: &str,
+) -> Vec<Hit> {
     let query: Vec<String> = text.split_whitespace().map(str::to_lowercase).collect();
     let mut out = Vec::new();
     if query.is_empty() {
         return out;
     }
-    let Some(snap) = &project.snapshot else {
-        return out;
-    };
 
     for wt in snap
         .worktrees
@@ -128,9 +236,9 @@ fn project_hits(project: &Project, text: &str) -> Vec<Hit> {
         .take(LIMIT)
     {
         out.push(Hit {
-            kind: "Worktree",
+            kind: Kind::Worktree,
             title: wt.label(),
-            detail: graft_core::wsl::display(&wt.path),
+            detail: graft_core::paths::display(&wt.path),
             project: None,
             actions: vec![Action::OpenWorktree(wt.path.clone())],
         });
@@ -142,7 +250,7 @@ fn project_hits(project: &Project, text: &str) -> Vec<Hit> {
         .take(LIMIT)
     {
         out.push(Hit {
-            kind: "Branch",
+            kind: Kind::Branch,
             title: b.name.clone(),
             detail: graft_core::short(&b.target),
             project: None,
@@ -156,7 +264,7 @@ fn project_hits(project: &Project, text: &str) -> Vec<Hit> {
         .take(LIMIT)
     {
         out.push(Hit {
-            kind: "Remote",
+            kind: Kind::Remote,
             title: b.name.clone(),
             detail: graft_core::short(&b.target),
             project: None,
@@ -170,7 +278,7 @@ fn project_hits(project: &Project, text: &str) -> Vec<Hit> {
         .take(LIMIT)
     {
         out.push(Hit {
-            kind: "Tag",
+            kind: Kind::Tag,
             title: t.name.clone(),
             detail: graft_core::short(&t.target),
             project: None,
@@ -178,7 +286,7 @@ fn project_hits(project: &Project, text: &str) -> Vec<Hit> {
         });
     }
 
-    if let Some(status) = project.worktree().and_then(|wt| wt.status.as_ref()) {
+    if let Some(status) = status {
         for entry in status
             .entries
             .iter()
@@ -187,7 +295,7 @@ fn project_hits(project: &Project, text: &str) -> Vec<Hit> {
         {
             let staged = entry.is_staged() && !entry.is_unstaged();
             out.push(Hit {
-                kind: "Changed",
+                kind: Kind::Changed,
                 title: entry.path.clone(),
                 detail: if staged { "staged" } else { "uncommitted" }.to_owned(),
                 project: None,
@@ -199,7 +307,7 @@ fn project_hits(project: &Project, text: &str) -> Vec<Hit> {
         }
     }
 
-    if let Some(history) = &project.history {
+    if let Some(history) = history {
         let hex = text.trim().to_lowercase();
         let by_id = hex.len() >= 4 && hex.chars().all(|c| c.is_ascii_hexdigit());
         for c in history
@@ -213,7 +321,7 @@ fn project_hits(project: &Project, text: &str) -> Vec<Hit> {
             .take(LIMIT * 2)
         {
             out.push(Hit {
-                kind: "Commit",
+                kind: Kind::Commit,
                 title: c.summary.clone(),
                 detail: format!("{} · {}", graft_core::short(&c.id), c.author),
                 project: None,
@@ -224,17 +332,21 @@ fn project_hits(project: &Project, text: &str) -> Vec<Hit> {
     out
 }
 
+/// The search box's width: what the toolbar leaves, within these.
+const MIN_WIDTH: f32 = 160.0;
+pub const MAX_WIDTH: f32 = 300.0;
+
 pub fn show(
     ui: &mut Ui,
     projects: &[Project],
     active: usize,
     text: &mut String,
-    actions: &mut Vec<Action>,
+    actions: &mut Actions,
 ) {
     let id = Id::unique("toolbar-search");
     let selected_id = id.with("selected");
     let popup_id = id.with("popup-rect");
-    let keys = &projects[active].settings.keys;
+    let keys = &projects[active].settings().keys;
     if keys.pressed(ui.ctx(), Command::Search) {
         ui.memory_mut(|m| m.request_focus(id));
         // Select the old query so typing replaces it.
@@ -259,7 +371,7 @@ pub fn show(
     } else {
         color::control_border()
     };
-    let width = ui.available_width().clamp(160.0, 300.0);
+    let width = ui.available_width().clamp(MIN_WIDTH, MAX_WIDTH);
 
     let before = text.clone();
     let frame = Frame::new()
@@ -324,9 +436,7 @@ pub fn show(
     let anchor = frame.response.rect;
     let popup_width = 460.0f32.max(anchor.width());
     let active_name = format!("{} · current", projects[active].name);
-    // The active project found nothing, but others did: say so on top.
-    let none_here = results.first().is_some_and(|hit| hit.project.is_some());
-    let elsewhere = results.iter().any(|hit| hit.project.is_some());
+    let lines = popup_lines(&results, &active_name);
     let area = Area::new(id.with("popup"))
         .order(Order::Foreground)
         .fixed_pos(egui::pos2(
@@ -347,45 +457,28 @@ pub fn show(
                     }
                     // The popup keeps last frame's size; ask for this list's height.
                     let spacing = ui.spacing().item_spacing.y;
-                    let headers = (0..results.len())
-                        .filter(|&i| header(&results, i, elsewhere, &active_name).is_some())
-                        .count()
-                        + usize::from(none_here) * 2;
-                    let height = (results.len() as f32 * (30.0 + spacing)
-                        + headers as f32 * (HEADER_HEIGHT + spacing))
-                        .min(420.0);
+                    let height: f32 = lines.iter().map(|line| line.height() + spacing).sum();
                     ScrollArea::vertical()
-                        .max_height(420.0)
-                        .min_scrolled_height(height)
+                        .max_height(MAX_POPUP_HEIGHT)
+                        .min_scrolled_height(height.min(MAX_POPUP_HEIGHT))
                         .show(ui, |ui| {
                             // Headers right above the selected row scroll in with it.
                             let mut above: Option<Rect> = None;
-                            if none_here {
-                                let top = group_header(ui, &active_name, true);
-                                let (rect, _) = ui.allocate_exact_size(
-                                    vec2(ui.available_width(), HEADER_HEIGHT),
-                                    Sense::hover(),
-                                );
-                                let none = ui.painter().layout_no_wrap(
-                                    "No matches".to_owned(),
-                                    theme::small(),
-                                    color::text_faint(),
-                                );
-                                super::widgets::paint_galley_left(
-                                    ui.painter(),
-                                    rect.left() + 8.0,
-                                    rect.center().y,
-                                    none,
-                                    color::text_faint(),
-                                );
-                                above = Some(top.union(rect));
-                            }
-                            for (i, hit) in results.iter().enumerate() {
-                                if let Some(name) = header(&results, i, elsewhere, &active_name) {
-                                    let rect = group_header(ui, name, i == 0 && !none_here);
-                                    above = Some(above.map_or(rect, |a| a.union(rect)));
-                                }
-                                let response = row(ui, hit, i == selected);
+                            for line in &lines {
+                                let i = match *line {
+                                    Line::Header { name, first } => {
+                                        let rect = group_header(ui, name, first);
+                                        above = Some(above.map_or(rect, |a| a.union(rect)));
+                                        continue;
+                                    }
+                                    Line::NoMatches => {
+                                        let rect = no_matches(ui);
+                                        above = Some(above.map_or(rect, |a| a.union(rect)));
+                                        continue;
+                                    }
+                                    Line::Hit(i) => i,
+                                };
+                                let response = row(ui, &results[i], i == selected);
                                 if i == selected && scroll {
                                     let rect =
                                         above.map_or(response.rect, |a| a.union(response.rect));
@@ -412,11 +505,28 @@ pub fn show(
     if let Some(i) = chosen
         && let Some(hit) = results.get(i)
     {
-        actions.extend(hit.actions.iter().cloned());
+        match &hit.project {
+            Some((project, _)) => actions.app(AppAction::InProject {
+                project: *project,
+                actions: hit.actions.clone(),
+            }),
+            None => actions.extend(hit.actions.iter().cloned()),
+        }
         text.clear();
         ui.memory_mut(|m| m.surrender_focus(id));
         ui.data_mut(|d| d.remove::<Rect>(popup_id));
     }
+}
+
+/// "No matches", where the active project's hits would be.
+fn no_matches(ui: &mut Ui) -> Rect {
+    let (rect, _) =
+        ui.allocate_exact_size(vec2(ui.available_width(), HEADER_HEIGHT), Sense::hover());
+    let none =
+        ui.painter()
+            .layout_no_wrap("No matches".to_owned(), theme::small(), color::text_faint());
+    super::widgets::paint_galley_left(ui.painter(), rect.left() + 8.0, rect.center().y, none);
+    rect
 }
 
 /// A project's name above its hits; a line separates it from the group above.
@@ -436,7 +546,8 @@ fn group_header(ui: &mut Ui, name: &str, first: bool) -> Rect {
 }
 
 fn row(ui: &mut Ui, hit: &Hit, selected: bool) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
     let painter = ui.painter();
     if selected {
         painter.rect_filled(rect, RADIUS, color::selected_row_bg());
@@ -444,26 +555,25 @@ fn row(ui: &mut Ui, hit: &Hit, selected: bool) -> egui::Response {
         painter.rect_filled(rect, RADIUS, color::hover_row_bg());
     }
     let y = rect.center().y;
-    let kind = painter.layout_no_wrap(hit.kind.to_owned(), theme::small(), color::text_faint());
+    let kind = painter.layout_no_wrap(
+        hit.kind.label().to_owned(),
+        theme::small(),
+        color::text_faint(),
+    );
     painter.galley(
         egui::pos2(rect.left() + 8.0, y - kind.size().y / 2.0),
         kind,
         color::text_faint(),
     );
     let detail_width = 150.0;
-    let font = if matches!(hit.kind, "Commit" | "Changed") {
-        theme::body()
-    } else {
-        theme::mono()
-    };
     let title = super::widgets::elided(
         ui,
         &hit.title,
-        font,
+        hit.kind.font(),
         color::text(),
         rect.width() - 80.0 - detail_width - 16.0,
     );
-    super::widgets::paint_galley_left(painter, rect.left() + 80.0, y, title, color::text());
+    super::widgets::paint_galley_left(painter, rect.left() + 80.0, y, title);
     let detail = super::widgets::elided_path(
         ui,
         &hit.detail,
@@ -472,194 +582,211 @@ fn row(ui: &mut Ui, hit: &Hit, selected: bool) -> egui::Response {
         detail_width,
     );
     let x = rect.right() - 8.0 - detail.size().x;
-    super::widgets::paint_galley_left(painter, x, y, detail, color::text_weak());
+    super::widgets::paint_galley_left(painter, x, y, detail);
     response
 }
 
 #[cfg(test)]
 mod tests {
+    use graft_core::history::{Commit, History};
+    use graft_core::{
+        Branch, Change, EntryKind, Oid, RepoSnapshot, StatusEntry, Upstream, Worktree,
+        WorktreeStatus,
+    };
     use std::path::Path;
-    use std::process::Command as Cmd;
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
-
-    use graft_core::Console;
-    use graft_core::jobs::JobPool;
 
     use super::*;
+    use crate::testing::{git, open};
 
-    fn git(dir: &Path, args: &[&str]) {
-        let status = Cmd::new("git")
-            .args([
-                "-c",
-                "user.name=t",
-                "-c",
-                "user.email=t@t",
-                "-c",
-                "commit.gpgsign=false",
-            ])
-            .args(args)
-            .current_dir(dir)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?}");
+    /// The name the popup gives the active project in these tests; no
+    /// project is called that.
+    const ACTIVE: &str = "<active>";
+
+    fn oid(n: u8) -> Oid {
+        Oid::from_hex(format!("{n:02x}").repeat(20).as_bytes()).unwrap()
     }
 
-    /// A repo with one commit and an extra branch `branch`.
-    fn repo(dir: &Path, branch: &str) {
-        git(dir, &["init", "-q", "-b", "main"]);
-        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
-        git(dir, &["add", "a.txt"]);
-        git(dir, &["commit", "-q", "-m", "first"]);
-        git(dir, &["branch", branch]);
-    }
-
-    fn open(root: &Path, pool: &JobPool) -> Project {
-        let mut project = Project::new(
-            root.to_path_buf(),
-            root.to_path_buf(),
-            Console::default(),
-            pool.clone(),
-        );
-        let start = Instant::now();
-        while project.snapshot.is_none() {
-            assert!(
-                start.elapsed() < Duration::from_secs(20),
-                "snapshot never came"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-            project.poll();
+    /// A repository called `name` with its main worktree on `main`, and the
+    /// extra local `branches`.
+    fn snap(name: &str, branches: &[&str]) -> RepoSnapshot {
+        let root = PathBuf::from(format!(r"C:\repos\{name}"));
+        RepoSnapshot {
+            name: name.to_owned(),
+            root: root.clone(),
+            worktrees: vec![Worktree {
+                path: root,
+                branch: Some("main".to_owned()),
+                head: Some(oid(1)),
+                is_main: true,
+                locked: false,
+                prunable: false,
+                status: None,
+                in_progress: None,
+                recycle_bin: true,
+            }],
+            branches: std::iter::once("main")
+                .chain(branches.iter().copied())
+                .map(|name| Branch {
+                    name: name.to_owned(),
+                    target: oid(1),
+                    upstream: Upstream::None,
+                })
+                .collect(),
+            ..Default::default()
         }
-        project
     }
 
-    #[test]
-    fn finds_branches_in_other_projects() {
-        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        repo(a.path(), "feature-here");
-        repo(b.path(), "feature-there");
-        let pool = JobPool::new(2, Arc::new(|| {}));
-        let projects = [open(a.path(), &pool), open(b.path(), &pool)];
-
-        // Searching from the second tab: its own hit comes first.
-        let found: Vec<Hit> = hits(&projects, 1, "feature")
-            .into_iter()
-            .filter(|h| h.kind == "Branch")
+    /// Search `text` from the tab `active` of projects made of just a
+    /// snapshot each.
+    fn search(snaps: &[RepoSnapshot], active: usize, text: &str) -> Vec<Hit> {
+        let found = snaps
+            .iter()
+            .map(|s| (s.name.clone(), project_hits(s, None, None, text)))
             .collect();
-        assert_eq!(found.len(), 2);
-        assert_eq!(found[0].title, "feature-there");
-        assert!(found[0].project.is_none());
-        assert!(matches!(found[0].actions[..], [Action::Reveal(_)]));
+        grouped(found, active)
+    }
 
-        assert_eq!(found[1].title, "feature-here");
-        assert_eq!(found[1].project, Some((0, projects[0].name.clone())));
-        match &found[1].actions[..] {
-            [
-                Action::InProject {
-                    project: 0,
-                    actions,
-                },
-            ] => {
-                assert!(matches!(actions[..], [Action::Reveal(_)]));
-            }
-            other => panic!("unexpected actions {other:?}"),
-        }
+    /// The group headers the popup draws.
+    fn headers(results: &[Hit]) -> Vec<&str> {
+        popup_lines(results, ACTIVE)
+            .into_iter()
+            .filter_map(|line| match line {
+                Line::Header { name, .. } => Some(name),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
     fn groups_hits_by_project_active_first() {
-        let (a, b, c) = (
-            tempfile::tempdir().unwrap(),
-            tempfile::tempdir().unwrap(),
-            tempfile::tempdir().unwrap(),
-        );
-        repo(a.path(), "topic");
-        repo(b.path(), "topic");
-        repo(c.path(), "topic");
-        let pool = JobPool::new(2, Arc::new(|| {}));
-        let projects = [
-            open(a.path(), &pool),
-            open(b.path(), &pool),
-            open(c.path(), &pool),
-        ];
-        let (na, nc) = (projects[0].name.as_str(), projects[2].name.as_str());
-
+        let snaps = [snap("a", &[]), snap("b", &[]), snap("c", &[])];
         // "main" matches each project's main worktree and main branch.
         // Searching from the second tab: its hits first, then tab 1, tab 3.
-        let results = hits(&projects, 1, "main");
-        let found: Vec<(&str, Option<usize>)> = results
+        let results = search(&snaps, 1, "main");
+        let found: Vec<(Kind, Option<usize>)> = results
             .iter()
-            .filter(|h| matches!(h.kind, "Worktree" | "Branch"))
             .map(|h| (h.kind, h.project.as_ref().map(|(tab, _)| *tab)))
             .collect();
         assert_eq!(
             found,
             [
-                ("Worktree", None),
-                ("Branch", None),
-                ("Worktree", Some(0)),
-                ("Branch", Some(0)),
-                ("Worktree", Some(2)),
-                ("Branch", Some(2)),
+                (Kind::Worktree, None),
+                (Kind::Branch, None),
+                (Kind::Worktree, Some(0)),
+                (Kind::Branch, Some(0)),
+                (Kind::Worktree, Some(2)),
+                (Kind::Branch, Some(2)),
             ]
         );
-
+        assert_eq!(results[2].project, Some((0, "a".to_owned())));
+        assert!(matches!(results[1].actions[..], [Action::Reveal(_)]));
         // One header per project, where its hits start.
-        assert_eq!(headers(&results), ["here", na, nc]);
+        assert_eq!(headers(&results), [ACTIVE, "a", "c"]);
     }
 
     #[test]
     fn no_header_when_only_the_active_project_matches() {
-        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        repo(a.path(), "only-in-a");
-        repo(b.path(), "topic");
-        let pool = JobPool::new(2, Arc::new(|| {}));
-        let projects = [open(a.path(), &pool), open(b.path(), &pool)];
-
-        let results = hits(&projects, 0, "only-in-a");
-        assert!(!results.is_empty());
-        assert!(results.iter().all(|h| h.project.is_none()));
-        assert!(headers(&results).is_empty());
+        let results = search(&[snap("a", &["only-in-a"]), snap("b", &[])], 0, "only-in-a");
+        assert_eq!(results.len(), 1);
+        assert!(results[0].project.is_none());
+        assert_eq!(popup_lines(&results, ACTIVE), [Line::Hit(0)]);
     }
 
     #[test]
     fn other_projects_only_when_the_active_one_has_no_match() {
-        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        repo(a.path(), "topic");
-        repo(b.path(), "only-in-b");
-        let pool = JobPool::new(2, Arc::new(|| {}));
-        let projects = [open(a.path(), &pool), open(b.path(), &pool)];
-
-        // The popup puts "No matches" under the active project on top.
-        let results = hits(&projects, 0, "only-in-b");
-        assert!(results[0].project.is_some());
-        assert_eq!(headers(&results), [projects[1].name.as_str()]);
+        let results = search(&[snap("a", &[]), snap("b", &["only-in-b"])], 0, "only-in-b");
+        // "No matches" under the active project on top, then b's hit.
+        assert_eq!(
+            popup_lines(&results, ACTIVE),
+            [
+                Line::Header {
+                    name: ACTIVE,
+                    first: true
+                },
+                Line::NoMatches,
+                Line::Header {
+                    name: "b",
+                    first: false
+                },
+                Line::Hit(0),
+            ]
+        );
     }
 
     #[test]
-    fn projects_with_the_same_folder_name_get_their_own_groups() {
-        let dir = tempfile::tempdir().unwrap();
-        let roots = [
-            dir.path().join("here"),
-            dir.path().join("x").join("app"),
-            dir.path().join("y").join("app"),
+    fn projects_with_the_same_name_get_their_own_groups() {
+        let snaps = [
+            snap("here", &["topic"]),
+            snap("app", &["topic"]),
+            snap("app", &["topic"]),
         ];
-        for root in &roots {
-            std::fs::create_dir_all(root).unwrap();
-            repo(root, "topic");
-        }
-        let pool = JobPool::new(2, Arc::new(|| {}));
-        let projects: Vec<Project> = roots.iter().map(|r| open(r, &pool)).collect();
-
-        let results = hits(&projects, 0, "topic");
-        assert_eq!(headers(&results), ["here", "app", "app"]);
+        let results = search(&snaps, 0, "topic");
+        assert_eq!(headers(&results), [ACTIVE, "app", "app"]);
     }
 
-    /// The group headers the popup draws, the active project's as "here".
-    fn headers(results: &[Hit]) -> Vec<&str> {
-        let elsewhere = results.iter().any(|h| h.project.is_some());
-        (0..results.len())
-            .filter_map(|i| header(results, i, elsewhere, "here"))
-            .collect()
+    #[test]
+    fn finds_changed_files_and_commits() {
+        let snap = snap("a", &[]);
+        let status = WorktreeStatus {
+            ahead: 0,
+            behind: 0,
+            entries: vec![StatusEntry {
+                path: "src/topic.rs".to_owned(),
+                orig_path: None,
+                index: Change::Modified,
+                worktree: Change::None,
+                kind: EntryKind::Tracked,
+            }],
+        };
+        let commit = Commit {
+            id: oid(0xab),
+            parents: Default::default(),
+            author: "Ada".to_owned(),
+            time: 0,
+            commit_time: 0,
+            summary: "Fix the topic".to_owned(),
+        };
+        let history = History::build(&[commit], None);
+        let hits = project_hits(&snap, Some(&status), Some(&history), "topic");
+        let found: Vec<(Kind, &str)> = hits.iter().map(|h| (h.kind, h.detail.as_str())).collect();
+        assert_eq!(
+            found,
+            [(Kind::Changed, "staged"), (Kind::Commit, "abababa · Ada")]
+        );
+        // A commit id prefix finds it, too.
+        let by_id = project_hits(&snap, None, Some(&history), "abab");
+        assert_eq!(by_id.len(), 1);
+    }
+
+    /// A repo with one commit and an extra branch `branch`, opened as a tab.
+    fn open_with(dir: &Path, branch: &str) -> Project {
+        git(dir, &["init", "-q", "-b", "main"]);
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        git(dir, &["add", "a.txt"]);
+        git(dir, &["commit", "-q", "-m", "first"]);
+        git(dir, &["branch", branch]);
+        open(dir)
+    }
+
+    /// The whole path once, with real repositories opened as tabs.
+    #[test]
+    fn finds_branches_in_open_projects() {
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let projects = [
+            open_with(a.path(), "feature-here"),
+            open_with(b.path(), "feature-there"),
+        ];
+        let found: Vec<(String, Option<usize>)> = hits(&projects, 1, "feature")
+            .into_iter()
+            .filter(|h| h.kind == Kind::Branch)
+            .map(|h| (h.title, h.project.map(|(tab, _)| tab)))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("feature-there".to_owned(), None),
+                ("feature-here".to_owned(), Some(0))
+            ]
+        );
     }
 }

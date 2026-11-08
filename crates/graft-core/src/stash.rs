@@ -3,13 +3,14 @@
 
 use anyhow::{Result, bail};
 
-use crate::details::{self, FileChange};
-use crate::status::Change;
-use crate::{Git, Oid};
+use crate::changes::{FileChange, between};
+use crate::cli::Git;
+use crate::model::{Change, Oid};
+use crate::refusal;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Stash {
-    /// Position in `git stash list` (stash@{index}).
+    /// Position in `git stash list` (see [`Stash::name`]).
     pub index: usize,
     pub id: Oid,
     pub message: String,
@@ -18,12 +19,21 @@ pub struct Stash {
     pub time: i64,
 }
 
+impl Stash {
+    /// `stash@{n}`, as git names it.
+    pub fn name(&self) -> String {
+        format!("stash@{{{}}}", self.index)
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Options {
     pub message: String,
-    /// Also stash untracked files (`-u`).
+    /// Also stash untracked files (`-u`). Not with `staged_only`: untracked
+    /// files are never staged.
     pub include_untracked: bool,
-    /// Leave staged changes in place (`--keep-index`).
+    /// Leave staged changes in place (`--keep-index`). Not with
+    /// `staged_only`, which stashes just the staged changes.
     pub keep_index: bool,
     /// Stash only what is staged (`--staged`).
     pub staged_only: bool,
@@ -35,6 +45,13 @@ pub struct Options {
 pub struct StashFile {
     pub change: FileChange,
     pub commit: Oid,
+}
+
+impl StashFile {
+    /// Saved with `--include-untracked`: it lives in the stash's third parent.
+    pub fn is_untracked(&self, stash: &Stash) -> bool {
+        self.commit != stash.id
+    }
 }
 
 pub fn list(git: &Git) -> Result<Vec<Stash>> {
@@ -82,10 +99,10 @@ fn parse_subject(subject: &str) -> (Option<String>, String) {
 
 pub fn push(git: &Git, options: &Options) -> Result<()> {
     let mut args = vec!["stash", "push"];
-    if options.include_untracked {
+    if options.include_untracked && !options.staged_only {
         args.push("--include-untracked");
     }
-    if options.keep_index {
+    if options.keep_index && !options.staged_only {
         args.push("--keep-index");
     }
     if options.staged_only {
@@ -95,8 +112,8 @@ pub fn push(git: &Git, options: &Options) -> Result<()> {
     if !message.is_empty() {
         args.extend(["--message", message]);
     }
-    let out = git.run(args)?;
-    if out.stdout_str().contains("No local changes to save") {
+    let out = git.without_literal_pathspecs().run(args)?;
+    if refusal::nothing_to_stash(&out.stdout_str()) {
         bail!("There are no changes to stash.");
     }
     Ok(())
@@ -106,7 +123,7 @@ pub fn push(git: &Git, options: &Options) -> Result<()> {
 /// stash is added or dropped, so they are looked up right before use.
 fn reference(git: &Git, id: Oid) -> Result<String> {
     match list(git)?.into_iter().find(|s| s.id == id) {
-        Some(s) => Ok(format!("stash@{{{}}}", s.index)),
+        Some(s) => Ok(s.name()),
         None => bail!("That stash no longer exists."),
     }
 }
@@ -134,16 +151,12 @@ pub fn branch(git: &Git, branch: &str, id: Oid) -> Result<()> {
 }
 
 pub fn files(git: &Git, id: Oid) -> Result<Vec<StashFile>> {
-    let mut files: Vec<StashFile> = details::load(git, id)?
-        .files
+    let mut files: Vec<StashFile> = between(git, &format!("{id}^1"), Some(&id.to_string()))?
         .into_iter()
         .map(|change| StashFile { change, commit: id })
         .collect();
     // Untracked files stashed with -u live in a third parent.
-    let third = git.run_raw(["rev-parse", "--verify", "--quiet", &format!("{id}^3")])?;
-    if third.success()
-        && let Ok(untracked) = Oid::from_hex(third.stdout_str().trim().as_bytes())
-    {
+    if let Some(untracked) = git.rev(&format!("{id}^3"))? {
         let names = git.read(["ls-tree", "-r", "--name-only", "-z", &untracked.to_string()])?;
         for path in names.split('\0').filter(|p| !p.is_empty()) {
             files.push(StashFile {

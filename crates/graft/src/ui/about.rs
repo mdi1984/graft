@@ -1,9 +1,11 @@
 //! The About dialog: version, license, and updates.
 
-use egui::{Align, Id, Key, Layout, RichText, Sense, Ui, vec2};
+use egui::{Align, Layout, RichText, Sense, Ui, vec2};
 
-use super::widgets::{ButtonKind, button, spinner};
-use super::window_frame::paint_app_icon;
+use super::can::{Can, yes};
+use super::icons::paint_app_icon;
+use super::widgets::dialog::{self, footer_row};
+use super::widgets::{ButtonKind, button, error_label, inline_spinner};
 use crate::theme::{self, color};
 use crate::update::{self, Status};
 
@@ -12,16 +14,18 @@ const WIDTH: f32 = 420.0;
 pub enum AboutAction {
     Check,
     Install,
+    /// Start the downloaded update.
+    Restart,
     /// Open a web page (the release notes, the repository).
     Open(String),
     Close,
 }
 
-pub fn show(ctx: &egui::Context, status: &Status) -> Option<AboutAction> {
+/// `blocked`: why Graft may not restart for an update now.
+pub fn show(ctx: &egui::Context, status: &Status, blocked: Option<&str>) -> Option<AboutAction> {
+    let restart = yes("").unless(blocked);
     let mut action = None;
-    let response = super::widgets::modal(ctx, Id::unique("about-modal")).show(ctx, |ui| {
-        ui.set_width(WIDTH);
-        ui.spacing_mut().item_spacing.y = 6.0;
+    let shown = dialog::show(ctx, "about-modal", WIDTH, false, |ui| {
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(vec2(48.0, 48.0), Sense::hover());
             paint_app_icon(ui, rect);
@@ -46,31 +50,34 @@ pub fn show(ctx: &egui::Context, status: &Status) -> Option<AboutAction> {
         );
 
         ui.add_space(10.0);
-        updates(ui, status, &mut action);
+        updates(ui, status, &restart, &mut action);
 
-        ui.add_space(12.0);
-        ui.horizontal(|ui| {
-            if button(ui, "GitHub", ButtonKind::Secondary, true).clicked() {
-                action = Some(AboutAction::Open(update::REPO_URL.to_owned()));
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if button(ui, "Close", ButtonKind::Secondary, true).clicked() {
-                    action = Some(AboutAction::Close);
-                }
-            });
-        });
+        ui.add_space(4.0);
+        let (github, close) = footer_row(
+            ui,
+            |ui| button(ui, "GitHub", ButtonKind::Secondary, true).clicked(),
+            |ui| button(ui, "Close", ButtonKind::Secondary, true).clicked(),
+        );
+        if github {
+            action = Some(AboutAction::Open(update::REPO_URL.to_owned()));
+        } else if close {
+            action = Some(AboutAction::Close);
+        }
     });
-    if action.is_none() && (response.should_close() || ctx.input(|i| i.key_pressed(Key::Escape))) {
+    if action.is_none() && shown.cancel {
         action = Some(AboutAction::Close);
     }
     action
 }
 
-fn updates(ui: &mut Ui, status: &Status, action: &mut Option<AboutAction>) {
+fn updates(ui: &mut Ui, status: &Status, restart: &Can, action: &mut Option<AboutAction>) {
+    let restart_button = |ui: &mut Ui, label: &str| {
+        let response = button(ui, label, ButtonKind::Primary, restart.ok);
+        restart.why_not(response).clicked()
+    };
     let busy = |ui: &mut Ui, text: String| {
         ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
-            spinner(ui, rect.center(), 5.0, color::text_weak());
+            inline_spinner(ui);
             ui.label(RichText::new(text).color(color::text_mid()));
         });
     };
@@ -98,7 +105,7 @@ fn updates(ui: &mut Ui, status: &Status, action: &mut Option<AboutAction>) {
                     .color(color::text()),
             );
             ui.horizontal(|ui| {
-                if button(ui, "Update and restart", ButtonKind::Primary, true).clicked() {
+                if restart_button(ui, "Update and restart") {
                     *action = Some(AboutAction::Install);
                 }
                 if button(ui, "What's new", ButtonKind::Secondary, true).clicked() {
@@ -107,8 +114,18 @@ fn updates(ui: &mut Ui, status: &Status, action: &mut Option<AboutAction>) {
             });
         }
         Status::Installing(release) => busy(ui, format!("Downloading Graft {}…", release.version)),
+        Status::Ready(release, _) => {
+            ui.label(
+                RichText::new(format!("Graft {} is downloaded.", release.version))
+                    .font(theme::semibold(theme::BODY_SIZE))
+                    .color(color::text()),
+            );
+            if restart_button(ui, "Restart to update") {
+                *action = Some(AboutAction::Restart);
+            }
+        }
         Status::Failed(error) => {
-            ui.add(egui::Label::new(RichText::new(error).color(color::removed())).wrap());
+            error_label(ui, error);
             if button(ui, "Try again", ButtonKind::Secondary, true).clicked() {
                 *action = Some(AboutAction::Check);
             }

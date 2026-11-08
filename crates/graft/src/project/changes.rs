@@ -1,28 +1,43 @@
 //! File status: the selected file's diff, line selection, staging and
-//! discarding, the commit form, and fetch/pull/push.
+//! discarding, and the commit form. Also loads the read-only diffs: each
+//! screen that shows one (History, Stashes, Review, File history) holds its
+//! own, see [`DiffOwner`].
 
 use std::collections::BTreeSet;
 use std::ops::Range;
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
 
+use graft_core::changes::FileChange;
 use graft_core::diff::{self, FileDiff, Gap, Source};
 use graft_core::ops::{self, LineOp};
-use graft_core::repo::Progress;
-use graft_core::status::{EntryKind, StatusEntry};
-use graft_core::{CancelToken, Git};
-use graft_core::{refs, remote};
+use graft_core::paths::same_path;
+use graft_core::{EntryKind, FileList, Git, StatusEntry};
 
 use super::comments::{Pick, Side};
-use super::{Action, Event, Project};
+use super::ops::{At, quietly};
+use super::{Action, Confirm, Project, RemoteOp, readable};
 
-/// One file in one of the File status lists.
+/// Which file a diff shows, and from where: a File status list, a commit
+/// or stash, or the review's base.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileKey {
     pub source: Source,
     pub path: String,
+    /// The path before a rename, for a diff that shows it as one (see
+    /// [`diff::load`]).
+    pub orig_path: Option<String>,
 }
 
 impl FileKey {
+    /// The key for a file of a commit, stash or review.
+    pub fn changed(source: Source, file: &FileChange) -> Self {
+        Self {
+            source,
+            path: file.path.clone(),
+            orig_path: file.orig_path.clone(),
+        }
+    }
+
     /// The key for a status entry in the staged or the unstaged list.
     pub fn of(entry: &StatusEntry, staged: bool) -> Self {
         let source = if staged {
@@ -35,6 +50,7 @@ impl FileKey {
         Self {
             source,
             path: entry.path.clone(),
+            orig_path: None,
         }
     }
 
@@ -60,10 +76,10 @@ fn line_count(diff: &FileDiff) -> usize {
 }
 
 /// A diff as loaded in the background, ready to show.
-pub struct Loaded {
-    pub diff: FileDiff,
-    pub gaps: Option<Vec<Gap>>,
-    pub highlights: Highlights,
+struct Loaded {
+    diff: FileDiff,
+    gaps: Option<Vec<Gap>>,
+    highlights: Highlights,
 }
 
 /// Line ranges on one side of a diff.
@@ -85,11 +101,17 @@ fn load_shown(
     whole: bool,
     revealed: &[(Side, Range<u32>)],
     kept: &[(Side, Range<u32>)],
-) -> Result<Loaded, String> {
+) -> anyhow::Result<Loaded> {
     let reveal = |old, new| whole || has(revealed, old, new);
     let keep = |old, new| has(kept, old, new);
-    let (diff, gaps) = diff::load_expanded(git, &key.source, &key.path, reveal, keep)
-        .map_err(|e| format!("{e:#}"))?;
+    let (diff, gaps) = diff::load_expanded(
+        git,
+        &key.source,
+        &key.path,
+        key.orig_path.as_deref(),
+        reveal,
+        keep,
+    )?;
     let highlights = Highlights::of(&diff);
     Ok(Loaded {
         diff,
@@ -127,41 +149,155 @@ impl Highlights {
     }
 }
 
-/// The diff shown next to the file lists.
+/// The screen a diff belongs to. Each holds its own diff, so a result that
+/// arrives late lands where it was asked for, or nowhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiffOwner {
+    /// File status: the selected worktree's file, with staging.
+    Status,
+    /// History: a file of the selected commit.
+    Commit,
+    /// Stashes: a file of the selected stash.
+    Stash,
+    /// Review: the open file of the review.
+    Review,
+    /// File history: the file in the selected commit.
+    FileHistory,
+}
+
+impl DiffOwner {
+    const ALL: [DiffOwner; 5] = [
+        DiffOwner::Status,
+        DiffOwner::Commit,
+        DiffOwner::Stash,
+        DiffOwner::Review,
+        DiffOwner::FileHistory,
+    ];
+
+    /// A diff with a close button (and Esc): a commit's or stash's file.
+    pub fn closes(self) -> bool {
+        matches!(self, DiffOwner::Commit | DiffOwner::Stash)
+    }
+}
+
+/// What a diff can change in the worktree. Only File status stages; a
+/// commit's, stash's or review's diff changes nothing (it is read-only),
+/// even where the review shows an untracked file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Staging {
+    /// Staged changes: unstage them.
+    Staged,
+    /// Unstaged or untracked changes: stage or discard them.
+    Unstaged,
+}
+
+impl Staging {
+    fn of(owner: DiffOwner, source: &Source) -> Option<Self> {
+        match (owner, source) {
+            (DiffOwner::Status, Source::Staged) => Some(Staging::Staged),
+            (DiffOwner::Status, Source::Unstaged | Source::Untracked) => Some(Staging::Unstaged),
+            _ => None,
+        }
+    }
+}
+
+/// One file's diff, as one screen shows it.
 pub struct DiffView {
+    pub owner: DiffOwner,
     pub key: FileKey,
+    /// The worktree it shows: the one selected when it opened, or the
+    /// review's. Its file is read from there, whatever is selected later.
+    pub worktree: PathBuf,
     pub diff: Option<FileDiff>,
     pub highlights: Highlights,
     pub error: Option<String>,
-    pub loading: bool,
     /// Selected changed lines as (hunk, line).
     pub selection: BTreeSet<(usize, usize)>,
     pub anchor: Option<(usize, usize)>,
-    /// No staging, discarding or line selection (commits, stashes, review).
-    pub read_only: bool,
+    /// What staging, discarding and line selection do; `None` when there
+    /// are none (read-only).
+    pub staging: Option<Staging>,
     /// Unchanged lines still hidden; `None` when they cannot be shown.
     pub gaps: Option<Vec<Gap>>,
     /// Unchanged lines the user asked to see, by the line numbers of the
     /// side that stays put (the working tree's while staging).
     pub revealed: SideLines,
-    generation: u64,
+    ticket: u64,
 }
 
 impl DiffView {
-    fn new(key: FileKey, read_only: bool) -> Self {
+    fn new(key: FileKey, owner: DiffOwner, worktree: PathBuf) -> Self {
         Self {
+            staging: Staging::of(owner, &key.source),
+            owner,
             key,
+            worktree,
             diff: None,
             highlights: Highlights::default(),
             error: None,
-            loading: true,
             selection: BTreeSet::new(),
             anchor: None,
-            read_only,
             gaps: None,
             revealed: Vec::new(),
-            generation: 0,
+            ticket: 0,
         }
+    }
+
+    fn clear_selection(&mut self) {
+        self.selection.clear();
+        self.anchor = None;
+    }
+
+    fn changed_lines(&self) -> Vec<(usize, usize)> {
+        let Some(diff) = &self.diff else {
+            return Vec::new();
+        };
+        diff.hunks
+            .iter()
+            .enumerate()
+            .flat_map(|(h, hunk)| {
+                hunk.lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, l)| l.is_change())
+                    .map(move |(l, _)| (h, l))
+            })
+            .collect()
+    }
+
+    /// Select every changed line from `a` to `b`.
+    fn select_range(&mut self, a: (usize, usize), b: (usize, usize)) {
+        let (lo, hi) = (a.min(b), a.max(b));
+        for at in self.changed_lines() {
+            if lo <= at && at <= hi {
+                self.selection.insert(at);
+            }
+        }
+    }
+}
+
+/// Lines of File status's diff to stage, unstage or discard, with the diff
+/// they were picked from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineChange {
+    op: LineOp,
+    key: FileKey,
+    diff: FileDiff,
+    /// One hunk, or else the selected lines.
+    hunk: Option<usize>,
+    selection: BTreeSet<(usize, usize)>,
+}
+
+impl DiffView {
+    /// `op` on hunk `hunk`, or on the selected lines with `None`.
+    pub fn change_lines(&self, op: LineOp, hunk: Option<usize>) -> Option<Action> {
+        Some(Action::ChangeLines(Box::new(LineChange {
+            op,
+            key: self.key.clone(),
+            diff: self.diff.clone()?,
+            hunk,
+            selection: self.selection.clone(),
+        })))
     }
 }
 
@@ -176,6 +312,21 @@ pub struct CommitForm {
 }
 
 impl CommitForm {
+    /// Empty, for the next commit: what was typed goes, "Push after commit"
+    /// (a preference, not part of the message) stays.
+    pub fn cleared(&self) -> Self {
+        Self {
+            push_after: self.push_after,
+            ..Self::default()
+        }
+    }
+
+    /// Can it be committed, with `staged` files staged? Amending needs no
+    /// staged files.
+    pub fn ready(&self, staged: usize) -> bool {
+        !self.summary.trim().is_empty() && (staged > 0 || self.amend)
+    }
+
     pub fn message(&self) -> String {
         let summary = self.summary.trim();
         let body = self.body.trim();
@@ -185,333 +336,278 @@ impl CommitForm {
             format!("{summary}\n\n{body}")
         }
     }
+
+    /// Something typed that a reset would lose.
+    pub fn is_drafted(&self) -> bool {
+        !self.summary.trim().is_empty() || !self.body.trim().is_empty()
+    }
 }
 
-/// A git command that changes things, running in the background.
-pub struct Operation {
-    pub label: String,
-    pub progress: Arc<Mutex<Progress>>,
-    pub cancel: Option<CancelToken>,
-}
-
-/// A question to confirm before doing something destructive.
-#[derive(Clone, Debug)]
-pub struct Confirm {
-    pub title: String,
-    pub body: String,
-    pub confirm_label: String,
-    pub action: Action,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RemoteOp {
-    Fetch,
-    Pull,
-    Push,
-    /// Push over a diverged upstream, with lease.
-    ForcePush,
-    PushTag {
-        remote: String,
-        tag: String,
-    },
-    DeleteRemoteBranch {
-        remote: String,
-        branch: String,
-    },
-}
-
-impl RemoteOp {
-    fn label(&self) -> String {
-        match self {
-            Self::Fetch => "Fetching".to_owned(),
-            Self::Pull => "Pulling".to_owned(),
-            Self::Push => "Pushing".to_owned(),
-            Self::ForcePush => "Force pushing".to_owned(),
-            Self::PushTag { tag, .. } => format!("Pushing tag {tag}"),
-            Self::DeleteRemoteBranch { remote, branch } => {
-                format!("Deleting {remote}/{branch}")
-            }
+impl Action {
+    /// Ask before discarding a whole file (File status, the diff's
+    /// Discard…) in `worktree`, see [`Project::ask_discard`].
+    pub fn discard_file(worktree: &Path, source: &Source, path: String) -> Action {
+        Action::AskDiscard {
+            worktree: worktree.to_path_buf(),
+            source: source.clone(),
+            path,
         }
     }
 }
 
-/// What happens when an operation finishes successfully.
-pub(super) enum Then {
-    Nothing,
-    /// A plain push: if the remote rejects it, offer to force push.
-    Pushed,
-    /// Deleting this branch: if it is not merged, offer to force it.
-    DeletedBranch(String),
-    /// Submitted from the open dialog: close it on success, show errors in it.
-    Dialog(String),
-    /// Select this worktree as soon as a snapshot contains it.
-    OpenWorktree(std::path::PathBuf),
-    Committed {
-        summary: String,
-        push: bool,
-    },
-    Info(String),
-    /// Switching to this branch: if local changes are in the way, offer to
-    /// stash them first.
-    Switched(String),
-    /// A merge, rebase, cherry-pick, revert or continue: the job's extra
-    /// message means it stopped with conflicts.
-    MayConflict(String),
+/// The question before discarding a whole file; a new one goes to the
+/// Recycle Bin if the worktree has one, else it is deleted for good.
+fn discard_question(recycle_bin: bool, source: &Source, path: String) -> Confirm {
+    let untracked = *source == Source::Untracked;
+    let (title, body, confirm_label) = if !untracked {
+        (
+            "Discard changes?",
+            format!("All unstaged changes to {path} will be lost. Staged changes stay."),
+            "Discard",
+        )
+    } else if recycle_bin {
+        (
+            "Discard changes?",
+            format!("{path} is not tracked by git. It will be moved to the Recycle Bin."),
+            "Discard",
+        )
+    } else {
+        (
+            "Delete the file for good?",
+            format!(
+                "{path} is not tracked by git. It will be deleted permanently: Windows \
+                     has no Recycle Bin inside WSL or on a network share or drive."
+            ),
+            "Delete permanently",
+        )
+    };
+    let (tracked, untracked_paths) = if untracked {
+        (Vec::new(), vec![path])
+    } else {
+        (vec![path], Vec::new())
+    };
+    Confirm {
+        title: title.to_owned(),
+        body,
+        confirm_label: confirm_label.to_owned(),
+        action: Action::Discard {
+            tracked,
+            untracked: untracked_paths,
+        },
+    }
 }
 
 impl Project {
-    /// Git pointed at the selected worktree.
-    pub fn wt_git(&self) -> Git {
-        self.git.at(&self.nav.worktree)
+    /// Ask before discarding `path` in `worktree`; confirmed,
+    /// [`Project::discard`] runs it. Whether a new file goes to the Recycle
+    /// Bin is the snapshot's answer (see [`graft_core::Worktree::recycle_bin`]):
+    /// finding out takes the disk, which the UI thread never touches.
+    pub(super) fn ask_discard(&mut self, worktree: &Path, source: &Source, path: String) {
+        let recycle_bin = self
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.worktree_at(worktree))
+            .is_some_and(|wt| wt.recycle_bin);
+        self.ask(discard_question(recycle_bin, source, path));
     }
 
-    /// The main folder. Checkouts always happen there, never in a linked
-    /// worktree: a worktree keeps its branch.
-    pub fn main_worktree(&self) -> Option<&graft_core::Worktree> {
-        self.snapshot.as_ref()?.main_worktree()
-    }
-
-    /// Why the main folder can't switch now, for a readable notice.
-    pub fn checkout_blocked(&self) -> Option<&'static str> {
-        let snap = self.snapshot.as_ref()?;
-        if snap.preview.is_some() {
-            Some("The main folder shows a preview. Restore main first, then check out.")
-        } else if self
-            .main_worktree()
-            .is_some_and(|wt| wt.in_progress.is_some())
-        {
-            Some(
-                "A merge, rebase, cherry-pick or revert is still going on in the main folder. \
-                 Finish or abort it first, then check out.",
-            )
-        } else {
-            None
+    /// The diff `owner` shows, if any.
+    pub fn diff(&self, owner: DiffOwner) -> Option<&DiffView> {
+        match owner {
+            DiffOwner::Status => self.diff_view.as_ref(),
+            DiffOwner::Commit => self.commit_diff.as_ref(),
+            DiffOwner::Stash => self.stash_diff.as_ref(),
+            DiffOwner::Review => self.review.as_ref()?.diff.as_ref(),
+            DiffOwner::FileHistory => self.file_history.as_ref()?.diff.as_ref(),
         }
     }
 
-    /// " in the main folder" while a linked worktree is selected, so a menu
-    /// says where a checkout lands; empty while the main folder is selected.
-    pub fn in_main_suffix(&self) -> &'static str {
-        if self.worktree().is_some_and(|wt| !wt.is_main) {
-            " in the main folder"
-        } else {
-            ""
+    /// Where `owner` keeps its diff; `None` while its screen is not open.
+    fn diff_slot(&mut self, owner: DiffOwner) -> Option<&mut Option<DiffView>> {
+        match owner {
+            DiffOwner::Status => Some(&mut self.diff_view),
+            DiffOwner::Commit => Some(&mut self.commit_diff),
+            DiffOwner::Stash => Some(&mut self.stash_diff),
+            DiffOwner::Review => Some(&mut self.review.as_mut()?.diff),
+            DiffOwner::FileHistory => Some(&mut self.file_history.as_mut()?.diff),
         }
     }
 
-    pub fn is_operating(&self) -> bool {
-        self.op.is_some()
+    fn diff_mut(&mut self, owner: DiffOwner) -> Option<&mut DiffView> {
+        self.diff_slot(owner)?.as_mut()
     }
 
-    pub fn select_file(&mut self, key: FileKey) {
-        if self.diff_view.as_ref().is_some_and(|v| v.key == key) {
-            return;
+    /// Close the diff `owner` shows.
+    pub(super) fn close_diff(&mut self, owner: DiffOwner) {
+        if let Some(slot) = self.diff_slot(owner) {
+            *slot = None;
         }
-        self.diff_view = Some(DiffView::new(key, false));
-        self.load_diff();
+    }
+
+    pub(super) fn select_file(&mut self, key: FileKey) {
+        self.open_diff(DiffOwner::Status, key);
         self.sync_conflict();
     }
 
-    /// Show one file of a commit or stash (read-only).
-    pub fn select_commit_file(&mut self, key: FileKey) {
-        if self.commit_diff.as_ref().is_some_and(|v| v.key == key) {
+    /// Show `key` in `owner`'s diff, unless it shows it already. The diff
+    /// shows the review's worktree on Review, else the selected one.
+    pub(super) fn open_diff(&mut self, owner: DiffOwner, key: FileKey) {
+        let review = self.review.as_ref().filter(|_| owner == DiffOwner::Review);
+        let worktree = review.map_or(&self.nav.worktree, |r| &r.worktree).clone();
+        let Some(slot) = self.diff_slot(owner) else {
+            return;
+        };
+        if slot
+            .as_ref()
+            .is_some_and(|v| v.key == key && same_path(&v.worktree, &worktree))
+        {
             return;
         }
-        self.commit_diff = Some(DiffView::new(key, true));
-        self.load_commit_diff();
+        *slot = Some(DiffView::new(key, owner, worktree));
+        self.load_view(owner);
     }
 
-    /// (Re)load the read-only diff (commit, stash, review).
-    pub(super) fn load_commit_diff(&mut self) {
-        self.diff_generation += 1;
-        let generation = self.diff_generation;
+    /// (Re)load `owner`'s diff; what is selected or picked in it survives
+    /// if only the unchanged lines shown change.
+    pub(super) fn load_view(&mut self, owner: DiffOwner) {
+        let Some((key, worktree)) = self
+            .diff(owner)
+            .map(|v| (v.key.clone(), v.worktree.clone()))
+        else {
+            return;
+        };
+        let ticket = self.ticket();
         let whole = self.settings.whole_file;
-        // Commits are the same everywhere; the rest reads the worktree.
-        let git = match self.commit_diff.as_ref().map(|v| &v.key.source) {
-            Some(Source::Commit(_)) => self.git.clone(),
-            _ => self.wt_git(),
+        // Commits are the same everywhere; the rest reads the diff's worktree.
+        let git = match key.source {
+            Source::Commit(_) => self.git.clone(),
+            _ => self.git.at(&worktree),
         };
-        let Some(view) = &mut self.commit_diff else {
-            return;
-        };
-        view.generation = generation;
-        view.loading = true;
-        let key = view.key.clone();
+        let kept = self.comment_lines(&key, &worktree);
+        let view = self.diff_mut(owner).expect("checked above");
+        view.ticket = ticket;
         let revealed = view.revealed.clone();
-        let kept = self.comment_lines(&key);
-        self.pool.spawn(&self.tx, move || Event::CommitDiff {
-            generation,
-            result: load_shown(&git, &key, whole, &revealed, &kept),
-        });
+        self.jobs.spawn(
+            move || load_shown(&git, &key, whole, &revealed, &kept),
+            move |p, result| p.on_view_loaded(owner, ticket, result),
+        );
     }
 
-    pub(super) fn on_commit_diff(&mut self, generation: u64, result: Result<Loaded, String>) {
-        let Some(view) = &mut self.commit_diff else {
+    /// A loaded diff, if `owner` still shows the load asked for (the ticket
+    /// of a closed or replaced diff matches nothing).
+    fn on_view_loaded(&mut self, owner: DiffOwner, ticket: u64, result: anyhow::Result<Loaded>) {
+        let picked = self.picked_in(owner);
+        let Some(view) = self.diff_mut(owner).filter(|v| v.ticket == ticket) else {
             return;
         };
-        if view.generation != generation {
+        let Loaded {
+            diff,
+            gaps,
+            highlights,
+        } = match readable(result) {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                view.diff = None;
+                view.error = Some(e);
+                return;
+            }
+        };
+        let same = view.diff.as_ref() == Some(&diff);
+        let mut pick = None;
+        if !same {
+            // Selected and picked lines stay when only more lines show; when
+            // the changes differ, they would point elsewhere.
+            let old = view.diff.as_ref();
+            let moved = old.and_then(|old| {
+                let selection = follow(old, &diff, view.selection.iter().copied())?;
+                let anchor = match view.anchor {
+                    Some(a) => Some(follow(old, &diff, [a])?[0]),
+                    None => None,
+                };
+                Some((selection, anchor))
+            });
+            let (selection, anchor) = moved.unwrap_or_default();
+            view.selection = selection.into_iter().collect();
+            view.anchor = anchor;
+            pick = picked.map(|p| {
+                old.and_then(|old| follow(old, &diff, [p.anchor, p.cursor]))
+                    .map(|at| Pick {
+                        anchor: at[0],
+                        cursor: at[1],
+                        ..p
+                    })
+            });
+        }
+        // A big diff's colors come later; keep the old ones meanwhile.
+        let old = std::mem::replace(&mut view.highlights, highlights);
+        if same && view.highlights.syntax.is_empty() {
+            view.highlights.syntax = old.syntax;
+        }
+        view.diff = Some(diff);
+        view.gaps = gaps;
+        view.error = None;
+        if let (Some(pick), Some(review)) = (pick, &mut self.review) {
+            review.pick = pick;
+        }
+        self.color_later(owner, ticket);
+    }
+
+    /// The review's picked lines, for the review's diff of its open file.
+    fn picked_in(&self, owner: DiffOwner) -> Option<Pick> {
+        if owner != DiffOwner::Review {
+            return None;
+        }
+        let review = self.review.as_ref()?;
+        let view = review.diff.as_ref()?;
+        let reviewed = review.selected.as_deref() == Some(view.key.path.as_str());
+        review.pick.filter(|_| reviewed)
+    }
+
+    /// Reload every open diff (the "Whole file" setting changed).
+    pub(super) fn reload_diffs(&mut self) {
+        for owner in DiffOwner::ALL {
+            self.load_view(owner);
+        }
+    }
+
+    /// Syntax colors for a diff too big to color with the diff itself.
+    fn color_later(&self, owner: DiffOwner, ticket: u64) {
+        let Some(view) = self.diff(owner) else { return };
+        let Some(diff) = &view.diff else { return };
+        if !view.highlights.syntax.is_empty() || line_count(diff) <= INLINE_SYNTAX_LINES {
             return;
         }
-        view.loading = false;
-        match result {
-            Ok(loaded) => {
-                // Lines picked to comment on stay picked when more show;
-                // when the lines changed, the pick would point elsewhere.
-                if let (Some(old), Some(review)) = (&view.diff, &mut self.review)
-                    && let Some(pick) = review.pick
-                    && *old != loaded.diff
-                {
-                    review.pick =
-                        follow(old, &loaded.diff, [pick.anchor, pick.cursor]).map(|at| Pick {
-                            anchor: at[0],
-                            cursor: at[1],
-                            ..pick
-                        });
+        let diff = diff.clone();
+        self.jobs.spawn(
+            move || Some(graft_core::syntax::highlight(&diff)),
+            move |p, syntax| {
+                let Some(syntax) = syntax else { return };
+                if let Some(view) = p.diff_mut(owner).filter(|v| v.ticket == ticket) {
+                    view.highlights.syntax = syntax;
                 }
-                view.diff = Some(loaded.diff);
-                view.gaps = loaded.gaps;
-                view.highlights = loaded.highlights;
-                view.error = None;
-            }
-            Err(e) => view.error = Some(e),
-        }
-        self.color_later(generation, true);
+            },
+        );
     }
 
     /// Show more unchanged lines, `old` and `new` being their numbers on
-    /// each side, in the File status diff or, with `commit`, in the
-    /// read-only one.
-    fn show_lines(&mut self, commit: bool, old: Range<u32>, new: Range<u32>) {
-        let view = if commit {
-            &mut self.commit_diff
-        } else {
-            &mut self.diff_view
+    /// each side, in `owner`'s diff if it still shows `key`.
+    pub(super) fn show_lines(
+        &mut self,
+        owner: DiffOwner,
+        key: &FileKey,
+        old: Range<u32>,
+        new: Range<u32>,
+    ) {
+        let Some(view) = self.diff_mut(owner).filter(|v| v.key == *key) else {
+            return;
         };
-        let Some(view) = view else { return };
         // Staging a hunk above moves the index's numbers, not the working
         // tree's.
         view.revealed.push(match view.key.source {
             Source::Unstaged => (Side::New, new),
             _ => (Side::Old, old),
         });
-        if commit {
-            self.load_commit_diff();
-        } else {
-            self.load_diff();
-        }
-    }
-
-    /// Show whole files in diffs, or only the changes with some context.
-    pub fn set_whole_file(&mut self, whole: bool) {
-        if self.settings.whole_file == whole {
-            return;
-        }
-        self.settings.whole_file = whole;
-        if self.diff_view.is_some() {
-            self.load_diff();
-        }
-        if self.commit_diff.is_some() {
-            self.load_commit_diff();
-        }
-    }
-
-    /// Syntax colors for a diff too big to color with the diff itself.
-    fn color_later(&self, generation: u64, commit: bool) {
-        let view = if commit {
-            self.commit_diff.as_ref()
-        } else {
-            self.diff_view.as_ref()
-        };
-        let Some(diff) = view.and_then(|v| v.diff.as_ref()) else {
-            return;
-        };
-        let colored = view.is_some_and(|v| !v.highlights.syntax.is_empty());
-        if colored || line_count(diff) <= INLINE_SYNTAX_LINES {
-            return;
-        }
-        let diff = diff.clone();
-        self.pool.spawn(&self.tx, move || Event::Syntax {
-            generation,
-            syntax: graft_core::syntax::highlight(&diff),
-        });
-    }
-
-    pub(super) fn on_syntax(&mut self, generation: u64, syntax: graft_core::syntax::Syntax) {
-        for view in [&mut self.diff_view, &mut self.commit_diff]
-            .into_iter()
-            .flatten()
-        {
-            if view.generation == generation {
-                view.highlights.syntax = syntax;
-                return;
-            }
-        }
-    }
-
-    /// (Re)load the selected file's diff; the selection survives if the diff
-    /// did not change.
-    pub(super) fn load_diff(&mut self) {
-        self.diff_generation += 1;
-        let generation = self.diff_generation;
-        let git = self.wt_git();
-        let whole = self.settings.whole_file;
-        let Some(view) = &mut self.diff_view else {
-            return;
-        };
-        view.generation = generation;
-        view.loading = true;
-        let key = view.key.clone();
-        let revealed = view.revealed.clone();
-        self.pool.spawn(&self.tx, move || Event::Diff {
-            generation,
-            result: load_shown(&git, &key, whole, &revealed, &[]),
-        });
-    }
-
-    pub(super) fn on_diff(&mut self, generation: u64, result: Result<Loaded, String>) {
-        let Some(view) = &mut self.diff_view else {
-            return;
-        };
-        if view.generation != generation {
-            return;
-        }
-        view.loading = false;
-        match result {
-            Ok(Loaded {
-                diff,
-                gaps,
-                highlights,
-            }) => {
-                let same = view.diff.as_ref() == Some(&diff);
-                if !same {
-                    // Selected lines stay selected when only more lines show.
-                    let moved = view.diff.as_ref().and_then(|old| {
-                        let selection = follow(old, &diff, view.selection.iter().copied())?;
-                        let anchor = match view.anchor {
-                            Some(a) => Some(follow(old, &diff, [a])?[0]),
-                            None => None,
-                        };
-                        Some((selection, anchor))
-                    });
-                    let (selection, anchor) = moved.unwrap_or_default();
-                    view.selection = selection.into_iter().collect();
-                    view.anchor = anchor;
-                }
-                // A big diff's colors come later; keep the old ones meanwhile.
-                let old = std::mem::replace(&mut view.highlights, highlights);
-                if same && view.highlights.syntax.is_empty() {
-                    view.highlights.syntax = old.syntax;
-                }
-                view.diff = Some(diff);
-                view.gaps = gaps;
-                view.error = None;
-            }
-            Err(e) => {
-                view.diff = None;
-                view.error = Some(e);
-            }
-        }
-        self.color_later(generation, false);
+        self.load_view(owner);
     }
 
     /// After a status refresh: keep the selected file if it is still in its
@@ -522,10 +618,8 @@ impl Project {
             return;
         };
         let keys: Vec<FileKey> = status
-            .staged()
-            .map(|e| FileKey::of(e, true))
-            .chain(status.unstaged().map(|e| FileKey::of(e, false)))
-            .chain(status.conflicted().map(|e| FileKey::of(e, false)))
+            .listed()
+            .map(|(list, e)| FileKey::of(e, list == FileList::Staged))
             .collect();
         let current = self.diff_view.as_ref().map(|v| v.key.clone());
         let next = match &current {
@@ -538,84 +632,19 @@ impl Project {
             None => keys.first().cloned(),
         };
         match next {
-            Some(key) if Some(&key) == current.as_ref() => self.load_diff(),
-            Some(key) => {
-                self.diff_view = None;
-                self.select_file(key);
-            }
+            Some(key) if Some(&key) == current.as_ref() => self.load_view(DiffOwner::Status),
+            Some(key) => self.select_file(key),
             None => self.diff_view = None,
         }
         self.sync_conflict();
     }
 
-    pub(super) fn apply_change(&mut self, action: Action) {
-        match action {
-            Action::SelectFile(key) => self.select_file(key),
-            Action::ClickLine { hunk, line, shift } => self.click_line(hunk, line, shift),
-            Action::DragLine { hunk, line } => self.drag_line(hunk, line),
-            Action::ClearLines => {
-                if let Some(v) = &mut self.diff_view {
-                    v.selection.clear();
-                    v.anchor = None;
-                }
-            }
-            Action::ShowLines { commit, old, new } => self.show_lines(commit, old, new),
-            Action::HunkOp(hunk, op) => self.lines_op(op, Some(hunk)),
-            Action::LinesOp(op) => self.lines_op(op, None),
-            Action::StageFiles(paths) => self.run_op("Staging", Then::Nothing, move |git| {
-                ops::stage_paths(&git, &paths)
-            }),
-            Action::UnstageFiles(paths) => self.run_op("Unstaging", Then::Nothing, move |git| {
-                ops::unstage_paths(&git, &paths)
-            }),
-            Action::Discard { tracked, untracked } => {
-                self.run_op("Discarding", Then::Nothing, move |git| {
-                    ops::discard_paths(&git, &tracked, &untracked)
-                })
-            }
-            Action::Commit => self.commit(),
-            Action::ToggleAmend => self.toggle_amend(),
-            Action::Remote(op) => self.remote(op),
-            Action::CancelOperation => {
-                if let Some(cancel) = self.op.as_ref().and_then(|o| o.cancel.as_ref()) {
-                    cancel.cancel();
-                }
-            }
-            Action::Ask(confirm) => self.confirm = Some(*confirm),
-            Action::ConfirmYes => {
-                if let Some(confirm) = self.confirm.take() {
-                    self.apply(confirm.action);
-                }
-            }
-            Action::ConfirmNo => self.confirm = None,
-            Action::OpenPath(path) => {
-                let full = self.nav.worktree.join(&path);
-                if let Err(e) = crate::launch::open_path(&full, &self.settings.ide_command) {
-                    self.notices
-                        .push(format!("Could not open {}: {e}", full.display()));
-                }
-            }
-            Action::RevealPath(path) => {
-                if let Err(e) = crate::launch::reveal(&self.nav.worktree.join(&path)) {
-                    self.notices.push(format!("Could not open Explorer: {e}"));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn click_line(&mut self, hunk: usize, line: usize, shift: bool) {
+    pub(super) fn click_line(&mut self, hunk: usize, line: usize, shift: bool) {
         let Some(view) = &mut self.diff_view else {
             return;
         };
         match (shift, view.anchor) {
-            (true, Some(anchor)) => {
-                let changed = changed_lines(view);
-                let (a, b) = (anchor.min((hunk, line)), anchor.max((hunk, line)));
-                for key in changed.into_iter().filter(|k| *k >= a && *k <= b) {
-                    view.selection.insert(key);
-                }
-            }
+            (true, Some(anchor)) => view.select_range(anchor, (hunk, line)),
             _ => {
                 if !view.selection.remove(&(hunk, line)) {
                     view.selection.insert((hunk, line));
@@ -626,74 +655,126 @@ impl Project {
     }
 
     /// Dragging over lines selects everything from where the drag started.
-    fn drag_line(&mut self, hunk: usize, line: usize) {
-        let Some(view) = &mut self.diff_view else {
-            return;
-        };
-        let Some(anchor) = view.anchor else {
-            return;
-        };
-        let (a, b) = (anchor.min((hunk, line)), anchor.max((hunk, line)));
-        for key in changed_lines(view)
-            .into_iter()
-            .filter(|k| *k >= a && *k <= b)
+    pub(super) fn drag_line(&mut self, hunk: usize, line: usize) {
+        if let Some(view) = &mut self.diff_view
+            && let Some(anchor) = view.anchor
         {
-            view.selection.insert(key);
+            view.select_range(anchor, (hunk, line));
         }
     }
 
-    /// Stage, unstage or discard a hunk (`Some(index)`) or the selected lines.
-    fn lines_op(&mut self, op: LineOp, hunk: Option<usize>) {
-        let Some(view) = &self.diff_view else {
-            return;
-        };
-        let Some(diff) = view.diff.clone() else {
-            return;
-        };
-        let source = view.key.source.clone();
-        let selection = view.selection.clone();
-        let label = match op {
-            LineOp::Stage => "Staging",
-            LineOp::Unstage => "Unstaging",
-            LineOp::Discard => "Discarding",
-        };
-        if let Some(v) = &mut self.diff_view {
-            v.selection.clear();
-            v.anchor = None;
+    pub(super) fn clear_lines(&mut self) {
+        if let Some(view) = &mut self.diff_view {
+            view.clear_selection();
         }
-        self.run_op(label, Then::Nothing, move |git| {
-            ops::apply_lines(&git, &diff, &source, op, |h, l| match hunk {
+    }
+
+    /// Stage, unstage or discard lines, if File status still shows the diff
+    /// they were picked from: a refresh or another file while a Discard
+    /// dialog was open must not discard something else.
+    pub(super) fn change_lines(&mut self, change: LineChange) {
+        let LineChange {
+            op,
+            key,
+            diff,
+            hunk,
+            selection,
+        } = change;
+        let (label, done) = match op {
+            LineOp::Stage => ("Staging", "staged"),
+            LineOp::Unstage => ("Unstaging", "unstaged"),
+            LineOp::Discard => ("Discarding", "discarded"),
+        };
+        let unchanged = self
+            .diff_view
+            .as_ref()
+            .is_some_and(|v| v.key == key && v.diff.as_ref() == Some(&diff));
+        if !unchanged {
+            self.notices.push(format!(
+                "{} changed in the meantime, so nothing was {done}. Check the diff and try again.",
+                key.path
+            ));
+            return;
+        }
+        let job = move |git: Git| {
+            ops::apply_lines(&git, &diff, &key.source, op, |h, l| match hunk {
                 Some(only) => h == only,
                 None => selection.contains(&(h, l)),
             })
-        });
+        };
+        if self.run_op(At::Selected, label, job, quietly)
+            && let Some(view) = &mut self.diff_view
+        {
+            view.clear_selection();
+        }
     }
 
-    fn commit(&mut self) {
-        let message = self.commit_form.message();
-        if message.is_empty() || self.is_operating() {
+    pub(super) fn stage_files(&mut self, paths: Vec<String>) {
+        let job = move |git: Git| ops::stage_paths(&git, &paths);
+        self.run_op(At::Selected, "Staging", job, quietly);
+    }
+
+    pub(super) fn unstage_files(&mut self, paths: Vec<String>) {
+        let job = move |git: Git| ops::unstage_paths(&git, &paths);
+        self.run_op(At::Selected, "Unstaging", job, quietly);
+    }
+
+    /// Discard whole files: what [`Action::discard_file`] asks for.
+    pub(super) fn discard(&mut self, tracked: Vec<String>, untracked: Vec<String>) {
+        let job = move |git: Git| ops::discard_paths(&git, &tracked, &untracked);
+        self.run_op(At::Selected, "Discarding", job, quietly);
+    }
+
+    pub(super) fn commit(&mut self) {
+        let staged = self
+            .worktree()
+            .and_then(|wt| wt.status.as_ref())
+            .map_or(0, |s| s.staged().count());
+        if !self.commit_form.ready(staged) {
             return;
         }
+        let message = self.commit_form.message();
         let amend = self.commit_form.amend;
         let push = self.commit_form.push_after;
         let summary = self.commit_form.summary.trim().to_owned();
-        self.run_op(
+        // The follow-ups belong to this worktree even if another is
+        // selected by the time the commit ends.
+        self.run_head_op(
+            At::Selected,
             if amend { "Amending" } else { "Committing" },
-            Then::Committed { summary, push },
             move |git| ops::commit(&git, &message, amend).map(|_| ()),
+            move |p, worktree, result| match result {
+                Ok(()) => {
+                    if same_path(&p.nav.worktree, &worktree) {
+                        p.commit_form = p.commit_form.cleared();
+                    }
+                    p.infos.push(format!("Committed: {summary}"));
+                    if push {
+                        p.remote_in(worktree, RemoteOp::Push);
+                    }
+                }
+                Err(e) => p.report(e),
+            },
         );
     }
 
-    fn toggle_amend(&mut self) {
+    pub(super) fn toggle_amend(&mut self) {
         let form = &mut self.commit_form;
         form.amend = !form.amend;
         if form.amend {
             form.before_amend = Some((form.summary.clone(), form.body.clone()));
             if form.summary.trim().is_empty() {
                 let git = self.wt_git();
-                self.pool.spawn(&self.tx, move || {
-                    Event::LastMessage(ops::last_commit_message(&git).ok().flatten())
-                });
+                let worktree = self.nav.worktree.clone();
+                self.jobs.spawn(
+                    move || ops::last_commit_message(&git),
+                    move |p, message| {
+                        // Another worktree's form has nothing to amend.
+                        if same_path(&p.nav.worktree, &worktree) {
+                            p.on_last_message(message);
+                        }
+                    },
+                );
             }
         } else if let Some((summary, body)) = form.before_amend.take() {
             form.summary = summary;
@@ -701,13 +782,20 @@ impl Project {
         }
     }
 
-    pub(super) fn on_last_message(&mut self, message: Option<String>) {
+    fn on_last_message(&mut self, message: anyhow::Result<Option<String>>) {
         let form = &mut self.commit_form;
-        let Some(message) = message else {
-            form.amend = false;
-            self.notices
-                .push("There is no commit to amend yet.".to_owned());
-            return;
+        let message = match message {
+            Ok(Some(message)) => message,
+            Ok(None) => {
+                form.amend = false;
+                self.notices
+                    .push("There is no commit to amend yet.".to_owned());
+                return;
+            }
+            Err(e) => {
+                self.report(e.context("Could not read the last commit message"));
+                return;
+            }
         };
         if !form.amend || !form.summary.trim().is_empty() {
             return;
@@ -716,146 +804,151 @@ impl Project {
         form.summary = summary.trim().to_owned();
         form.body = body.trim().to_owned();
     }
-
-    fn remote(&mut self, op: RemoteOp) {
-        if self.is_operating() {
-            return;
-        }
-        let progress = Arc::new(Mutex::new(Progress::default()));
-        let cancel = CancelToken::default();
-        self.op = Some(Operation {
-            label: format!("{}…", op.label()),
-            progress: progress.clone(),
-            cancel: Some(cancel.clone()),
-        });
-        let git = self.wt_git();
-        let then = match &op {
-            RemoteOp::Fetch => Then::Nothing,
-            RemoteOp::Pull => Then::Info("Pulled".to_owned()),
-            RemoteOp::Push => Then::Pushed,
-            RemoteOp::ForcePush => Then::Info("Force pushed".to_owned()),
-            RemoteOp::PushTag { remote, tag } => {
-                Then::Info(format!("Pushed tag {tag} to {remote}"))
-            }
-            RemoteOp::DeleteRemoteBranch { remote, branch } => {
-                Then::Info(format!("Deleted {remote}/{branch}"))
-            }
-        };
-        self.pool.spawn_long(&self.tx, move |waker| {
-            let report = |p: Progress| {
-                if let Ok(mut slot) = progress.lock() {
-                    *slot = p;
-                }
-                waker();
-            };
-            let result = match op {
-                RemoteOp::Fetch => remote::fetch(&git, &cancel, report),
-                RemoteOp::Pull => remote::pull(&git, &cancel, report),
-                RemoteOp::Push => remote::push(&git, &cancel, report),
-                RemoteOp::ForcePush => remote::force_push(&git, &cancel, report),
-                RemoteOp::PushTag { remote, tag } => {
-                    refs::push_tag(&git, &remote, &tag, &cancel, report)
-                }
-                RemoteOp::DeleteRemoteBranch { remote, branch } => {
-                    refs::delete_remote_branch(&git, &remote, &branch, &cancel, report)
-                }
-            };
-            Event::OpDone {
-                then,
-                result: result.map(|()| None).map_err(|e| format!("{e:#}")),
-            }
-        });
-    }
-
-    /// Run a quick git operation on the selected worktree, then refresh.
-    pub(super) fn run_op(
-        &mut self,
-        label: &str,
-        then: Then,
-        job: impl FnOnce(Git) -> anyhow::Result<()> + Send + 'static,
-    ) {
-        let git = self.wt_git();
-        self.run_op_at(git, label, then, move |git| job(git).map(|()| None));
-    }
-
-    /// Run a quick git operation with `git`, then refresh. The job may return
-    /// an extra message for the user.
-    pub(super) fn run_op_at(
-        &mut self,
-        git: Git,
-        label: &str,
-        then: Then,
-        job: impl FnOnce(Git) -> anyhow::Result<Option<String>> + Send + 'static,
-    ) {
-        if self.is_operating() {
-            return;
-        }
-        self.op = Some(Operation {
-            label: format!("{label}…"),
-            progress: Arc::default(),
-            cancel: None,
-        });
-        self.pool.spawn(&self.tx, move || Event::OpDone {
-            then,
-            result: job(git).map_err(|e| format!("{e:#}")),
-        });
-    }
-
-    pub(super) fn on_op_done(&mut self, then: Then, result: Result<Option<String>, String>) {
-        self.op = None;
-        self.refresh();
-        match result {
-            Err(e) if e == "Cancelled" => {}
-            Err(e) => self.on_op_error(then, e),
-            Ok(extra) => match then {
-                Then::Nothing | Then::DeletedBranch(_) => self.infos.extend(extra),
-                Then::Pushed => self.infos.push("Pushed".to_owned()),
-                Then::Dialog(text) => {
-                    self.dialog = None;
-                    self.infos.push(text);
-                }
-                Then::MayConflict(done) => self.on_may_conflict(done, extra),
-                Then::Switched(branch) => self.infos.push(match extra {
-                    Some(extra) => format!("Switched to {branch}. {extra}"),
-                    None => format!("Switched to {branch}"),
-                }),
-                Then::Info(text) => self.infos.push(match extra {
-                    Some(extra) => format!("{text}. {extra}"),
-                    None => text,
-                }),
-                Then::OpenWorktree(path) => {
-                    self.new_worktree = None;
-                    self.infos.extend(extra);
-                    self.pending_open = Some(path);
-                }
-                Then::Committed { summary, push } => {
-                    self.commit_form = CommitForm {
-                        push_after: self.commit_form.push_after,
-                        ..CommitForm::default()
-                    };
-                    self.infos.push(format!("Committed: {summary}"));
-                    if push {
-                        self.remote(RemoteOp::Push);
-                    }
-                }
-            },
-        }
-    }
 }
 
-fn changed_lines(view: &DiffView) -> Vec<(usize, usize)> {
-    let Some(diff) = &view.diff else {
-        return Vec::new();
-    };
-    diff.hunks
-        .iter()
-        .enumerate()
-        .flat_map(|(h, hunk)| {
-            hunk.lines
-                .iter()
-                .enumerate()
-                .filter(|(_, l)| l.is_change())
-                .map(move |(l, _)| (h, l))
-        })
-        .collect()
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{git, open, wait};
+
+    /// Discarding a new file asks to move it to the Recycle Bin, or, where
+    /// Windows has none, says it is deleted for good.
+    #[test]
+    fn discarding_a_new_file_says_where_it_goes() {
+        let ask = |recycle_bin| discard_question(recycle_bin, &Source::Untracked, "new.txt".into());
+        let local = ask(true);
+        assert!(local.body.contains("Recycle Bin"), "{}", local.body);
+        assert!(!local.body.contains("permanently"), "{}", local.body);
+        let remote = ask(false);
+        assert!(
+            remote.body.contains("deleted permanently"),
+            "{}",
+            remote.body
+        );
+        assert_eq!(remote.confirm_label, "Delete permanently");
+    }
+
+    /// Discard… asks with the snapshot's answer for the worktree: a local
+    /// folder has a Recycle Bin.
+    #[test]
+    fn discard_asks_with_the_worktrees_recycle_bin() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(dir.path().join("new.txt"), "new\n").unwrap();
+        let mut project = open(dir.path());
+        assert!(project.worktree().unwrap().recycle_bin);
+        let worktree = project.nav.worktree.clone();
+        project.apply(Action::discard_file(
+            &worktree,
+            &Source::Untracked,
+            "new.txt".to_owned(),
+        ));
+        let (confirm, _) = project.confirm.as_ref().unwrap();
+        assert!(confirm.body.contains("Recycle Bin"), "{}", confirm.body);
+    }
+
+    fn porcelain(dir: &std::path::Path) -> String {
+        let out = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    fn numbered(changed: &[usize]) -> String {
+        (1..=20)
+            .map(|n| match changed.contains(&n) {
+                true => format!("changed {n}\n"),
+                false => format!("line {n}\n"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_hunk_is_only_discarded_while_its_diff_is_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let file = root.join("f.txt");
+        git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["config", "core.autocrlf", "false"]);
+        std::fs::write(&file, numbered(&[])).unwrap();
+        git(root, &["add", "f.txt"]);
+        git(root, &["commit", "-q", "-m", "first"]);
+        std::fs::write(&file, numbered(&[2, 18])).unwrap();
+        let mut project = open(root);
+        let key = FileKey {
+            source: Source::Unstaged,
+            path: "f.txt".to_owned(),
+            orig_path: None,
+        };
+        project.apply(Action::SelectFile(key));
+        let hunks = |p: &Project| p.diff_view.as_ref()?.diff.as_ref().map(|d| d.hunks.len());
+        wait(&mut project, "the diff never came", |p| hunks(p) == Some(2));
+        let stale = project.diff_view.as_ref().unwrap();
+        let stale = stale.change_lines(LineOp::Discard, Some(1)).unwrap();
+
+        // The file changes while the dialog is open: the hunk asked about
+        // is now a different one.
+        std::fs::write(&file, numbered(&[2, 10, 18])).unwrap();
+        project.load_view(DiffOwner::Status);
+        wait(&mut project, "the diff never reloaded", |p| {
+            hunks(p) == Some(3)
+        });
+        project.apply(stale);
+        assert!(!project.is_operating());
+        assert_eq!(project.notices.len(), 1, "{:?}", project.notices);
+        assert!(project.notices[0].contains("nothing was discarded"));
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            numbered(&[2, 10, 18])
+        );
+
+        // Asked again, it goes.
+        let view = project.diff_view.as_ref().unwrap();
+        let fresh = view.change_lines(LineOp::Discard, Some(2)).unwrap();
+        project.apply(fresh);
+        wait(&mut project, "discarding never ended", |p| {
+            !p.is_operating()
+        });
+        assert_eq!(project.notices.len(), 1, "{:?}", project.notices);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), numbered(&[2, 10]));
+    }
+
+    #[test]
+    fn unstaging_a_rename_puts_back_both_sides() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("d.txt"), "d\n").unwrap();
+        git(root, &["add", "d.txt"]);
+        git(root, &["commit", "-q", "-m", "first"]);
+        git(root, &["mv", "d.txt", "e.txt"]);
+        let mut project = open(root);
+        wait(&mut project, "the rename never showed", |p| {
+            p.worktree()
+                .and_then(|wt| wt.status.as_ref())
+                .is_some_and(|s| s.staged().any(|e| e.index == graft_core::Change::Renamed))
+        });
+
+        project.unstage_files(vec!["e.txt".to_owned()]);
+        wait(&mut project, "unstaging never ended", |p| !p.is_operating());
+        assert!(project.notices.is_empty(), "{:?}", project.notices);
+        assert_eq!(porcelain(root), " D d.txt\n?? e.txt\n");
+    }
+
+    #[test]
+    fn only_file_status_stages() {
+        assert_eq!(
+            Staging::of(DiffOwner::Status, &Source::Untracked),
+            Some(Staging::Unstaged)
+        );
+        assert_eq!(
+            Staging::of(DiffOwner::Status, &Source::Staged),
+            Some(Staging::Staged)
+        );
+        // Review shows untracked files too; they stay read-only there.
+        assert_eq!(Staging::of(DiffOwner::Review, &Source::Untracked), None);
+        assert_eq!(Staging::of(DiffOwner::Stash, &Source::Staged), None);
+    }
 }

@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::cli::Git;
-use crate::conflicts;
 use crate::model::{
-    Branch, Oid, Remote, RemoteBranch, RepoSnapshot, Tag, Upstream, Worktree, same_path,
+    Branch, ORIGIN, Oid, Remote, RemoteBranch, RepoSnapshot, Tag, Upstream, Worktree, branch_name,
 };
-use crate::status;
+use crate::paths::{self, folder_name, same_path};
+use crate::{repo, stash, status};
 
 /// Read the whole snapshot. `git` must point at the main worktree. The git
 /// calls run side by side: each one costs tens of milliseconds just to start
@@ -19,28 +19,29 @@ pub fn load(git: &Git) -> Result<RepoSnapshot> {
     std::thread::scope(|s| {
         let refs = s.spawn(|| load_refs(git));
         let remotes = s.spawn(|| load_remotes(git));
-        let stash_count = s.spawn(|| load_stash_count(git));
+        let stash_count = s.spawn(|| stash::list(git).map(|list| list.len()));
         let mut worktrees = load_worktrees(git, &root)?;
         let statuses: Vec<_> = worktrees
             .iter()
             .map(|wt| {
                 let at = git.at(&wt.path);
-                (!wt.prunable).then(|| {
-                    s.spawn(move || (status::load(&at).ok(), conflicts::in_progress(at.cwd())))
+                let prunable = wt.prunable;
+                s.spawn(move || {
+                    let recycle_bin = paths::has_recycle_bin(at.cwd());
+                    if prunable {
+                        return (None, None, recycle_bin);
+                    }
+                    let in_progress = repo::in_progress(at.cwd());
+                    (status::load(&at).ok(), in_progress, recycle_bin)
                 })
             })
             .collect();
         for (wt, job) in worktrees.iter_mut().zip(statuses) {
-            if let Some(job) = job {
-                (wt.status, wt.in_progress) = job.join().expect("status thread");
-            }
+            (wt.status, wt.in_progress, wt.recycle_bin) = job.join().expect("status thread");
         }
         let refs = refs.join().expect("refs thread")?;
         Ok(RepoSnapshot {
-            name: root
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| root.display().to_string()),
+            name: folder_name(&root),
             root: root.clone(),
             worktrees,
             branches: refs.branches,
@@ -65,7 +66,7 @@ struct Refs {
 fn load_refs(git: &Git) -> Result<Refs> {
     let out = git.read([
         "for-each-ref",
-        "--format=%(refname)%00%(objectname)%00%(*objectname)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(symref)%00%(objecttype)%00%(*objecttype)",
+        "--format=%(refname)%00%(objectname)%00%(*objectname)%00%(upstream)%00%(upstream:track,nobracket)%00%(symref)%00%(objecttype)%00%(*objecttype)",
         "refs/heads",
         "refs/remotes",
         "refs/tags",
@@ -75,6 +76,7 @@ fn load_refs(git: &Git) -> Result<Refs> {
 
 fn parse_refs(text: &str) -> Refs {
     let mut refs = Refs::default();
+    let origin = format!("refs/remotes/{ORIGIN}/");
     for line in text.lines() {
         let f: Vec<&str> = line.split('\0').collect();
         let [name, oid, peeled, upstream, track, symref, ref types @ ..] = f[..] else {
@@ -82,10 +84,8 @@ fn parse_refs(text: &str) -> Refs {
         };
         if !symref.is_empty() {
             // refs/remotes/origin/HEAD -> refs/remotes/origin/<default branch>
-            if name == "refs/remotes/origin/HEAD" {
-                refs.remote_default = symref
-                    .strip_prefix("refs/remotes/origin/")
-                    .map(str::to_owned);
+            if name.strip_prefix(&origin) == Some("HEAD") {
+                refs.remote_default = symref.strip_prefix(&origin).map(str::to_owned);
             }
             continue;
         }
@@ -121,7 +121,6 @@ fn parse_refs(text: &str) -> Refs {
             refs.tags.push(Tag {
                 name: tag.to_owned(),
                 target: peeled_oid.unwrap_or(oid),
-                annotated: peeled_oid.is_some(),
             });
         }
     }
@@ -132,6 +131,7 @@ fn parse_upstream(upstream: &str, track: &str) -> Upstream {
     if upstream.is_empty() {
         return Upstream::None;
     }
+    let upstream = branch_name(upstream).unwrap_or(upstream);
     if track == "gone" {
         return Upstream::Gone {
             name: upstream.to_owned(),
@@ -152,7 +152,7 @@ fn parse_upstream(upstream: &str, track: &str) -> Upstream {
     }
 }
 
-fn load_worktrees(git: &Git, root: &Path) -> Result<Vec<Worktree>> {
+pub(crate) fn load_worktrees(git: &Git, root: &Path) -> Result<Vec<Worktree>> {
     let out = git.run(["worktree", "list", "--porcelain", "-z"])?;
     Ok(parse_worktrees(&out.stdout, root, |p| git.native_path(p)))
 }
@@ -182,6 +182,7 @@ fn parse_worktrees(bytes: &[u8], root: &Path, to_path: impl Fn(&str) -> PathBuf)
                     prunable: false,
                     status: None,
                     in_progress: None,
+                    recycle_bin: false,
                 });
             }
             "HEAD" => {
@@ -220,43 +221,58 @@ fn parse_worktrees(bytes: &[u8], root: &Path, to_path: impl Fn(&str) -> PathBuf)
     list
 }
 
+/// The remotes with their URLs as configured (not expanded by `insteadOf`,
+/// so editing a remote writes back what was there). A remote with several
+/// URLs shows its first; one with only a push URL shows that.
 fn load_remotes(git: &Git) -> Result<Vec<Remote>> {
-    let out = git.read(["remote", "-v"])?;
-    let mut remotes: Vec<Remote> = Vec::new();
-    for line in out.lines() {
-        let mut parts = line.split_whitespace();
-        let (Some(name), Some(url), Some(kind)) = (parts.next(), parts.next(), parts.next()) else {
-            continue;
-        };
-        let remote = match remotes.iter_mut().find(|r| r.name == name) {
-            Some(r) => r,
-            None => {
-                remotes.push(Remote {
-                    name: name.to_owned(),
-                    fetch_url: String::new(),
-                    push_url: String::new(),
-                });
-                remotes.last_mut().expect("just pushed")
-            }
-        };
-        if kind == "(push)" {
-            remote.push_url = url.to_owned();
-        } else {
-            remote.fetch_url = url.to_owned();
-        }
-    }
-    Ok(remotes)
+    let out = git.run_accepting(
+        [
+            "config",
+            "-z",
+            "--get-regexp",
+            r"^remote\..*\.(url|pushurl)$",
+        ],
+        None,
+        |o| o.status <= 1,
+    )?;
+    Ok(parse_remotes(&out.stdout_str()))
 }
 
-fn load_stash_count(git: &Git) -> Result<usize> {
-    let out = git.read(["stash", "list", "--format=%H"])?;
-    Ok(out.lines().filter(|l| !l.is_empty()).count())
+/// `git config -z --get-regexp` output: `key\nvalue\0` per entry.
+fn parse_remotes(text: &str) -> Vec<Remote> {
+    let mut remotes: Vec<Remote> = Vec::new();
+    for entry in text.split('\0') {
+        let Some((key, value)) = entry.split_once('\n') else {
+            continue;
+        };
+        let Some(rest) = key.strip_prefix("remote.") else {
+            continue;
+        };
+        let (name, is_url) = match (rest.strip_suffix(".url"), rest.strip_suffix(".pushurl")) {
+            (Some(name), _) => (name, true),
+            (None, Some(name)) => (name, false),
+            (None, None) => continue,
+        };
+        match remotes.iter_mut().find(|r| r.name == name) {
+            Some(remote) if is_url && remote.push_only => {
+                remote.url = value.to_owned();
+                remote.push_only = false;
+            }
+            Some(_) => {}
+            None => remotes.push(Remote {
+                name: name.to_owned(),
+                url: value.to_owned(),
+                push_only: !is_url,
+            }),
+        }
+    }
+    remotes
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo::native;
+    use crate::paths::native;
 
     #[test]
     fn refs_git_would_read_as_options_are_left_out() {
@@ -279,8 +295,8 @@ mod tests {
         let oid = "1111111111111111111111111111111111111111";
         let peeled = "2222222222222222222222222222222222222222";
         let text = format!(
-            "refs/heads/main\0{oid}\0\0origin/main\0ahead 2, behind 1\0\n\
-             refs/heads/old\0{oid}\0\0origin/old\0gone\0\n\
+            "refs/heads/main\0{oid}\0\0refs/remotes/origin/main\0ahead 2, behind 1\0\n\
+             refs/heads/old\0{oid}\0\0refs/remotes/origin/old\0gone\0\n\
              refs/heads/local\0{oid}\0\0\0\0\n\
              refs/remotes/origin/HEAD\0{oid}\0\0\0\0refs/remotes/origin/main\n\
              refs/remotes/origin/feature/x\0{oid}\0\0\0\0\n\
@@ -301,7 +317,6 @@ mod tests {
         assert_eq!(refs.remote_branches.len(), 1);
         assert_eq!(refs.remote_branches[0].branch_name(), "feature/x");
         assert_eq!(refs.remote_default.as_deref(), Some("main"));
-        assert!(refs.tags[0].annotated);
         assert_eq!(refs.tags[0].target.to_string(), peeled);
     }
 

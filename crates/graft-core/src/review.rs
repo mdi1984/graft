@@ -2,19 +2,24 @@
 //! base branch, including uncommitted and untracked files. That is what a pull
 //! request would show, plus the work that is not committed yet.
 
+use std::collections::HashSet;
 use std::io::Read;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
+use crate::changes::{FileChange, between, count_lines, is_binary};
 use crate::cli::Git;
-use crate::details::{FileChange, apply_numstat, parse_name_status};
-use crate::model::Oid;
-use crate::status::Change;
+use crate::model::{Change, ORIGIN, Oid, RepoSnapshot, local_ref};
+use crate::paths::display;
+use crate::repo::in_progress;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReviewFile {
     pub change: FileChange,
     pub untracked: bool,
+    /// Its worktree version is not committed: changed since HEAD (staged
+    /// or not), or untracked.
+    pub uncommitted: bool,
     /// Hash of the file's current content (empty when deleted). A "Viewed"
     /// mark is tied to it, so it goes away when the file changes again.
     pub content: String,
@@ -31,6 +36,8 @@ impl ReviewFile {
 pub struct Review {
     pub base: String,
     pub merge_base: Oid,
+    /// The worktree's HEAD it was loaded for: Merge merges only that.
+    pub head: Oid,
     /// Commits on the branch since the merge-base.
     pub commits: usize,
     pub files: Vec<ReviewFile>,
@@ -46,86 +53,70 @@ impl Review {
     }
 }
 
-/// The branch to review against when the user has not picked one: the local
-/// copy of the remote's default branch (origin/HEAD), else main, master,
-/// trunk or develop, else origin/HEAD itself.
-pub fn default_base(git: &Git, branches: &[String], current: Option<&str>) -> Option<String> {
-    // Exit code 1 just means there is no origin/HEAD.
-    let remote_head = git
-        .run_expecting(
-            ["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
-            None,
-            |o| o.status <= 1,
-        )
-        .ok()
-        .filter(|out| out.success())
-        .map(|out| out.stdout_str().trim().to_owned())
-        .filter(|head| !head.is_empty());
-    let remote_default = remote_head
-        .as_deref()
-        .and_then(|h| h.strip_prefix("origin/"));
-    for name in remote_default
-        .into_iter()
-        .chain(["main", "master", "trunk", "develop"])
-    {
-        if branches.iter().any(|b| b == name) && current != Some(name) {
-            return Some(name.to_owned());
-        }
-    }
-    remote_head
+/// The branch to review `current` against when the user has not picked
+/// one: the first default branch candidate that is not `current` itself,
+/// else origin/HEAD.
+pub fn default_base(snap: &RepoSnapshot, current: Option<&str>) -> Option<String> {
+    snap.default_branches()
+        .find(|name| current != Some(*name))
+        .map(str::to_owned)
+        .or_else(|| {
+            snap.remote_default
+                .as_ref()
+                .map(|branch| format!("{ORIGIN}/{branch}"))
+        })
 }
 
 /// Untracked files bigger than this are not read to count their lines.
 const MAX_COUNTED: u64 = 8 * 1024 * 1024;
 
-/// `git` points at the worktree under review.
-pub fn load(git: &Git, base: &str) -> Result<Review> {
+/// `git` points at the worktree under review; `rev` is `base` as a
+/// revision ([`RepoSnapshot::rev`]).
+pub fn load(git: &Git, base: &str, rev: &str) -> Result<Review> {
+    let head = git.rev("HEAD")?.context("This branch has no commits yet")?;
+    let head_hex = head.to_string();
     let merge_base = git
-        .read(["merge-base", "--end-of-options", base, "HEAD"])
+        .read(["merge-base", "--end-of-options", rev, &head_hex])
         .with_context(|| format!("{base} and this branch have no common history"))?;
     let merge_base = merge_base.trim().to_owned();
     // The rest runs side by side: each git start costs tens of milliseconds
     // on Windows.
-    let common = ["-c", "core.quotepath=false", "diff", "-z", "-M"];
-    let (commits, status, numstat, untracked) = std::thread::scope(|s| {
-        let range = format!("{merge_base}..HEAD");
+    let (commits, changes, untracked, uncommitted) = std::thread::scope(|s| {
+        let range = format!("{merge_base}..{head_hex}");
         let commits = s.spawn(move || git.read(["rev-list", "--count", &range]));
-        let numstat = s.spawn(|| git.run(common.iter().copied().chain(["--numstat", &merge_base])));
-        let untracked = s.spawn(|| {
-            git.run([
-                "-c",
-                "core.quotepath=false",
-                "ls-files",
-                "--others",
-                "--exclude-standard",
-                "-z",
-            ])
-        });
-        let status = git.run(common.iter().copied().chain(["--name-status", &merge_base]));
+        let uncommitted = s.spawn(|| git.run(["diff", "--name-only", "-z", "HEAD"]));
+        let untracked = s.spawn(|| git.run(["ls-files", "--others", "--exclude-standard", "-z"]));
+        let changes = between(git, &merge_base, None);
         (
             commits.join().expect("rev-list thread"),
-            status,
-            numstat.join().expect("numstat thread"),
+            changes,
             untracked.join().expect("ls-files thread"),
+            uncommitted.join().expect("diff thread"),
         )
     });
     let commits = commits?.trim().parse().unwrap_or(0);
-    let (status, numstat, untracked) = (status?, numstat?, untracked?);
-    let mut changes = parse_name_status(&status.stdout);
-    apply_numstat(&mut changes, &numstat.stdout);
-    let mut files: Vec<ReviewFile> = changes
+    let uncommitted = uncommitted?;
+    let uncommitted: HashSet<&[u8]> = uncommitted
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .collect();
+    let mut files: Vec<ReviewFile> = changes?
         .into_iter()
         .map(|change| ReviewFile {
+            uncommitted: uncommitted.contains(change.path.as_bytes()),
             change,
             untracked: false,
             content: String::new(),
         })
         .collect();
 
-    for path in untracked
+    // A trailing `/` is an untracked repository inside the worktree: a
+    // folder, not a file to show or hash.
+    for path in untracked?
         .stdout
         .split(|b| *b == 0)
-        .filter(|p| !p.is_empty())
+        .filter(|p| !p.is_empty() && !p.ends_with(b"/"))
     {
         let path = String::from_utf8_lossy(path).into_owned();
         // Only the start of a huge file (a stray dump or build output): its
@@ -134,12 +125,8 @@ pub fn load(git: &Git, base: &str) -> Result<Review> {
         let complete = std::fs::File::open(git.cwd().join(&path))
             .and_then(|f| f.take(MAX_COUNTED + 1).read_to_end(&mut bytes))
             .is_ok_and(|n| n as u64 <= MAX_COUNTED);
-        let binary = bytes.iter().take(8000).any(|b| *b == 0);
-        let lines = bytes
-            .split(|b| *b == b'\n')
-            .filter(|l| !l.is_empty())
-            .count();
-        let counted = complete && !binary;
+        let lines = count_lines(&bytes);
+        let counted = complete && !is_binary(&bytes);
         files.push(ReviewFile {
             change: FileChange {
                 path,
@@ -149,14 +136,20 @@ pub fn load(git: &Git, base: &str) -> Result<Review> {
                 removed: counted.then_some(0),
             },
             untracked: true,
+            uncommitted: true,
             content: String::new(),
         });
     }
     files.sort_by(|a, b| a.change.path.cmp(&b.change.path));
 
-    // Content hashes of everything that still exists, in one call.
+    // Content hashes of every file that still exists, in one call. A
+    // folder (a submodule) has no content to hash; its mark stays keyed by
+    // path alone.
     let present: Vec<usize> = (0..files.len())
-        .filter(|&i| files[i].change.change != Change::Deleted)
+        .filter(|&i| {
+            files[i].change.change != Change::Deleted
+                && !git.cwd().join(&files[i].change.path).is_dir()
+        })
         .collect();
     if !present.is_empty() {
         let mut input = Vec::new();
@@ -164,7 +157,7 @@ pub fn load(git: &Git, base: &str) -> Result<Review> {
             input.extend_from_slice(files[i].change.path.as_bytes());
             input.push(b'\n');
         }
-        let out = git.run_with_input(["hash-object", "--stdin-paths"], Some(&input))?;
+        let out = git.run_input(["hash-object", "--stdin-paths"], &input)?;
         for (&i, hash) in present.iter().zip(out.stdout_str().lines()) {
             files[i].content = hash.trim().to_owned();
         }
@@ -174,7 +167,34 @@ pub fn load(git: &Git, base: &str) -> Result<Review> {
         base: base.to_owned(),
         merge_base: Oid::from_hex(merge_base.as_bytes())
             .with_context(|| format!("unexpected merge-base {merge_base}"))?,
+        head,
         commits,
         files,
     })
+}
+
+/// Merge the reviewed `branch` into `into`, if `into` is still checked out
+/// where `git` points with nothing in progress there (it may have switched
+/// while the user was asked), and `branch` is still at the reviewed `head`:
+/// commits made after the review are never merged unseen. Ok(true):
+/// stopped with conflicts.
+pub fn merge(git: &Git, branch: &str, into: &str, head: Oid) -> Result<bool> {
+    let place = display(git.cwd());
+    if let Some(op) = in_progress(git.cwd()) {
+        bail!(
+            "Nothing was merged: a {} is in progress in {place}. Finish or abort it, then merge again.",
+            op.kind.noun().to_lowercase()
+        );
+    }
+    if git.current_branch()?.as_deref() != Some(into) {
+        bail!(
+            "Nothing was merged: {into} is no longer checked out in {place}. Check it out there, then merge again."
+        );
+    }
+    if git.rev(&local_ref(branch))? != Some(head) {
+        bail!(
+            "Nothing was merged: {branch} moved since you reviewed it. Look at its new commits in Review, then merge again."
+        );
+    }
+    crate::conflicts::merge(git, &local_ref(branch), false)
 }

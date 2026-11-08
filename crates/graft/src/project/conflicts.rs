@@ -1,20 +1,26 @@
-//! Merges and conflicts: the Merge dialog's job, the resolver for the selected
+//! Merges and conflicts: merging and rebasing, the resolver for the selected
 //! conflicted file, and Continue / Abort for whatever stopped part-way.
 
-use graft_core::conflicts::{self, ConflictFile, Resolution, Segment};
+use std::path::PathBuf;
+use std::sync::Arc;
 
-use super::changes::Then;
-use super::{Action, Confirm, DialogKind, Event, Project, WorkspaceView};
+use graft_core::conflicts::{self, ConflictFile, Resolution, Segment};
+use graft_core::paths::same_path;
+use graft_core::{Oid, Operation, review};
+
+use super::ops::{At, say};
+use super::{Action, Confirm, DialogKind, Project, Tab, WorkspaceView, readable};
 
 /// The resolver for one conflicted file of the selected worktree.
 pub struct ConflictView {
     pub path: String,
-    pub file: Option<Result<ConflictFile, String>>,
+    /// Shared, so the screen can hold it without copying it every frame.
+    pub file: Option<Result<Arc<ConflictFile>, String>>,
     /// One per conflict; `None` until the user picks.
     pub resolutions: Vec<Option<Resolution>>,
     /// Text of conflicts the user edits by hand (their resolution is Custom).
     pub edits: Vec<Option<String>>,
-    generation: u64,
+    ticket: u64,
 }
 
 impl ConflictView {
@@ -51,11 +57,7 @@ fn resolution_text(segment: &Segment, resolution: Option<&Resolution>) -> String
         return String::new();
     };
     let bytes = match resolution {
-        Some(r) => conflicts::assemble(
-            std::slice::from_ref(segment),
-            std::slice::from_ref(&Some(r.clone())),
-        )
-        .unwrap_or_default(),
+        Some(r) => r.apply(ours, theirs),
         None => [ours.as_slice(), theirs.as_slice()].concat(),
     };
     String::from_utf8_lossy(&bytes).into_owned()
@@ -66,13 +68,7 @@ fn resolution_text(segment: &Segment, resolution: Option<&Resolution>) -> String
 pub fn merge_dialog(project: &Project, rev: Option<&str>) -> Option<DialogKind> {
     let snap = project.snapshot.as_ref()?;
     let into = project.worktree()?.branch.clone()?;
-    let choices: Vec<String> = snap
-        .branches
-        .iter()
-        .map(|b| b.name.clone())
-        .filter(|b| *b != into)
-        .chain(snap.remote_branches.iter().map(|b| b.name.clone()))
-        .collect();
+    let choices = snap.merge_choices(&into).map(str::to_owned).collect();
     Some(DialogKind::Merge {
         into,
         rev: rev.unwrap_or_default().to_owned(),
@@ -82,8 +78,47 @@ pub fn merge_dialog(project: &Project, rev: Option<&str>) -> Option<DialogKind> 
     })
 }
 
+/// The ending of a merge, rebase, cherry-pick, revert or continue (the job
+/// says whether it stopped with conflicts): say `done`, or say that `doing`
+/// ("Merging x") stopped and show the conflicts in File status of the
+/// worktree it ran in. `name` names that worktree in the message (e.g. by
+/// its branch) when it is not the selected one.
+pub(super) fn after_conflicts(
+    done: String,
+    doing: String,
+    name: Option<String>,
+) -> impl FnOnce(&mut Project, PathBuf, anyhow::Result<bool>) + Send {
+    let place = match &name {
+        Some(name) => format!("File status of {name}"),
+        None => "File status".to_owned(),
+    };
+    let stopped =
+        format!("{doing} stopped with conflicts. Resolve them in {place}, then Continue.");
+    move |p, ran_in, result| {
+        let selected = same_path(&p.nav.worktree, &ran_in);
+        match result {
+            Ok(false) => {
+                p.infos.push(done);
+                // Show the new commit (and the worktree is usually clean now).
+                if selected && p.nav.tab == Tab::Workspace {
+                    p.nav.view = WorkspaceView::History;
+                }
+            }
+            Ok(true) => {
+                p.infos.push(stopped);
+                p.nav.tab = Tab::Workspace;
+                if !selected {
+                    p.open_worktree(ran_in);
+                }
+                p.nav.view = WorkspaceView::FileStatus;
+            }
+            Err(e) => p.report(e),
+        }
+    }
+}
+
 impl Project {
-    /// Paths with conflicts in the selected worktree.
+    /// Whether `path` has conflicts in the selected worktree.
     pub fn is_conflicted(&self, path: &str) -> bool {
         self.worktree()
             .and_then(|wt| wt.status.as_ref())
@@ -106,173 +141,217 @@ impl Project {
     }
 
     fn load_conflict(&mut self, path: String) {
-        self.diff_generation += 1;
-        let generation = self.diff_generation;
+        let ticket = self.ticket();
         self.conflict = Some(ConflictView {
             path: path.clone(),
             file: None,
             resolutions: Vec::new(),
             edits: Vec::new(),
-            generation,
+            ticket,
         });
         let git = self.wt_git();
-        self.pool.spawn(&self.tx, move || Event::Conflict {
-            generation,
-            result: conflicts::load(&git, &path).map_err(|e| format!("{e:#}")),
-        });
+        self.jobs.spawn(
+            move || conflicts::load(&git, &path),
+            move |p, result| {
+                let Some(view) = p.conflict.as_mut().filter(|v| v.ticket == ticket) else {
+                    return;
+                };
+                if let Ok(file) = &result {
+                    view.resolutions = vec![None; file.conflicts()];
+                    view.edits = vec![None; file.conflicts()];
+                }
+                view.file = Some(readable(result).map(Arc::new));
+            },
+        );
     }
 
-    pub(super) fn on_conflict(&mut self, generation: u64, result: Result<ConflictFile, String>) {
+    /// Merge a reviewed branch in the worktree that has its base `into`
+    /// checked out, unless either changed since; conflicts are resolved there.
+    pub(super) fn merge_reviewed(
+        &mut self,
+        worktree: PathBuf,
+        branch: String,
+        into: String,
+        head: Oid,
+    ) {
+        let done = format!("Merged {branch} into {into}");
+        let doing = format!("Merging {branch} into {into}");
+        let target = into.clone();
+        self.run_head_op(
+            At::Path(worktree),
+            "Merging",
+            move |git| review::merge(&git, &branch, &target, head),
+            after_conflicts(done, doing, Some(into)),
+        );
+    }
+
+    pub(super) fn rebase(&mut self, onto: String) {
+        let done = format!("Rebased onto {onto}");
+        let doing = format!("Rebasing onto {onto}");
+        let rev = self.rev(&onto);
+        self.run_head_op(
+            At::Selected,
+            "Rebasing",
+            move |git| conflicts::rebase(&git, &rev),
+            after_conflicts(done, doing, None),
+        );
+    }
+
+    pub(super) fn resolve_conflict(&mut self, index: usize, resolution: Option<Resolution>) {
         let Some(view) = &mut self.conflict else {
             return;
         };
-        if view.generation != generation {
+        if let Some(slot) = view.resolutions.get_mut(index) {
+            *slot = resolution;
+            view.edits[index] = None;
+        }
+    }
+
+    pub(super) fn edit_conflict(&mut self, index: usize) {
+        let Some(view) = &mut self.conflict else {
             return;
-        }
-        if let Ok(file) = &result {
-            view.resolutions = vec![None; file.conflicts()];
-            view.edits = vec![None; file.conflicts()];
-        }
-        view.file = Some(result);
+        };
+        let Some(Ok(file)) = &view.file else { return };
+        let Some(segment) = file
+            .segments
+            .iter()
+            .filter(|s| matches!(s, Segment::Conflict { .. }))
+            .nth(index)
+        else {
+            return;
+        };
+        let text = resolution_text(segment, view.resolutions[index].as_ref());
+        view.edits[index] = Some(text);
+        view.resolutions[index] = Some(Resolution::Custom(Vec::new()));
     }
 
-    fn merge(&mut self, rev: String, no_ff: bool, into: String) {
-        let done = format!("Merged {rev} into {into}");
-        let stopped = format!(
-            "Merging {rev} stopped with conflicts. Resolve them in File status, then Continue."
+    /// Write the resolver's result. Edits made to the file on disk since
+    /// the resolver loaded it are only replaced once the user agreed
+    /// (`confirmed`): otherwise finding them asks first.
+    pub(super) fn save_resolution(&mut self, confirmed: bool) {
+        let Some(view) = &self.conflict else { return };
+        let (Some(content), Some(Ok(file))) = (view.result(), &view.file) else {
+            return;
+        };
+        let file = file.clone();
+        let path = file.path.clone();
+        self.run_op(
+            At::Selected,
+            "Saving resolution",
+            move |git| {
+                if !confirmed && conflicts::edited_since_load(&git, &file) {
+                    return Ok(false);
+                }
+                conflicts::resolve_with(&git, &file, &content)?;
+                Ok(true)
+            },
+            move |p, _, result| match result {
+                Ok(true) => p.infos.push(format!("Resolved {path}")),
+                Ok(false) => p.ask(Confirm {
+                    title: format!("{path} was edited since the resolver opened it"),
+                    body: "Saving replaces the file with the resolver's result, and the \
+                           edits made to it on disk are lost. To keep the file as it is \
+                           now, use More > Mark as resolved instead."
+                        .to_owned(),
+                    confirm_label: "Overwrite".to_owned(),
+                    action: Action::SaveResolutionAnyway,
+                }),
+                Err(e) => p.report(e),
+            },
         );
-        self.run_op_at(
-            self.wt_git(),
-            "Merging",
-            Then::MayConflict(done),
-            move |git| Ok(conflicts::merge(&git, &rev, no_ff)?.then_some(stopped)),
+    }
+
+    pub(super) fn take_side(&mut self, path: String, ours: bool) {
+        let side = if ours { "ours" } else { "theirs" };
+        let done = format!("Resolved {path} with {side}");
+        self.run_op(
+            At::Selected,
+            "Resolving",
+            move |git| {
+                let file = conflicts::load(&git, &path)?;
+                conflicts::take_side(&git, &file, ours)
+            },
+            say(done),
         );
     }
 
-    pub(super) fn apply_conflict_action(&mut self, action: Action) {
-        match action {
-            Action::Merge { rev, no_ff, into } => self.merge(rev, no_ff, into),
-            Action::Rebase(onto) => {
-                let done = format!("Rebased onto {onto}");
-                let stopped = format!(
-                    "Rebasing onto {onto} stopped with conflicts. Resolve them in File status, then Continue."
-                );
-                self.run_op_at(
-                    self.wt_git(),
-                    "Rebasing",
-                    Then::MayConflict(done),
-                    move |git| Ok(conflicts::rebase(&git, &onto)?.then_some(stopped)),
-                );
-            }
-            Action::ResolveConflict { index, resolution } => {
-                let Some(view) = &mut self.conflict else {
-                    return;
-                };
-                if let Some(slot) = view.resolutions.get_mut(index) {
-                    *slot = resolution;
-                    view.edits[index] = None;
-                }
-            }
-            Action::EditConflict(index) => {
-                let Some(view) = &mut self.conflict else {
-                    return;
-                };
-                let Some(Ok(file)) = &view.file else { return };
-                let Some(segment) = file
-                    .segments
-                    .iter()
-                    .filter(|s| matches!(s, Segment::Conflict { .. }))
-                    .nth(index)
-                else {
-                    return;
-                };
-                let text = resolution_text(segment, view.resolutions[index].as_ref());
-                view.edits[index] = Some(text);
-                view.resolutions[index] = Some(Resolution::Custom(Vec::new()));
-            }
-            Action::SaveResolution => {
-                let Some(view) = &self.conflict else { return };
-                let (Some(content), Some(Ok(file))) = (view.result(), &view.file) else {
-                    return;
-                };
-                let file = file.clone();
-                let done = format!("Resolved {}", file.path);
-                self.run_op("Saving resolution", Then::Info(done), move |git| {
-                    conflicts::resolve_with(&git, &file, &content)
-                });
-            }
-            Action::TakeSide { path, ours } => {
-                let side = if ours { "ours" } else { "theirs" };
-                let done = format!("Resolved {path} with {side}");
-                self.run_op("Resolving", Then::Info(done), move |git| {
-                    let file = conflicts::load(&git, &path)?;
-                    conflicts::take_side(&git, &file, ours)
-                });
-            }
-            Action::MarkResolved(path) => {
-                let done = format!("Marked {path} as resolved");
-                self.run_op("Resolving", Then::Info(done), move |git| {
-                    conflicts::mark_resolved(&git, &path)
-                });
-            }
-            Action::ContinueOp(kind) => {
-                let done = format!("{} finished", kind.noun());
-                let stopped =
-                    "The next commit has conflicts too. Resolve them, then Continue.".to_owned();
-                self.run_op_at(
-                    self.wt_git(),
-                    &format!("Continuing {}", kind.noun().to_lowercase()),
-                    Then::MayConflict(done),
-                    move |git| Ok(conflicts::continue_op(&git, kind)?.then_some(stopped)),
-                );
-            }
-            Action::AbortOp { kind, confirmed } => {
-                if !confirmed {
-                    self.confirm = Some(Confirm {
-                        title: format!("Abort the {}?", kind.noun().to_lowercase()),
-                        body: "The worktree goes back to how it was before it started. \
-                               Conflict resolutions made so far are lost."
-                            .to_owned(),
-                        confirm_label: format!("Abort {}", kind.noun().to_lowercase()),
-                        action: Action::AbortOp {
-                            kind,
-                            confirmed: true,
-                        },
-                    });
-                    return;
-                }
-                let done = format!("{} aborted", kind.noun());
-                self.run_op("Aborting", Then::Info(done), move |git| {
-                    conflicts::abort(&git, kind)
-                });
-            }
-            _ => {}
-        }
+    pub(super) fn mark_resolved(&mut self, path: String) {
+        let done = format!("Marked {path} as resolved");
+        self.run_op(
+            At::Selected,
+            "Resolving",
+            move |git| conflicts::mark_resolved(&git, &path),
+            say(done),
+        );
     }
 
-    /// A merge, rebase, cherry-pick or revert finished or stopped.
-    pub(super) fn on_may_conflict(&mut self, done: String, stopped: Option<String>) {
-        if self.dialog.as_ref().is_some_and(|d| d.submitting) {
-            self.dialog = None;
-        }
-        let elsewhere = self.pending_conflicts.take();
-        match stopped {
-            Some(text) => {
-                self.infos.push(text);
-                if let Some(path) = elsewhere {
-                    self.nav.tab = super::Tab::Workspace;
-                    self.open_worktree(path);
-                }
-                self.nav.tab = super::Tab::Workspace;
-                self.nav.view = WorkspaceView::FileStatus;
-            }
-            None => {
-                self.infos.push(done);
-                // Show the new commit (and the worktree is usually clean now).
-                if self.nav.tab == super::Tab::Workspace {
-                    self.nav.view = WorkspaceView::History;
-                }
-            }
-        }
+    pub(super) fn continue_op(&mut self, kind: Operation) {
+        let done = format!("{} finished", kind.noun());
+        let noun = kind.noun().to_lowercase();
+        let doing = format!("Continuing the {noun}");
+        self.run_head_op(
+            At::Selected,
+            &format!("Continuing {noun}"),
+            move |git| conflicts::continue_op(&git, kind),
+            after_conflicts(done, doing, None),
+        );
+    }
+
+    pub(super) fn abort_op(&mut self, kind: Operation) {
+        self.run_op(
+            At::Selected,
+            "Aborting",
+            move |git| conflicts::abort(&git, kind),
+            say(format!("{} aborted", kind.noun())),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{git, merge_stops, open, wait};
+
+    /// The file was fixed by hand in an editor while the resolver was open:
+    /// Save resolution asks before it replaces those edits.
+    #[test]
+    fn saving_asks_before_it_replaces_edits_made_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        git(&main, &["init", "-q", "-b", "main"]);
+        std::fs::write(main.join("a.txt"), "a\n").unwrap();
+        git(&main, &["add", "a.txt"]);
+        git(&main, &["commit", "-q", "-m", "first"]);
+        git(&main, &["switch", "-q", "-c", "other"]);
+        std::fs::write(main.join("a.txt"), "other\n").unwrap();
+        git(&main, &["commit", "-q", "-am", "other"]);
+        git(&main, &["switch", "-q", "main"]);
+        std::fs::write(main.join("a.txt"), "main\n").unwrap();
+        git(&main, &["commit", "-q", "-am", "main"]);
+        merge_stops(&main, "other");
+
+        let mut project = open(&main);
+        wait(&mut project, "the resolver never loaded", |p| {
+            p.conflict.as_ref().is_some_and(|c| c.file.is_some())
+        });
+        project.apply(Action::ResolveConflict {
+            index: 0,
+            resolution: Some(Resolution::Theirs),
+        });
+        std::fs::write(main.join("a.txt"), "fixed by hand\n").unwrap();
+        let on_disk = || std::fs::read_to_string(main.join("a.txt")).unwrap();
+
+        project.apply(Action::SaveResolution);
+        wait(&mut project, "nothing was asked", |p| {
+            p.confirm.is_some() && !p.is_operating()
+        });
+        assert_eq!(on_disk(), "fixed by hand\n");
+        project.apply(Action::ConfirmYes);
+        wait(&mut project, "the resolution was never saved", |p| {
+            !p.is_operating() && !p.infos.is_empty()
+        });
+        assert!(project.notices.is_empty(), "{:?}", project.notices);
+        assert_eq!(on_disk().trim_end(), "other");
     }
 }

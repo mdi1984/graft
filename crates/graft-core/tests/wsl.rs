@@ -2,25 +2,46 @@
 //! against real throwaway repositories in the default distro. Skipped where
 //! no distro with git is installed (e.g. CI).
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use graft_core::console::Console;
 use graft_core::watch::Watcher;
 use graft_core::worktree::{self, Start};
 use graft_core::wsl::Wsl;
-use graft_core::{CancelToken, Console, Git, conflicts, history, ops, preview, repo, snapshot};
+use graft_core::{CancelToken, Git, conflicts, history, ops, preview, remote, repo, snapshot};
 
 /// A temporary folder inside the distro, removed on drop.
 struct Distro {
     name: String,
+    wsl: Wsl,
     tmp: String,
 }
 
+/// Say that `test` did not run, past the test harness's output capture (so
+/// it shows in a normal `cargo test` run), and let it pass.
+fn skipped(test: &str) {
+    let _ = writeln!(
+        std::io::stderr(),
+        "skipped: {test} needs a WSL distro with git, none found"
+    );
+}
+
 impl Distro {
-    fn start() -> Option<Self> {
+    /// The default distro, or `None` (and a visible skip) without one.
+    fn start(test: &str) -> Option<Self> {
+        let distro = Self::find();
+        if distro.is_none() {
+            skipped(test);
+        }
+        distro
+    }
+
+    fn find() -> Option<Self> {
         let out = Command::new("wsl.exe")
             .args([
                 "--exec",
@@ -32,10 +53,10 @@ impl Distro {
             .ok()?;
         let name = String::from_utf8_lossy(&out.stdout).trim().to_owned();
         if !out.status.success() || name.is_empty() {
-            eprintln!("no WSL distro with git; skipping");
             return None;
         }
         let mut distro = Self {
+            wsl: Wsl::new(&name),
             name,
             tmp: String::new(),
         };
@@ -60,8 +81,7 @@ impl Distro {
 
     /// The Windows path of `rel` inside the temporary folder.
     fn path(&self, rel: &str) -> PathBuf {
-        let wsl = Wsl::of(Path::new(&format!(r"\\wsl.localhost\{}\", self.name))).unwrap();
-        wsl.to_windows(&format!("{}/{rel}", self.tmp))
+        self.wsl.to_windows(&format!("{}/{rel}", self.tmp))
     }
 }
 
@@ -87,7 +107,9 @@ fn repo_with_worktree(d: &Distro) {
 
 #[test]
 fn open_status_worktrees_and_history() {
-    let Some(d) = Distro::start() else { return };
+    let Some(d) = Distro::start("open_status_worktrees_and_history") else {
+        return;
+    };
     repo_with_worktree(&d);
     let app = d.path("app");
     let feature = d.path("app.worktrees/feature");
@@ -119,7 +141,7 @@ fn open_status_worktrees_and_history() {
         .unwrap()
         .entries
         .into_iter()
-        .filter(|e| e.kind == graft_core::status::EntryKind::Tracked)
+        .filter(|e| e.kind == graft_core::EntryKind::Tracked)
         .map(|e| e.path)
         .collect();
     assert_eq!(staged, ["x[ab].txt"]);
@@ -129,12 +151,14 @@ fn open_status_worktrees_and_history() {
     // History through gix, also when opened at the linked worktree.
     let tips = [snap.worktrees[1].head.unwrap()];
     let commits = history::walk(&feature, &tips, 100, &CancelToken::default()).unwrap();
-    assert_eq!(commits.list.len(), 1);
+    assert_eq!(commits.len(), 1);
 }
 
 #[test]
 fn worktrees_clone_and_conflicts() {
-    let Some(d) = Distro::start() else { return };
+    let Some(d) = Distro::start("worktrees_clone_and_conflicts") else {
+        return;
+    };
     repo_with_worktree(&d);
     let app = d.path("app");
     let feature = d.path("app.worktrees/feature");
@@ -151,15 +175,18 @@ fn worktrees_clone_and_conflicts() {
     assert!(path.join("readme.md").exists());
     let snap = snapshot::load(&git).unwrap();
     assert!(snap.worktrees.iter().any(|w| w.path == path));
-    worktree::set_locked(&git, &path, true).unwrap();
-    assert!(
-        snapshot::load(&git)
-            .unwrap()
-            .worktrees
+    let locked = || {
+        let snap = snapshot::load(&git).unwrap();
+        snap.worktrees
             .iter()
-            .any(|w| w.locked)
-    );
+            .find(|w| w.path == path)
+            .unwrap()
+            .locked
+    };
+    worktree::set_locked(&git, &path, true).unwrap();
+    assert!(locked());
     worktree::set_locked(&git, &path, false).unwrap();
+    assert!(!locked());
     worktree::remove(&git, &path, false).unwrap();
     assert!(!path.exists());
 
@@ -177,13 +204,13 @@ fn worktrees_clone_and_conflicts() {
          && cd ../app.worktrees/feature && printf 'feature\\n' > readme.md \
          && git commit -qam feature && (git merge -q main >/dev/null 2>&1 || true)",
     );
-    assert!(conflicts::in_progress(&feature).is_some());
+    assert!(repo::in_progress(&feature).is_some());
     let wt = Git::new(&feature, console.clone());
     let file = conflicts::load(&wt, "readme.md").unwrap();
     conflicts::take_side(&wt, &file, true).unwrap();
-    let stopped_again = conflicts::continue_op(&wt, conflicts::Kind::Merge).unwrap();
+    let stopped_again = conflicts::continue_op(&wt, graft_core::Operation::Merge).unwrap();
     assert!(!stopped_again);
-    assert!(conflicts::in_progress(&feature).is_none());
+    assert!(repo::in_progress(&feature).is_none());
 
     // Clone into a WSL folder.
     let dest = d.path("copy");
@@ -193,9 +220,78 @@ fn worktrees_clone_and_conflicts() {
     assert!(dest.join("readme.md").exists());
 }
 
+/// Staging some lines of a new executable script keeps its mode: git in the
+/// distro sees the +x bit Windows cannot.
+#[test]
+fn partial_stage_of_new_script_keeps_mode() {
+    let Some(d) = Distro::start("partial_stage_of_new_script_keeps_mode") else {
+        return;
+    };
+    repo_with_worktree(&d);
+    d.sh("cd app && printf '#!/bin/sh\\necho a\\necho b\\n' > new.sh && chmod +x new.sh");
+    let git = Git::new(d.path("app"), Console::default());
+    let diff =
+        graft_core::diff::load(&git, &graft_core::diff::Source::Untracked, "new.sh", None).unwrap();
+    ops::apply_lines(
+        &git,
+        &diff,
+        &graft_core::diff::Source::Untracked,
+        ops::LineOp::Stage,
+        |_, l| l < 2,
+    )
+    .unwrap();
+    let entry = d.sh("cd app && git ls-files --stage -- new.sh");
+    assert!(entry.starts_with("100755 "), "{entry}");
+    assert_eq!(d.sh("cd app && git show :new.sh"), "#!/bin/sh\necho a");
+}
+
+/// Linux git has no pull setting like Git for Windows' pull.rebase=false: a
+/// pull of a diverged branch goes through anyway, as a merge unless the
+/// user's config in the distro says otherwise.
+#[test]
+fn pull_of_a_diverged_branch() {
+    let Some(d) = Distro::start("pull_of_a_diverged_branch") else {
+        return;
+    };
+    d.sh("git init -q --bare -b main server.git \
+         && git clone -q server.git mine && git clone -q server.git theirs \
+         && for r in mine theirs; do git -C $r config user.name Ada \
+            && git -C $r config user.email ada@example.com; done \
+         && cd mine && printf 'a\\n' > a.txt && git add a.txt && git commit -q -m a \
+         && git push -q origin main && cd ../theirs && git pull -q \
+         && printf 'theirs\\n' > a.txt && git commit -qam theirs && git push -q \
+         && cd ../mine && printf 'mine\\n' > b.txt && git add b.txt && git commit -q -m mine");
+    let git = Git::new(d.path("mine"), Console::default());
+    let stopped = remote::pull(&git, &CancelToken::default(), |_| {}).unwrap();
+    assert!(!stopped);
+    assert_eq!(d.sh("cd mine && cat a.txt b.txt"), "theirs\nmine");
+}
+
+/// Windows has no Recycle Bin inside WSL: discarding a new file deletes
+/// it (and its intent-to-add entry) for good, as the question says.
+#[test]
+fn discarding_new_files_deletes_them() {
+    let Some(d) = Distro::start("discarding_new_files_deletes_them") else {
+        return;
+    };
+    repo_with_worktree(&d);
+    d.sh(
+        "cd app && printf 'a\\n' > new.txt && printf 'b\\n' > intent.txt && git add -N intent.txt",
+    );
+    let app = d.path("app");
+    assert!(!graft_core::paths::has_recycle_bin(&app));
+    let git = Git::new(&app, Console::default());
+    let files = ["new.txt".to_owned(), "intent.txt".to_owned()];
+    ops::discard_paths(&git, &[], &files).unwrap();
+    assert!(!app.join("new.txt").exists() && !app.join("intent.txt").exists());
+    assert_eq!(d.sh("cd app && git status --porcelain"), "");
+}
+
 #[test]
 fn preview_in_main() {
-    let Some(d) = Distro::start() else { return };
+    let Some(d) = Distro::start("preview_in_main") else {
+        return;
+    };
     repo_with_worktree(&d);
     let app = d.path("app");
     let feature = d.path("app.worktrees/feature");
@@ -216,9 +312,11 @@ fn preview_in_main() {
 
 #[test]
 fn distros_and_home_folders() {
-    let Some(d) = Distro::start() else { return };
+    let Some(d) = Distro::start("distros_and_home_folders") else {
+        return;
+    };
     assert!(graft_core::wsl::distros().contains(&d.name));
-    let wsl = Wsl::new(&d.name);
+    let wsl = &d.wsl;
     let home = wsl.home().expect("home folder");
     assert_eq!(home, d.sh("echo $HOME"));
     // `~/x` typed on the start page is the folder git sees as `$HOME/x`.
@@ -228,7 +326,9 @@ fn distros_and_home_folders() {
 
 #[test]
 fn changes_inside_wsl_are_noticed() {
-    let Some(d) = Distro::start() else { return };
+    let Some(d) = Distro::start("changes_inside_wsl_are_noticed") else {
+        return;
+    };
     repo_with_worktree(&d);
     let changes = Arc::new(AtomicUsize::new(0));
     let seen = changes.clone();
@@ -249,8 +349,9 @@ fn changes_inside_wsl_are_noticed() {
             std::thread::sleep(Duration::from_millis(200));
         }
     };
-    std::thread::sleep(Duration::from_secs(3));
-    changes.store(0, Ordering::SeqCst);
+    // The first check always refreshes once (it has nothing to compare
+    // with yet); every change after it must be noticed on its own.
+    wait("first check");
     d.sh("printf 'x\\n' > app.worktrees/feature/new.txt");
     wait("new file in the linked worktree");
     d.sh("cd app && git branch other");

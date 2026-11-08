@@ -1,37 +1,39 @@
 //! The main area to the right of the sidebar: a header strip plus the
 //! screen for the current tab and view.
 
-use egui::{Align2, Frame, Margin, Panel, Rect, Sense, Ui, vec2};
-use graft_core::Worktree;
+use egui::{Frame, Margin, Panel, Rect, Sense, Ui, vec2};
+use graft_core::{Worktree, paths};
 
-use super::widgets::{ButtonKind, button, elided_path, paint_galley_left, spinner};
-use super::{conflicts, file_history, file_status, history, review, stashes};
+use super::widgets::{
+    ButtonKind, button, elided_path, error_label, loading, paint_galley_left, title,
+};
+use super::{can, conflicts, file_history, file_status, history, review, stashes};
 use crate::project::{Action, Project, Tab, WorkspaceView};
 use crate::theme::{self, color};
+use crate::ui::{Actions, AppAction};
 
-pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
-    if project.snapshot.is_none() {
+pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
+    let Some(snap) = project.snapshot.clone() else {
         not_loaded(ui, project, actions);
         return;
-    }
-    let worktree = project.worktree().cloned();
-    let worktree = worktree.as_ref();
+    };
+    let worktree = project.worktree_in(&snap);
     preview_banner(ui, project, actions);
     match project.nav.tab {
         Tab::Workspace => match project.nav.view {
-            WorkspaceView::FileStatus => {
-                header(ui, "File status", worktree);
+            view @ WorkspaceView::FileStatus => {
+                header(ui, view.label(), worktree);
                 if let Some(wt) = worktree {
                     conflicts::banner(ui, project, wt, actions);
                 }
                 file_status::show(ui, project, actions);
             }
-            WorkspaceView::FileHistory => {
-                header(ui, "File history", worktree);
+            view @ WorkspaceView::FileHistory => {
+                header(ui, view.label(), worktree);
                 file_history::show(ui, project, actions);
             }
-            WorkspaceView::History => {
-                header(ui, "History", worktree);
+            view @ WorkspaceView::History => {
+                header(ui, view.label(), worktree);
                 if let Some(wt) = worktree {
                     conflicts::banner(ui, project, wt, actions);
                 }
@@ -39,32 +41,26 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Vec<Action>) {
             }
         },
         Tab::Review => {
-            header(ui, "Review", worktree);
+            header(ui, Tab::Review.label(), worktree);
             review::show(ui, project, actions);
         }
         Tab::Stashes => {
-            header(ui, "Stashes", worktree);
+            header(ui, Tab::Stashes.label(), worktree);
             stashes::show(ui, project, actions);
         }
     }
 }
 
 /// The strip across the top while main shows another worktree.
-fn preview_banner(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
+fn preview_banner(ui: &mut Ui, project: &Project, actions: &mut Actions) {
     let Some(snap) = &project.snapshot else {
         return;
     };
     let Some(preview) = &snap.preview else { return };
-    let source = snap
-        .worktrees
-        .iter()
-        .find(|wt| graft_core::same_path(&wt.path, &preview.source));
-    let name = source.map_or_else(|| preview.source.display().to_string(), |wt| wt.label());
-    let back = match &preview.restore {
-        graft_core::preview::Restore::Branch(b) => b.clone(),
-        graft_core::preview::Restore::Detached(id) => graft_core::short(id),
-    };
-    let busy = project.is_operating();
+    let source = snap.worktree_at(&preview.source);
+    let name = source.map_or_else(|| paths::display(&preview.source), |wt| wt.label());
+    let back = preview.restore.label();
+    let blocked = project.can_act().err();
     Panel::top("preview-banner")
         .frame(
             Frame::new()
@@ -87,19 +83,27 @@ fn preview_banner(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
                     .color(color::text_mid()),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if button(ui, "Restore main folder", ButtonKind::Primary, !busy)
-                        .on_hover_text(format!(
-                            "Go back to {back}. Changes made in the main folder during the preview are discarded."
-                        ))
+                    let can = can::yes(format!(
+                        "Go back to {back}. If files in the main folder changed during the preview, Graft asks before discarding them."
+                    ))
+                    .unless(blocked);
+                    if button(ui, "Restore main folder", ButtonKind::Primary, can.ok)
+                        .on_hover_text(can.hint)
                         .clicked()
                     {
                         actions.push(Action::RestoreMain);
                     }
-                    if button(ui, "Update", ButtonKind::Secondary, !busy && source.is_some())
-                        .on_hover_text(format!("Show the current state of {name} again"))
+                    let (can, update) = match source {
+                        Some(wt) => can::preview(snap, Some(wt)),
+                        None => (can::no("The previewed worktree is gone"), None),
+                    };
+                    let can = can.unless(blocked);
+                    if button(ui, "Update", ButtonKind::Secondary, can.ok)
+                        .on_hover_text(can.hint)
                         .clicked()
+                        && let Some(update) = update
                     {
-                        actions.push(Action::UpdatePreview);
+                        actions.push(update);
                     }
                 });
             });
@@ -111,7 +115,7 @@ fn header(ui: &mut Ui, title: &str, worktree: Option<&Worktree>) {
     Panel::top("main-header")
         .frame(
             Frame::new()
-                .fill(color::sidebar_bg().lerp_to_gamma(color::app_bg(), 0.5))
+                .fill(color::muted_bg())
                 .inner_margin(Margin::symmetric(14, 0)),
         )
         .show(ui, |ui| {
@@ -126,7 +130,7 @@ fn header(ui: &mut Ui, title: &str, worktree: Option<&Worktree>) {
                 color::text(),
             );
             let mut x = rect.left() + title.size().x + 10.0;
-            paint_galley_left(painter, rect.left(), y, title, color::text());
+            paint_galley_left(painter, rect.left(), y, title);
 
             let Some(wt) = worktree else { return };
             let chip_text = painter.layout_no_wrap(wt.label(), theme::mono(), color::dirty_fg());
@@ -139,10 +143,10 @@ fn header(ui: &mut Ui, title: &str, worktree: Option<&Worktree>) {
                 5,
                 color::dirty_bg().lerp_to_gamma(color::app_bg(), 0.3),
             );
-            paint_galley_left(painter, chip.left() + 8.0, y, chip_text, color::dirty_fg());
+            paint_galley_left(painter, chip.left() + 8.0, y, chip_text);
             x = chip.right() + 10.0;
 
-            let path = graft_core::wsl::display(&wt.path);
+            let path = paths::display(&wt.path);
             let path = elided_path(
                 ui,
                 &path,
@@ -150,44 +154,32 @@ fn header(ui: &mut Ui, title: &str, worktree: Option<&Worktree>) {
                 color::text_weak(),
                 rect.right() - x,
             );
-            paint_galley_left(painter, x, y, path, color::text_weak());
+            paint_galley_left(painter, x, y, path);
         });
 }
 
 /// The project has no snapshot yet: loading, or it failed (folder gone?).
-fn not_loaded(ui: &mut Ui, project: &Project, actions: &mut Vec<Action>) {
-    let rect = ui.available_rect_before_wrap();
+fn not_loaded(ui: &mut Ui, project: &Project, actions: &mut Actions) {
     let Some(error) = &project.error else {
-        spinner(ui, rect.center() - vec2(0.0, 16.0), 9.0, color::text_weak());
-        ui.painter().text(
-            rect.center() + vec2(0.0, 10.0),
-            Align2::CENTER_CENTER,
-            format!("Opening {}…", project.root.display()),
-            theme::body(),
-            color::text_weak(),
-        );
+        let path = paths::display(&project.root);
+        loading(ui, &format!("Opening {path}…"));
         return;
     };
+    let rect = ui.available_rect_before_wrap();
     let width = 460.0_f32.min(rect.width() - 32.0);
     let area = Rect::from_center_size(rect.center(), vec2(width, 160.0));
     ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
-        ui.label(
-            egui::RichText::new(format!("Could not open {}", project.name))
-                .font(theme::semibold(15.0))
-                .color(color::text()),
-        );
-        ui.label(
-            egui::RichText::new(graft_core::wsl::display(&project.root)).color(color::text_weak()),
-        );
+        title(ui, &format!("Could not open {}", project.name));
+        ui.label(egui::RichText::new(paths::display(&project.root)).color(color::text_weak()));
         ui.add_space(4.0);
-        ui.add(egui::Label::new(egui::RichText::new(error).color(color::removed())).wrap());
+        error_label(ui, error);
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if button(ui, "Try again", ButtonKind::Primary, true).clicked() {
                 actions.push(Action::Refresh);
             }
             if button(ui, "Close tab", ButtonKind::Secondary, true).clicked() {
-                actions.push(Action::Close);
+                actions.app(AppAction::Close);
             }
         });
     });

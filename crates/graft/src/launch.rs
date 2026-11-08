@@ -3,9 +3,23 @@
 //! nothing here goes through `cmd /c` (which would read `&` or `%` in a path as
 //! commands), and a file Windows would run (`.exe`, `.bat`, `.lnk`, ...) is
 //! never handed to its default program.
+//!
+//! Launching looks at the disk and starts processes: it runs in background
+//! jobs (see `project::launch`), never on the UI thread.
 
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// Ask for a folder in Windows' folder picker, opened at `start` if that
+/// is one. Waits for the user: run it on a thread of its own.
+pub fn pick_folder(title: &str, start: Option<PathBuf>) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new().set_title(title);
+    if let Some(dir) = start.filter(|d| d.is_dir()) {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog.pick_folder()
+}
 
 /// Extensions that Windows runs, or follows to something it runs, instead of
 /// opening them as a document. `PATHEXT` adds to these.
@@ -69,37 +83,33 @@ fn path_exts() -> Vec<String> {
 
 /// Open a file with its default program, or a folder in Explorer. A file that
 /// would run goes to the IDE instead (or is shown in Explorer).
-pub fn open_path(path: &Path, ide_command: &str) -> std::io::Result<()> {
+pub fn open_path(path: &Path, ide_command: &str) -> io::Result<()> {
     if path.is_file() && is_runnable(path) {
-        open_in_ide(path, ide_command);
-        return Ok(());
+        return open_in_ide(path, ide_command);
     }
     open::that_detached(path)
 }
 
 /// Open a folder in Explorer; anything that is not a folder is refused.
-pub fn open_folder(dir: &Path) -> std::io::Result<()> {
+pub fn open_folder(dir: &Path) -> io::Result<()> {
     if !dir.is_dir() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "not a folder",
-        ));
+        return Err(not_a_folder());
     }
     open::that_detached(dir)
 }
 
 /// Show `path` selected in an Explorer window.
-pub fn reveal(path: &Path) -> std::io::Result<()> {
-    let full = graft_core::repo::native(&path.to_string_lossy());
+pub fn reveal(path: &Path) -> io::Result<()> {
+    let full = graft_core::paths::native(&path.to_string_lossy());
     let mut arg = std::ffi::OsString::from("/select,");
     arg.push(&full);
     Command::new("explorer").arg(arg).spawn().map(drop)
 }
 
 /// Open a terminal in `dir`: Windows Terminal if installed, else cmd.
-pub fn open_terminal(dir: &Path) {
+pub fn open_terminal(dir: &Path) -> io::Result<()> {
     if !dir.is_dir() {
-        return;
+        return Err(not_a_folder());
     }
     // Windows Terminal reads `;` as "new tab"; `\;` is a plain semicolon.
     let escaped = dir.to_string_lossy().replace(';', "\\;");
@@ -107,52 +117,55 @@ pub fn open_terminal(dir: &Path) {
         .arg("-d")
         .arg(escaped)
         .spawn()
-        .is_err()
+        .is_ok()
     {
-        let mut cmd = Command::new("cmd.exe");
-        cmd.current_dir(dir);
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-            cmd.creation_flags(CREATE_NEW_CONSOLE);
-        }
-        let _ = cmd.spawn();
+        return Ok(());
     }
+    let mut cmd = Command::new("cmd.exe");
+    cmd.current_dir(dir);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        cmd.creation_flags(CREATE_NEW_CONSOLE);
+    }
+    cmd.spawn().map(drop)
 }
 
 /// Open a folder or file with the IDE command from the settings (`code`,
 /// `idea64`, a full path, with optional arguments). Without a working IDE a
 /// folder opens in Explorer, a document with its default program, and a file
-/// that would run is only shown in Explorer.
-pub fn open_in_ide(path: &Path, command: &str) {
-    let path = path.to_path_buf();
+/// that would run is only shown in Explorer. Waits for the IDE command.
+pub fn open_in_ide(path: &Path, command: &str) -> io::Result<()> {
+    if run_ide(path, command) {
+        return Ok(());
+    }
+    if path.is_file() && is_runnable(path) {
+        reveal(path)
+    } else {
+        open::that_detached(path)
+    }
+}
+
+/// Run the IDE command on `path`; whether it ran and succeeded.
+fn run_ide(path: &Path, command: &str) -> bool {
     let words = split_command(command);
-    std::thread::spawn(move || {
-        let ok = words.split_first().is_some_and(|(program, args)| {
-            let Some(program) = find_program(program) else {
-                return false;
-            };
-            let mut cmd = Command::new(program);
-            cmd.args(args).arg(&path);
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-                cmd.creation_flags(CREATE_NO_WINDOW);
-            }
-            // A .cmd launcher (code.cmd) goes through cmd.exe; the standard
-            // library escapes its arguments and refuses ones it cannot.
-            cmd.status().is_ok_and(|s| s.success())
-        });
-        if !ok {
-            let _ = if path.is_file() && is_runnable(&path) {
-                reveal(&path)
-            } else {
-                open::that_detached(&path)
-            };
-        }
-    });
+    let Some((program, args)) = words.split_first() else {
+        return false;
+    };
+    let Some(program) = find_program(program) else {
+        return false;
+    };
+    let mut cmd = Command::new(program);
+    cmd.args(args).arg(path);
+    graft_core::paths::no_window(&mut cmd);
+    // A .cmd launcher (code.cmd) goes through cmd.exe; the standard library
+    // escapes its arguments and refuses ones it cannot.
+    cmd.status().is_ok_and(|s| s.success())
+}
+
+fn not_a_folder() -> io::Error {
+    io::Error::new(io::ErrorKind::NotFound, "not a folder")
 }
 
 /// Split a command line into words; double quotes keep spaces in a word.
@@ -233,36 +246,44 @@ mod tests {
         }
     }
 
+    /// A bare name is looked up on PATH with the PATHEXT extensions; a path
+    /// is taken as given, also without its extension.
+    #[cfg(windows)]
     #[test]
-    fn programs_are_found_on_path_not_in_the_current_folder() {
+    fn programs_are_found_on_path_or_as_given() {
         let cmd = find_program("cmd").expect("cmd.exe is on PATH");
         assert!(
             cmd.ends_with("cmd.exe") || cmd.ends_with("cmd.EXE"),
             "{cmd:?}"
         );
         assert_eq!(find_program("graft-no-such-program"), None);
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("my-ide.cmd");
+        std::fs::write(&script, "@exit 0\r\n").unwrap();
+        let without_ext = dir.path().join("my-ide");
+        let lower = |p: &Path| p.to_string_lossy().to_lowercase();
+        let found = find_program(without_ext.to_str().unwrap()).expect("found with PATHEXT");
+        assert_eq!(lower(&found), lower(&script));
+        assert_eq!(find_program(script.to_str().unwrap()), Some(script));
     }
 
-    /// A file name with `&` in it must reach the program as one argument, not
-    /// as a second command.
+    /// A file name with `&` in it must reach a `.cmd` IDE launcher as one
+    /// argument, not as a second command.
     #[cfg(windows)]
     #[test]
     fn ampersands_in_paths_stay_arguments() {
-        let dir = std::env::temp_dir().join(format!("graft-launch-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let script = dir.join("echo-arg.cmd");
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("echo-arg.cmd");
         std::fs::write(&script, "@echo %1>\"%~dp0out.txt\"\r\n").unwrap();
-        let marker = dir.join("pwned.txt");
-        let evil = dir.join("a&echo x>pwned.txt&b.txt");
-        let status = Command::new(&script)
-            .current_dir(&dir)
-            .arg(&evil)
-            .status()
-            .unwrap();
-        assert!(status.success());
-        assert!(!marker.exists(), "the & ran as a command");
-        let out = std::fs::read_to_string(dir.join("out.txt")).unwrap();
+        let evil = dir.path().join("a&echo x>pwned.txt&b.txt");
+        let command = format!("\"{}\"", script.display());
+        assert!(run_ide(&evil, &command), "the IDE command failed");
+        let cwd = std::env::current_dir().unwrap();
+        for folder in [dir.path(), cwd.as_path()] {
+            assert!(!folder.join("pwned.txt").exists(), "the & ran as a command");
+        }
+        let out = std::fs::read_to_string(dir.path().join("out.txt")).unwrap();
         assert!(out.contains("a&echo x>pwned.txt&b.txt"), "{out}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

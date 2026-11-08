@@ -13,25 +13,16 @@ pub struct Identity {
     pub local: bool,
 }
 
-/// `git config` exits with 1 when a key is not set, 5 when unsetting a key
-/// that is not set.
+/// A config value; empty when not set.
 fn get(git: &Git, args: &[&str]) -> Result<String> {
-    let mut all = vec!["config"];
-    all.extend_from_slice(args);
-    let out = git.run_expecting(&all, None, |o| o.status <= 1)?;
-    if out.status > 1 {
-        anyhow::bail!("{}", crate::cli::failure_message(&out));
-    }
-    Ok(out.stdout_str().trim().to_owned())
+    Ok(git.config(args)?.unwrap_or_default())
 }
 
+/// `git config --unset` exits with 5 when the key is not set.
 fn unset(git: &Git, scope: &str, key: &str) -> Result<()> {
-    let out = git.run_expecting(["config", scope, "--unset", key], None, |o| {
+    git.run_accepting(["config", scope, "--unset", key], None, |o| {
         o.status == 0 || o.status == 5
     })?;
-    if out.status != 0 && out.status != 5 {
-        anyhow::bail!("{}", crate::cli::failure_message(&out));
-    }
     Ok(())
 }
 

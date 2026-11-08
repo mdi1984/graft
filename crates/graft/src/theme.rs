@@ -105,7 +105,13 @@ pub mod color {
 
         removed: 0xff9a8f / 0xc8232f,
         added: 0x7ee08f / 0x1a7f37,
+        /// Renamed and copied files.
+        renamed: 0xd6a3ff / 0x8250df,
         tag: 0xf5d76e / 0x8a6200,
+
+        // The two sides of a conflict.
+        ours: 0x8cc2ff / 0x0b62c9,
+        theirs: 0xd6a3ff / 0x8250df,
 
         // Syntax colors in diffs.
         syn_keyword: 0xd6a3ff / 0x8250df,
@@ -116,7 +122,9 @@ pub mod color {
         syn_type: 0xf5d76e / 0x953800,
     }
 
-    const DARK_LANES: [Color32; 8] = [
+    /// Accents that tell things apart: commit graph lanes and tab groups.
+    const ACCENTS: usize = graft_core::history::LANE_COLORS as usize;
+    const DARK_ACCENTS: [Color32; ACCENTS] = [
         hex(0x8fd19e),
         hex(0x8cc2ff),
         hex(0xf2b77a),
@@ -126,7 +134,7 @@ pub mod color {
         hex(0xf5d76e),
         hex(0xf39ac7),
     ];
-    const LIGHT_LANES: [Color32; 8] = [
+    const LIGHT_ACCENTS: [Color32; ACCENTS] = [
         hex(0x1a7f37),
         hex(0x0b62c9),
         hex(0xbc5400),
@@ -137,9 +145,35 @@ pub mod color {
         hex(0xbf3989),
     ];
 
-    /// Commit graph lanes, assigned round-robin.
-    pub fn lanes() -> [Color32; 8] {
-        if is_light() { LIGHT_LANES } else { DARK_LANES }
+    fn distinct(index: usize) -> Color32 {
+        let accents = if is_light() {
+            &LIGHT_ACCENTS
+        } else {
+            &DARK_ACCENTS
+        };
+        accents[index % ACCENTS]
+    }
+
+    /// The color of commit graph lane `index`, assigned round-robin.
+    pub fn lane(index: usize) -> Color32 {
+        distinct(index)
+    }
+
+    /// Tab group colors; a group stores an index into them.
+    pub const GROUP_COUNT: usize = ACCENTS;
+
+    pub fn group(index: usize) -> Color32 {
+        distinct(index)
+    }
+
+    /// Between the sidebar and the app background: headers, hidden lines.
+    pub fn muted_bg() -> Color32 {
+        sidebar_bg().lerp_to_gamma(app_bg(), 0.5)
+    }
+
+    /// The outline of a selected card or tab.
+    pub fn selected_outline() -> Color32 {
+        accent().gamma_multiply(0.6)
     }
 }
 
@@ -162,6 +196,11 @@ pub fn mono() -> FontId {
 
 pub fn semibold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(SEMIBOLD.into()))
+}
+
+/// Dialog and page titles.
+pub fn title() -> FontId {
+    semibold(15.0)
 }
 
 /// Install both styles and pick the theme; `System` follows Windows.

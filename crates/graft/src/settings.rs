@@ -1,6 +1,6 @@
 //! App-wide preferences, saved with the rest of Graft's state.
 
-use graft_core::slash::PROTECTED;
+use graft_core::slash::default_protected;
 use graft_core::worktree::DEFAULT_COPY_PATTERNS;
 use serde::{Deserialize, Serialize};
 
@@ -34,7 +34,7 @@ impl Default for Settings {
             theme: ThemeChoice::System,
             ide_command: "code".to_owned(),
             auto_fetch_minutes: 10,
-            protected: PROTECTED.to_owned(),
+            protected: default_protected(),
             copy_patterns: DEFAULT_COPY_PATTERNS.to_owned(),
             check_updates: true,
             wrap_lines: false,
@@ -71,4 +71,11 @@ impl ThemeChoice {
             Self::Light => egui::ThemePreference::Light,
         }
     }
+}
+
+/// Where clones go when the user has not picked a folder yet.
+pub fn default_clone_parent() -> std::path::PathBuf {
+    std::env::var_os("USERPROFILE")
+        .map(|home| std::path::PathBuf::from(home).join("source").join("repos"))
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\dev"))
 }

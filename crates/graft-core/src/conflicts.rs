@@ -1,178 +1,152 @@
-//! Merges and conflicts: start a merge, detect an operation in progress
-//! (merge, cherry-pick, revert, rebase), read a conflicted file's three sides
-//! from the index, resolve it, and continue or abort.
+//! Merges and conflicts: start a merge, rebase, cherry-pick or revert, read
+//! a conflicted file's three sides from the index, resolve it, and continue
+//! or abort. What is in progress is `repo::in_progress`.
 //!
 //! A resolution is written as a blob straight into the index and then checked
 //! out, so git applies the worktree's line endings (core.autocrlf) itself.
 
-use std::path::{Path, PathBuf};
-
 use anyhow::{Context, Result, bail};
 
-use crate::Git;
-use crate::cli::failure_message;
+use crate::changes::is_binary;
+use crate::cli::{Git, Output};
+use crate::model::Operation;
 
-/// An operation that stopped part-way, usually because of conflicts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
-    Merge,
-    CherryPick,
-    Revert,
-    Rebase,
+/// What one side of a conflict is called.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SideName {
+    /// As a heading, e.g. "Current (main)".
+    pub long: String,
+    /// Inside a sentence, e.g. "current".
+    pub short: String,
 }
 
-impl Kind {
-    fn command(self) -> &'static str {
-        match self {
-            Kind::Merge => "merge",
-            Kind::CherryPick => "cherry-pick",
-            Kind::Revert => "revert",
-            Kind::Rebase => "rebase",
-        }
-    }
-
-    pub fn noun(self) -> &'static str {
-        match self {
-            Kind::Merge => "Merge",
-            Kind::CherryPick => "Cherry-pick",
-            Kind::Revert => "Revert",
-            Kind::Rebase => "Rebase",
+impl SideName {
+    fn new(name: &str, detail: Option<&str>) -> Self {
+        Self {
+            long: match detail {
+                Some(detail) => format!("{name} ({detail})"),
+                None => name.to_owned(),
+            },
+            short: name.to_lowercase(),
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InProgress {
-    pub kind: Kind,
-    /// What is being done, e.g. "Merge branch 'feature/x'".
-    pub title: String,
+pub struct SideNames {
+    pub ours: SideName,
+    pub theirs: SideName,
 }
 
-/// The git dir of a worktree: `.git` itself, or what a linked worktree's
-/// `.git` file points at.
-pub(crate) fn git_dir(worktree: &Path) -> Option<PathBuf> {
-    let dot = worktree.join(".git");
-    if dot.is_dir() {
-        return Some(dot);
-    }
-    let text = std::fs::read_to_string(&dot).ok()?;
-    let target = text.trim().strip_prefix("gitdir:")?.trim();
-    // In WSL git writes a Linux path.
-    if let Some(wsl) = crate::wsl::Wsl::of(worktree)
-        && target.starts_with('/')
-    {
-        return Some(wsl.to_windows(target));
-    }
-    let path = PathBuf::from(target);
-    Some(if path.is_absolute() {
-        path
-    } else {
-        worktree.join(path)
-    })
-}
-
-/// What is in progress in this worktree, judged by git's marker files.
-pub fn in_progress(worktree: &Path) -> Option<InProgress> {
-    let dir = git_dir(worktree)?;
-    let first_line = |name: &str| {
-        std::fs::read_to_string(dir.join(name))
-            .ok()
-            .and_then(|t| t.lines().next().map(str::to_owned))
-            .unwrap_or_default()
+/// Names for the two sides of a conflict. In a rebase, "ours" is the branch
+/// being rebased onto and "theirs" is your commit being replayed.
+pub fn side_names(kind: Option<Operation>, branch: Option<&str>) -> SideNames {
+    let current = SideName::new("Current", Some(branch.unwrap_or("HEAD")));
+    let (ours, theirs) = match kind {
+        Some(Operation::Rebase) => (SideName::new("Upstream", None), "Your commit"),
+        Some(Operation::CherryPick) => (current, "Picked commit"),
+        Some(Operation::Revert) => (current, "Reverted commit"),
+        Some(Operation::Merge) | None => (current, "Incoming"),
     };
-    if dir.join("rebase-merge").is_dir() || dir.join("rebase-apply").is_dir() {
-        let sub = if dir.join("rebase-merge").is_dir() {
-            "rebase-merge"
-        } else {
-            "rebase-apply"
-        };
-        let head = first_line(&format!("{sub}/head-name"));
-        let head = head.trim_start_matches("refs/heads/");
-        return Some(InProgress {
-            kind: Kind::Rebase,
-            title: if head.is_empty() {
-                "Rebasing".to_owned()
-            } else {
-                format!("Rebasing {head}")
-            },
-        });
+    SideNames {
+        ours,
+        theirs: SideName::new(theirs, None),
     }
-    if dir.join("MERGE_HEAD").is_file() {
-        let msg = first_line("MERGE_MSG");
-        return Some(InProgress {
-            kind: Kind::Merge,
-            title: if msg.is_empty() {
-                "Merging".to_owned()
-            } else {
-                msg
-            },
-        });
-    }
-    if dir.join("CHERRY_PICK_HEAD").is_file() {
-        let msg = first_line("MERGE_MSG");
-        return Some(InProgress {
-            kind: Kind::CherryPick,
-            title: format!("Cherry-picking: {msg}"),
-        });
-    }
-    if dir.join("REVERT_HEAD").is_file() {
-        let msg = first_line("MERGE_MSG");
-        return Some(InProgress {
-            kind: Kind::Revert,
-            title: if msg.is_empty() {
-                "Reverting".to_owned()
-            } else {
-                msg
-            },
-        });
-    }
-    None
 }
 
 /// Run a command that may stop with conflicts. Ok(true) means it stopped and
 /// the conflicts are waiting to be resolved.
-pub fn run_may_conflict(git: &Git, args: &[&str]) -> Result<bool> {
-    let out = git.run_expecting(args, None, |o| o.success() || stopped(o))?;
-    if out.success() {
-        return Ok(false);
-    }
-    if stopped(&out) {
-        return Ok(true);
-    }
-    bail!(failure_message(&out))
+fn run_may_conflict(git: &Git, args: &[&str]) -> Result<bool> {
+    let out = git.run_accepting(args, None, done_or_stopped(git)?)?;
+    Ok(!out.success())
 }
 
-/// Git stopped because of conflicts (rather than failing).
-fn stopped(out: &crate::cli::Output) -> bool {
-    let text = format!("{}\n{}", out.stdout_str(), out.stderr_str());
-    text.contains("CONFLICT") || text.contains("could not apply")
+/// Tells, for a merge, rebase, cherry-pick, revert or pull (or a continue)
+/// about to run in `git`'s worktree, whether it went through or stopped
+/// part-way to resolve conflicts (rather than failed): it failed and left
+/// conflicted files where there were none. Judged by the index, not by
+/// git's words, which for a pull include fetched branch names and the
+/// remote's messages. Anything else that stops it (a hook, a commit made
+/// empty, another operation in progress) is reported in git's words; what
+/// it left in progress still offers Abort and Continue.
+pub(crate) fn done_or_stopped(git: &Git) -> Result<impl Fn(&Output) -> bool> {
+    let before = has_conflicts(git)?;
+    let git = git.clone();
+    let after = std::cell::OnceCell::new();
+    Ok(move |out: &Output| {
+        out.success() || (!before && *after.get_or_init(|| has_conflicts(&git).unwrap_or(false)))
+    })
+}
+
+/// Whether the index has conflicted (unmerged) files.
+fn has_conflicts(git: &Git) -> Result<bool> {
+    Ok(!git.run(["ls-files", "-u", "-z"])?.stdout.is_empty())
 }
 
 /// Merge `rev` into the current branch. Ok(true): stopped with conflicts.
 pub fn merge(git: &Git, rev: &str, no_ff: bool) -> Result<bool> {
-    let mut args = vec!["merge", "--no-edit"];
+    // Git names the merge commit and the conflict markers after `rev`.
+    let rev = short_name(git, rev)?;
+    let mut args = vec![Operation::Merge.command(), "--no-edit"];
     if no_ff {
         args.push("--no-ff");
     }
-    args.extend(["--end-of-options", rev]);
+    args.extend(["--end-of-options", &rev]);
     run_may_conflict(git, &args)
+}
+
+/// A full ref (`refs/heads/feat`) by its short name (`feat`) when git takes
+/// that name for the same ref, i.e. no tag or other ref is named alike;
+/// anything else as it is.
+fn short_name(git: &Git, rev: &str) -> Result<String> {
+    let short = ["refs/heads/", "refs/remotes/", "refs/tags/"]
+        .iter()
+        .find_map(|prefix| rev.strip_prefix(prefix));
+    let Some(short) = short else {
+        return Ok(rev.to_owned());
+    };
+    let args = ["rev-parse", "-q", "--verify", "--symbolic-full-name", short];
+    let out = git.run_accepting(args, None, |o| o.status <= 1)?;
+    let same = out.success() && out.stdout_str().trim() == rev;
+    Ok(if same { short } else { rev }.to_owned())
 }
 
 /// Rebase the current branch onto `onto`. Ok(true): stopped with conflicts.
 pub fn rebase(git: &Git, onto: &str) -> Result<bool> {
-    run_may_conflict(git, &["rebase", "--end-of-options", onto])
-}
-
-/// Continue after all conflicts are resolved, without opening an editor.
-/// Ok(true): the next step (a rebase's next commit) stopped with conflicts.
-pub fn continue_op(git: &Git, kind: Kind) -> Result<bool> {
     run_may_conflict(
         git,
-        &["-c", "core.editor=true", kind.command(), "--continue"],
+        &[Operation::Rebase.command(), "--end-of-options", onto],
     )
 }
 
-pub fn abort(git: &Git, kind: Kind) -> Result<()> {
+/// Apply the commit `rev` on top of HEAD. Ok(true): stopped with conflicts.
+pub fn cherry_pick(git: &Git, rev: &str) -> Result<bool> {
+    run_may_conflict(
+        git,
+        &[Operation::CherryPick.command(), "--end-of-options", rev],
+    )
+}
+
+/// Commit the opposite of `rev`. Ok(true): stopped with conflicts.
+pub fn revert(git: &Git, rev: &str) -> Result<bool> {
+    run_may_conflict(
+        git,
+        &[
+            Operation::Revert.command(),
+            "--no-edit",
+            "--end-of-options",
+            rev,
+        ],
+    )
+}
+
+/// Continue after all conflicts are resolved, keeping the prepared message.
+/// Ok(true): the next step (a rebase's next commit) stopped with conflicts.
+pub fn continue_op(git: &Git, kind: Operation) -> Result<bool> {
+    run_may_conflict(git, &[kind.command(), "--continue"])
+}
+
+pub fn abort(git: &Git, kind: Operation) -> Result<()> {
     git.run([kind.command(), "--abort"])?;
     Ok(())
 }
@@ -208,6 +182,9 @@ pub struct ConflictFile {
     /// The file split into clean parts and conflicts (text files where both
     /// sides exist).
     pub segments: Vec<Segment>,
+    /// A hash of the working file when this was loaded (`None`: missing),
+    /// see [`edited_since_load`].
+    pub on_disk: Option<u64>,
 }
 
 impl ConflictFile {
@@ -229,7 +206,21 @@ pub enum Resolution {
     Custom(Vec<u8>),
 }
 
+impl Resolution {
+    /// The text that replaces a conflict with these two sides.
+    pub fn apply(&self, ours: &[u8], theirs: &[u8]) -> Vec<u8> {
+        match self {
+            Resolution::Ours => ours.to_vec(),
+            Resolution::Theirs => theirs.to_vec(),
+            Resolution::OursThenTheirs => [ours, theirs].concat(),
+            Resolution::TheirsThenOurs => [theirs, ours].concat(),
+            Resolution::Custom(text) => text.clone(),
+        }
+    }
+}
+
 pub fn load(git: &Git, path: &str) -> Result<ConflictFile> {
+    let on_disk = disk_hash(git, path);
     let out = git.run(["ls-files", "-u", "-z", "--", path])?;
     let mut sides: [Option<Side>; 3] = [None, None, None];
     for record in out.stdout.split(|b| *b == 0).filter(|r| !r.is_empty()) {
@@ -256,30 +247,30 @@ pub fn load(git: &Git, path: &str) -> Result<ConflictFile> {
     if ours.is_none() && theirs.is_none() {
         bail!("{path} has no conflict in the index (already resolved?).");
     }
-    let is_binary = |s: &Option<Side>| {
-        s.as_ref()
-            .is_some_and(|s| s.content.iter().take(8000).any(|b| *b == 0))
-    };
-    let binary = is_binary(&base) || is_binary(&ours) || is_binary(&theirs);
+    let binary = [&base, &ours, &theirs]
+        .into_iter()
+        .flatten()
+        .any(|s| is_binary(&s.content));
     let segments = match (&ours, &theirs) {
         (Some(o), Some(t)) if !binary => {
             let base_id = match &base {
                 Some(b) => b.id.clone(),
-                None => empty_blob(git)?,
+                None => write_blob(git, b"", &[])?,
             };
             // Exit code: the number of conflicts (negative on error).
-            let out = git.run_expecting(
+            let out = git.run_accepting(
                 [
                     "merge-file",
                     "-p",
                     "--diff3",
                     "--object-id",
+                    &format!("--marker-size={MARKER_SIZE}"),
                     "-L",
-                    "ours",
+                    LABELS[0],
                     "-L",
-                    "base",
+                    LABELS[1],
                     "-L",
-                    "theirs",
+                    LABELS[2],
                     &o.id,
                     &base_id,
                     &t.id,
@@ -287,9 +278,6 @@ pub fn load(git: &Git, path: &str) -> Result<ConflictFile> {
                 None,
                 |o| (0..=127).contains(&o.status),
             )?;
-            if out.status < 0 || out.status > 127 {
-                bail!("git merge-file failed: {}", out.stderr_str());
-            }
             parse_merged(&out.stdout)
         }
         _ => Vec::new(),
@@ -301,16 +289,70 @@ pub fn load(git: &Git, path: &str) -> Result<ConflictFile> {
         theirs,
         binary,
         segments,
+        on_disk,
     })
 }
 
-fn empty_blob(git: &Git) -> Result<String> {
-    let out = git.run_with_input(["hash-object", "-w", "--stdin"], Some(b""))?;
+/// A hash of the working file's content; `None` when it is missing.
+fn disk_hash(git: &Git, path: &str) -> Option<u64> {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let bytes = std::fs::read(git.cwd().join(path)).ok()?;
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+/// Whether the working file changed since `file` was loaded (edited by
+/// hand, e.g. in another editor): saving a resolution would replace that.
+pub fn edited_since_load(git: &Git, file: &ConflictFile) -> bool {
+    disk_hash(git, &file.path) != file.on_disk
+}
+
+/// Store `content` as a blob; returns its id.
+fn write_blob(git: &Git, content: &[u8], flags: &[&str]) -> Result<String> {
+    let mut args = vec!["hash-object", "-w"];
+    args.extend(flags);
+    args.push("--stdin");
+    let out = git.run_input(args, content)?;
     Ok(out.stdout_str().trim().to_owned())
 }
 
+/// The `-L` labels for ours, base and theirs.
+const LABELS: [&str; 3] = ["ours", "base", "theirs"];
+
+/// How long the conflict markers are: far longer than git's usual 7, so a
+/// content line (a Markdown `=======` underline) is never taken for one.
+const MARKER_SIZE: usize = 41;
+
+/// The marker lines of `git merge-file --marker-size` [`MARKER_SIZE`] with
+/// [`LABELS`]: ours starts, base starts, theirs starts, the conflict ends.
+/// A line is a marker only if it is exactly one of these.
+static MARKERS: std::sync::LazyLock<[Vec<u8>; 4]> = std::sync::LazyLock::new(|| {
+    let marker = |c: &str, label: Option<&str>| {
+        let line = c.repeat(MARKER_SIZE);
+        match label {
+            Some(label) => format!("{line} {label}").into_bytes(),
+            None => line.into_bytes(),
+        }
+    };
+    [
+        marker("<", Some(LABELS[0])),
+        marker("|", Some(LABELS[1])),
+        marker("=", None),
+        marker(">", Some(LABELS[2])),
+    ]
+});
+
+/// The lines of `text` (each with its line ending), and each without it.
+fn lines(text: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> {
+    text.split_inclusive(|b| *b == b'\n').map(|line| {
+        let bare = line.strip_suffix(b"\n").unwrap_or(line);
+        (line, bare.strip_suffix(b"\r").unwrap_or(bare))
+    })
+}
+
 /// Split `git merge-file --diff3` output at its conflict markers.
-pub fn parse_merged(text: &[u8]) -> Vec<Segment> {
+fn parse_merged(text: &[u8]) -> Vec<Segment> {
     enum State {
         Common,
         Ours,
@@ -321,21 +363,21 @@ pub fn parse_merged(text: &[u8]) -> Vec<Segment> {
     let mut common = Vec::new();
     let (mut ours, mut base, mut theirs) = (Vec::new(), Vec::new(), Vec::new());
     let mut state = State::Common;
-    for line in text.split_inclusive(|b| *b == b'\n') {
-        let marker = |m: &[u8]| line.starts_with(m);
+    for (line, bare) in lines(text) {
+        let marker = |m: usize| bare == MARKERS[m];
         match state {
-            State::Common if marker(b"<<<<<<< ") => {
+            State::Common if marker(0) => {
                 if !common.is_empty() {
                     segments.push(Segment::Common(std::mem::take(&mut common)));
                 }
                 state = State::Ours;
             }
             State::Common => common.extend_from_slice(line),
-            State::Ours if marker(b"||||||| ") => state = State::Base,
-            State::Ours | State::Base if marker(b"=======") => state = State::Theirs,
+            State::Ours if marker(1) => state = State::Base,
+            State::Ours | State::Base if marker(2) => state = State::Theirs,
             State::Ours => ours.extend_from_slice(line),
             State::Base => base.extend_from_slice(line),
-            State::Theirs if marker(b">>>>>>> ") => {
+            State::Theirs if marker(3) => {
                 segments.push(Segment::Conflict {
                     ours: std::mem::take(&mut ours),
                     base: std::mem::take(&mut base),
@@ -352,31 +394,45 @@ pub fn parse_merged(text: &[u8]) -> Vec<Segment> {
     segments
 }
 
+/// A piece of the file being resolved, in order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Piece<'a> {
+    /// Text outside the conflicts.
+    Common(&'a [u8]),
+    /// A conflict's text as its resolution says.
+    Resolved(Vec<u8>),
+    /// Conflict number `n` (from 0) has no resolution yet.
+    Unresolved(usize),
+}
+
+/// The file as far as `resolutions` (one per conflict) resolve it.
+pub fn pieces<'a>(
+    segments: &'a [Segment],
+    resolutions: &'a [Option<Resolution>],
+) -> impl Iterator<Item = Piece<'a>> {
+    let mut conflict = 0;
+    segments.iter().map(move |segment| match segment {
+        Segment::Common(text) => Piece::Common(text),
+        Segment::Conflict { ours, theirs, .. } => {
+            let n = conflict;
+            conflict += 1;
+            match resolutions.get(n).and_then(Option::as_ref) {
+                Some(resolution) => Piece::Resolved(resolution.apply(ours, theirs)),
+                None => Piece::Unresolved(n),
+            }
+        }
+    })
+}
+
 /// The file's content with every conflict resolved. `None` while any
 /// conflict has no resolution.
 pub fn assemble(segments: &[Segment], resolutions: &[Option<Resolution>]) -> Option<Vec<u8>> {
     let mut out = Vec::new();
-    let mut i = 0;
-    for segment in segments {
-        match segment {
-            Segment::Common(text) => out.extend_from_slice(text),
-            Segment::Conflict { ours, theirs, .. } => {
-                let resolution = resolutions.get(i)?.as_ref()?;
-                i += 1;
-                match resolution {
-                    Resolution::Ours => out.extend_from_slice(ours),
-                    Resolution::Theirs => out.extend_from_slice(theirs),
-                    Resolution::OursThenTheirs => {
-                        out.extend_from_slice(ours);
-                        out.extend_from_slice(theirs);
-                    }
-                    Resolution::TheirsThenOurs => {
-                        out.extend_from_slice(theirs);
-                        out.extend_from_slice(ours);
-                    }
-                    Resolution::Custom(text) => out.extend_from_slice(text),
-                }
-            }
+    for piece in pieces(segments, resolutions) {
+        match piece {
+            Piece::Common(text) => out.extend_from_slice(text),
+            Piece::Resolved(text) => out.extend(text),
+            Piece::Unresolved(_) => return None,
         }
     }
     Some(out)
@@ -385,20 +441,22 @@ pub fn assemble(segments: &[Segment], resolutions: &[Option<Resolution>]) -> Opt
 /// Resolve `path` with this content (in repository form, LF line endings):
 /// stage it and write it to the worktree.
 pub fn resolve_with(git: &Git, file: &ConflictFile, content: &[u8]) -> Result<()> {
+    // Only the labelled markers: a bare line of `=` is a heading underline
+    // or a banner just as well.
+    let labelled = [&MARKERS[0], &MARKERS[1], &MARKERS[3]];
+    if lines(content).any(|(_, bare)| labelled.iter().any(|m| bare == m.as_slice())) {
+        bail!(
+            "The result for {} still contains conflict markers. Edit them out first.",
+            file.path
+        );
+    }
     let mode = file
         .ours
         .as_ref()
         .or(file.theirs.as_ref())
         .map(|s| s.mode.clone())
         .unwrap_or_else(|| "100644".to_owned());
-    let out = git.run_with_input(
-        ["hash-object", "-w", "--no-filters", "--stdin"],
-        Some(content),
-    )?;
-    if !out.success() {
-        bail!(failure_message(&out));
-    }
-    let id = out.stdout_str().trim().to_owned();
+    let id = write_blob(git, content, &["--no-filters"])?;
     git.run([
         "update-index",
         "--cacheinfo",
@@ -427,18 +485,35 @@ pub fn take_side(git: &Git, file: &ConflictFile, ours: bool) -> Result<()> {
     Ok(())
 }
 
-/// The user fixed the file by hand: stage it as it is.
+/// The user fixed the file by hand: stage it as it is (deleting it
+/// resolves the conflict with a deletion).
 pub fn mark_resolved(git: &Git, path: &str) -> Result<()> {
-    let full = git.cwd().join(path);
-    if let Ok(bytes) = std::fs::read(&full)
-        && bytes
-            .split(|b| *b == b'\n')
-            .any(|l| l.starts_with(b"<<<<<<< ") || l.starts_with(b">>>>>>> "))
+    let bytes = match std::fs::read(git.cwd().join(path)) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e).with_context(|| format!("Could not read {path}")),
+    };
+    if bytes
+        .split(|b| *b == b'\n')
+        .any(|l| l.starts_with(b"<<<<<<< ") || l.starts_with(b">>>>>>> "))
     {
         bail!("{path} still contains conflict markers (<<<<<<< / >>>>>>>).");
     }
     git.run(["add", "--", path])?;
     Ok(())
+}
+
+/// The last `n` lines of `text`, for context above a conflict.
+pub fn last_lines(text: &[u8], n: usize) -> String {
+    let text = String::from_utf8_lossy(text);
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(n)..].join("\n")
+}
+
+/// The first `n` lines of `text`, for context below a conflict.
+pub fn first_lines(text: &[u8], n: usize) -> String {
+    let text = String::from_utf8_lossy(text);
+    text.lines().take(n).collect::<Vec<_>>().join("\n")
 }
 
 #[cfg(test)]
@@ -447,8 +522,9 @@ mod tests {
 
     #[test]
     fn parses_diff3_output() {
-        let text = b"a\n<<<<<<< ours\nB1\n||||||| base\nb\n=======\nB2\n>>>>>>> theirs\nc\n";
-        let segments = parse_merged(text);
+        let [start, base, sep, end] = MARKERS.clone().map(|m| String::from_utf8(m).unwrap());
+        let text = format!("a\n{start}\nB1\n{base}\nb\n{sep}\nB2\n{end}\nc\n");
+        let segments = parse_merged(text.as_bytes());
         assert_eq!(
             segments,
             vec![
@@ -462,6 +538,8 @@ mod tests {
             ]
         );
         assert_eq!(assemble(&segments, &[None]), None);
+        let unresolved: Vec<Piece> = pieces(&segments, &[None]).collect();
+        assert_eq!(unresolved[1], Piece::Unresolved(0));
         assert_eq!(
             assemble(&segments, &[Some(Resolution::TheirsThenOurs)]).unwrap(),
             b"a\nB2\nB1\nc\n"
@@ -470,5 +548,22 @@ mod tests {
             assemble(&segments, &[Some(Resolution::Custom(b"X\n".to_vec()))]).unwrap(),
             b"a\nX\nc\n"
         );
+    }
+
+    #[test]
+    fn side_names_per_operation() {
+        let merge = side_names(Some(Operation::Merge), Some("main"));
+        assert_eq!(merge.ours.long, "Current (main)");
+        assert_eq!(merge.ours.short, "current");
+        assert_eq!(merge.theirs.short, "incoming");
+        let rebase = side_names(Some(Operation::Rebase), Some("main"));
+        assert_eq!(rebase.ours.long, "Upstream");
+        assert_eq!(rebase.theirs.short, "your commit");
+    }
+
+    #[test]
+    fn context_lines() {
+        assert_eq!(last_lines(b"1\n2\n3\n", 2), "2\n3");
+        assert_eq!(first_lines(b"1\n2\n3\n", 2), "1\n2");
     }
 }

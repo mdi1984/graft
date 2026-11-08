@@ -2,57 +2,81 @@
 //! files or selected lines, and commit. Every change goes through git.exe so
 //! hooks, filters and config apply.
 
-use std::path::Path;
-
 use anyhow::{Context, Result, bail};
 
 use crate::cli::Git;
-use crate::diff::{Direction, FileDiff, Kind, Source, build_patch};
+use crate::diff::{Chosen, Direction, FileDiff, Kind, Source, build_patch, chosen};
+use crate::paths::{display, has_recycle_bin};
 
 /// Stage whole files (including deletions).
 pub fn stage_paths(git: &Git, paths: &[String]) -> Result<()> {
-    if paths.is_empty() {
-        return Ok(());
-    }
-    let mut args = vec!["add", "-A", "--"];
-    args.extend(paths.iter().map(String::as_str));
-    git.run(args)?;
-    Ok(())
+    git.run_paths(&["add", "-A"], paths)
 }
 
-/// Move staged changes of whole files back to the working tree.
+/// Move staged changes of whole files back to the working tree (before the
+/// first commit too). A staged rename is a deletion and an addition:
+/// unstaging its new path puts both back, or the old file would stay staged
+/// as deleted.
 pub fn unstage_paths(git: &Git, paths: &[String]) -> Result<()> {
     if paths.is_empty() {
         return Ok(());
     }
-    let mut args = if has_head(git)? {
-        vec!["restore", "--staged", "--"]
-    } else {
-        // Before the first commit there is nothing to restore from.
-        vec!["rm", "--cached", "-r", "-q", "--"]
-    };
-    args.extend(paths.iter().map(String::as_str));
-    git.run(args)?;
-    Ok(())
+    let sources = renamed_from(git, paths)?;
+    git.run_paths(&["reset", "-q"], paths.iter().chain(&sources))
 }
 
-pub fn has_head(git: &Git) -> Result<bool> {
-    Ok(git
-        .run_raw(["rev-parse", "-q", "--verify", "HEAD"])?
-        .success())
+/// The old paths of the staged renames whose new path is in `paths`, as
+/// git (and so File status) detects renames.
+fn renamed_from(git: &Git, paths: &[String]) -> Result<Vec<String>> {
+    let out = git.run([
+        "diff",
+        "--cached",
+        "-M",
+        "--name-status",
+        "-z",
+        "--diff-filter=R",
+    ])?;
+    // Records of three fields: the status (R and a score), old, new.
+    let fields: Vec<String> = out
+        .stdout
+        .split(|&b| b == 0)
+        .map(|f| String::from_utf8_lossy(f).into_owned())
+        .collect();
+    let (records, _) = fields.as_chunks::<3>();
+    Ok(records
+        .iter()
+        .filter(|[_, _, new]| paths.contains(new))
+        .map(|[_, old, _]| old.clone())
+        .collect())
+}
+
+fn has_head(git: &Git) -> Result<bool> {
+    Ok(git.rev("HEAD")?.is_some())
 }
 
 /// Throw away unstaged changes. Tracked files go back to their staged (or
-/// committed) state; untracked files go to the Recycle Bin, not oblivion.
+/// committed) state; untracked files leave the index if they were added
+/// with intent (`add -N`), then go to the Recycle Bin, not oblivion. Where
+/// Windows has none (see [`has_recycle_bin`]) they are deleted for good.
 pub fn discard_paths(git: &Git, tracked: &[String], untracked: &[String]) -> Result<()> {
-    if !tracked.is_empty() {
-        let mut args = vec!["restore", "--worktree", "--"];
-        args.extend(tracked.iter().map(String::as_str));
-        git.run(args)?;
-    }
+    git.run_paths(&["restore", "--worktree"], tracked)?;
     if !untracked.is_empty() {
+        // Out of the index first: if that fails, the files are still there
+        // (never an intent-to-add entry for a missing file).
+        git.run_paths(&["rm", "--cached", "--ignore-unmatch", "-q"], untracked)?;
         let files: Vec<_> = untracked.iter().map(|p| git.cwd().join(p)).collect();
-        trash::delete_all(&files).context("move untracked files to the Recycle Bin")?;
+        if has_recycle_bin(git.cwd()) {
+            trash::delete_all(&files).context("move untracked files to the Recycle Bin")?;
+        } else {
+            for file in &files {
+                let deleted = if file.is_dir() {
+                    std::fs::remove_dir_all(file)
+                } else {
+                    std::fs::remove_file(file)
+                };
+                deleted.with_context(|| format!("delete {}", display(file)))?;
+            }
+        }
     }
     Ok(())
 }
@@ -74,91 +98,62 @@ pub fn apply_lines(
     op: LineOp,
     selected: impl Fn(usize, usize) -> bool,
 ) -> Result<()> {
-    let total = diff.changed_lines();
-    let chosen = diff
-        .hunks
-        .iter()
-        .enumerate()
-        .flat_map(|(h, hunk)| {
-            hunk.lines
-                .iter()
-                .enumerate()
-                .filter(move |(_, l)| l.is_change())
-                .map(move |(l, _)| (h, l))
-        })
-        .filter(|&(h, l)| selected(h, l))
-        .count();
-    if chosen == 0 {
+    let chosen = chosen(diff, &selected);
+    if chosen == Chosen::Nothing {
         return Ok(());
     }
-    let everything = chosen == total;
+    let everything = chosen == Chosen::All;
+    let patch = |direction| {
+        build_patch(diff, direction, &selected).context(
+            "The newline at the end of the file goes with the lines added after it: select those too.",
+        )
+    };
     match (source, op) {
         (Source::Unstaged, LineOp::Stage) => {
-            let patch = build_patch(diff, Direction::Forward, &selected).expect("lines chosen");
-            apply_patch(git, &patch, true, false)
+            apply_patch(git, &patch(Direction::Forward)?, true, false)
+        }
+        // As a whole file: a rename's old path comes back too.
+        (Source::Staged, LineOp::Unstage) if everything => {
+            unstage_paths(git, std::slice::from_ref(&diff.path))
         }
         (Source::Staged, LineOp::Unstage) => {
-            let patch = build_patch(diff, Direction::Reverse, &selected).expect("lines chosen");
-            apply_patch(git, &patch, true, true)
+            apply_patch(git, &patch(Direction::Reverse)?, true, true)
         }
         (Source::Unstaged, LineOp::Discard) => {
-            let patch = build_patch(diff, Direction::Reverse, &selected).expect("lines chosen");
-            apply_patch(git, &patch, false, true)
+            apply_patch(git, &patch(Direction::Reverse)?, false, true)
         }
         (Source::Untracked, LineOp::Stage) if everything => {
             stage_paths(git, std::slice::from_ref(&diff.path))
         }
-        (Source::Untracked, LineOp::Stage) => {
-            let mut diff = diff.clone();
-            if strips_cr(git)? {
-                for line in diff.hunks.iter_mut().flat_map(|h| &mut h.lines) {
-                    if line.content.ends_with(b"\r") {
-                        line.content.pop();
-                    }
-                }
-            }
-            diff.header = new_file_header(&diff.path);
-            let patch = build_patch(&diff, Direction::Forward, &selected).expect("lines chosen");
-            apply_patch(git, &patch, true, false)
-        }
+        (Source::Untracked, LineOp::Stage) => stage_new_file_lines(
+            git,
+            &diff.path,
+            &kept_lines(diff, Kept::Selected, &selected),
+        ),
         (Source::Untracked, LineOp::Discard) if everything => {
             discard_paths(git, &[], std::slice::from_ref(&diff.path))
         }
-        (Source::Untracked, LineOp::Discard) => {
-            remove_lines(&git.cwd().join(&diff.path), diff, &selected)
-        }
+        (Source::Untracked, LineOp::Discard) => remove_lines(git, diff, &selected),
         _ => bail!("That change cannot be applied here"),
     }
 }
 
-fn new_file_header(path: &str) -> Vec<u8> {
-    format!("diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n")
-        .into_bytes()
+/// Which lines of a new file's diff to keep.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kept {
+    Selected,
+    Unselected,
 }
 
-/// Whether git turns CRLF into LF when adding files (core.autocrlf).
-fn strips_cr(git: &Git) -> Result<bool> {
-    let out = git.run_raw(["config", "--get", "core.autocrlf"])?;
-    let value = out.stdout_str().trim().to_lowercase();
-    Ok(value == "true" || value == "input")
-}
-
-/// Rewrite an untracked file without the selected lines.
-fn remove_lines(
-    path: &Path,
-    diff: &FileDiff,
-    selected: impl Fn(usize, usize) -> bool,
-) -> Result<()> {
-    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
-        bail!(
-            "{} is a link; Graft only edits plain files.",
-            path.display()
-        );
-    }
+/// The content of a new file's diff with only the selected (or only the
+/// unselected) added lines. Like the diff, it is in git's form (line endings,
+/// encoding and filters as stored), not as on disk.
+fn kept_lines(diff: &FileDiff, keep: Kept, selected: impl Fn(usize, usize) -> bool) -> Vec<u8> {
     let mut out = Vec::new();
     for (h, hunk) in diff.hunks.iter().enumerate() {
         for (l, line) in hunk.lines.iter().enumerate() {
-            if line.kind == Kind::Added && selected(h, l) {
+            let picked = line.kind == Kind::Added && selected(h, l);
+            if picked != (keep == Kept::Selected) {
                 continue;
             }
             out.extend_from_slice(&line.content);
@@ -167,11 +162,73 @@ fn remove_lines(
             }
         }
     }
-    std::fs::write(path, out).with_context(|| format!("write {}", path.display()))
+    out
+}
+
+/// Store `content` (git's form) as a blob as it is, and return its id.
+fn write_blob(git: &Git, content: &[u8]) -> Result<String> {
+    let out = git.run_input(["hash-object", "-w", "--stdin", "--no-filters"], content)?;
+    Ok(out.stdout_str().trim().to_owned())
+}
+
+/// Stage an untracked file with only `content` (git's form), with the mode
+/// git sees on the file (core.fileMode). A failure leaves the index as it
+/// was.
+fn stage_new_file_lines(git: &Git, path: &str, content: &[u8]) -> Result<()> {
+    let id = write_blob(git, content)?;
+    // An intent-to-add entry carries the mode git sees on the file.
+    git.run(["add", "--intent-to-add", "--", path])?;
+    let staged = replace_entry_content(git, path, &id);
+    if staged.is_err() {
+        let _ = git.run(["update-index", "--force-remove", "--", path]);
+    }
+    staged.context("git could not stage the lines")
+}
+
+/// Point the index entry of `path` at blob `id`, keeping its mode.
+fn replace_entry_content(git: &Git, path: &str, id: &str) -> Result<()> {
+    let entry = git.read(["ls-files", "--stage", "--", path])?;
+    let mode = entry
+        .split_whitespace()
+        .next()
+        .with_context(|| format!("git did not list {path} in the index"))?
+        .to_owned();
+    git.run(["update-index", "--add", "--cacheinfo", &mode, id, path])?;
+    Ok(())
+}
+
+/// Rewrite an untracked file without the selected lines, in the form the
+/// file is in on disk: converted as checkout would (line endings, encoding,
+/// filters) if the file is in that form, else as git's form. An LF file
+/// under core.autocrlf=true stays LF.
+fn remove_lines(git: &Git, diff: &FileDiff, selected: impl Fn(usize, usize) -> bool) -> Result<()> {
+    let path = git.cwd().join(&diff.path);
+    if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+        bail!(
+            "{} is a link; Graft only edits plain files.",
+            display(&path)
+        );
+    }
+    let on_disk =
+        std::fs::read(&path).with_context(|| format!("Could not read {}", display(&path)))?;
+    let path_arg = format!("--path={}", diff.path);
+    // Only a probe: mixed line endings must not fail it (core.safecrlf).
+    let probe = ["-c", "core.safecrlf=false", "hash-object", "-w", "--stdin"];
+    let cleaned = git.run_input(probe.iter().chain([&path_arg.as_str()]), &on_disk)?;
+    let checked_out = |id: &str| git.run(["cat-file", "--filters", &path_arg, id]);
+    let converted = checked_out(cleaned.stdout_str().trim())?.stdout == on_disk;
+
+    let kept = kept_lines(diff, Kept::Unselected, selected);
+    let content = if converted {
+        checked_out(&write_blob(git, &kept)?)?.stdout
+    } else {
+        kept
+    };
+    std::fs::write(&path, content).with_context(|| format!("Could not write {}", display(&path)))
 }
 
 /// `git apply` a patch to the index (`cached`) or the working tree.
-pub fn apply_patch(git: &Git, patch: &[u8], cached: bool, reverse: bool) -> Result<()> {
+fn apply_patch(git: &Git, patch: &[u8], cached: bool, reverse: bool) -> Result<()> {
     let mut args = vec!["apply", "--recount", "--whitespace=nowarn"];
     if cached {
         args.push("--cached");
@@ -180,13 +237,8 @@ pub fn apply_patch(git: &Git, patch: &[u8], cached: bool, reverse: bool) -> Resu
         args.push("--reverse");
     }
     args.push("-");
-    let out = git.run_with_input(args, Some(patch))?;
-    if !out.success() {
-        bail!(
-            "git could not apply the change: {}",
-            crate::cli::failure_message(&out)
-        );
-    }
+    git.run_input(args, patch)
+        .context("git could not apply the change")?;
     Ok(())
 }
 
@@ -201,14 +253,13 @@ pub fn last_commit_message(git: &Git) -> Result<Option<String>> {
 
 /// Commit what is staged. Hooks run as usual. Returns git's one-line summary.
 pub fn commit(git: &Git, message: &str, amend: bool) -> Result<String> {
-    let mut args = vec!["commit", "--file=-", "--cleanup=strip"];
+    // Not `strip`: lines starting with '#' (Markdown headings, "#42 Fix
+    // crash") are part of the message.
+    let mut args = vec!["commit", "--file=-", "--cleanup=whitespace"];
     if amend {
         args.push("--amend");
     }
-    let out = git.run_with_input(args, Some(message.as_bytes()))?;
-    if !out.success() {
-        bail!(crate::cli::failure_message(&out));
-    }
+    let out = git.run_input(args, message.as_bytes())?;
     let summary = out
         .stdout_str()
         .lines()

@@ -1,12 +1,10 @@
 //! Branches, tags and commit-level operations: create, switch, rename, delete,
-//! cherry-pick, revert, reset.
+//! reset.
 
 use anyhow::{Result, bail};
 
-use crate::Git;
-use crate::cli::CancelToken;
-use crate::remote;
-use crate::repo::Progress;
+use crate::cli::Git;
+use crate::model::remote_ref;
 
 /// How far `git reset` goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,7 +18,7 @@ pub enum ResetMode {
 }
 
 impl ResetMode {
-    pub fn flag(self) -> &'static str {
+    fn flag(self) -> &'static str {
         match self {
             ResetMode::Soft => "--soft",
             ResetMode::Mixed => "--mixed",
@@ -29,28 +27,74 @@ impl ResetMode {
     }
 }
 
-/// Whether git accepts `name` as a branch name; the error says why not.
-pub fn check_branch_name(git: &Git, name: &str) -> Result<()> {
+/// What a name is for, in [`check_ref_name`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefKind {
+    Branch,
+    Tag,
+    Remote,
+}
+
+impl RefKind {
+    fn noun(self) -> &'static str {
+        match self {
+            RefKind::Branch => "branch",
+            RefKind::Tag => "tag",
+            RefKind::Remote => "remote",
+        }
+    }
+}
+
+/// The rules a name must pass before git is asked: not empty, no spaces.
+/// The error says what is wrong, for showing in a dialog.
+pub fn check_ref_name(kind: RefKind, name: &str) -> Result<(), String> {
+    let noun = kind.noun();
     if name.trim().is_empty() {
-        bail!("Give the branch a name.");
+        return Err(format!("Give the {noun} a name."));
     }
     if name.contains(char::is_whitespace) {
-        bail!("Branch names cannot contain spaces.");
+        let mut names = noun.to_owned();
+        names[..1].make_ascii_uppercase();
+        return Err(format!("{names} names cannot contain spaces."));
     }
-    let out = git.run_raw(["check-ref-format", "--branch", name])?;
-    if !out.success() {
-        bail!("{name} is not a valid branch name.");
+    Ok(())
+}
+
+/// Whether git accepts `name` as a branch name; the error says why not.
+pub fn check_branch_name(git: &Git, name: &str) -> Result<()> {
+    check_name(git, RefKind::Branch, name)
+}
+
+/// [`check_ref_name`], then git's own rules for the name.
+pub(crate) fn check_name(git: &Git, kind: RefKind, name: &str) -> Result<()> {
+    if let Err(why) = check_ref_name(kind, name) {
+        bail!(why);
+    }
+    let full = match kind {
+        RefKind::Branch => None,
+        RefKind::Tag => Some(format!("refs/tags/{name}")),
+        RefKind::Remote => Some(format!("refs/remotes/{name}")),
+    };
+    let args = match &full {
+        None => vec!["check-ref-format", "--branch", name],
+        Some(full) => vec!["check-ref-format", full],
+    };
+    if !git.run_raw(args)?.success() {
+        bail!("{name} is not a valid {} name.", kind.noun());
     }
     Ok(())
 }
 
 /// Create `name` at `start`; with `checkout`, switch the worktree to it.
+/// The new branch has no upstream, even when `start` is a remote branch
+/// (pushing it would otherwise go to that branch); [`switch_tracking`]
+/// is for tracking one.
 pub fn create_branch(git: &Git, name: &str, start: &str, checkout: bool) -> Result<()> {
     check_branch_name(git, name)?;
     if checkout {
-        git.run(["switch", "-c", name, start])?;
+        git.run(["switch", "--no-track", "-c", name, start])?;
     } else {
-        git.run(["branch", name, start])?;
+        git.run(["branch", "--no-track", name, start])?;
     }
     Ok(())
 }
@@ -63,7 +107,7 @@ pub fn switch(git: &Git, branch: &str) -> Result<()> {
 
 /// Create a local branch tracking `remote_branch` (e.g. `origin/x`) and switch to it.
 pub fn switch_tracking(git: &Git, local: &str, remote_branch: &str) -> Result<()> {
-    git.run(["switch", "-c", local, "--track", remote_branch])?;
+    git.run(["switch", "-c", local, "--track", &remote_ref(remote_branch)])?;
     Ok(())
 }
 
@@ -80,7 +124,7 @@ pub fn rename_branch(git: &Git, old: &str, new: &str) -> Result<()> {
 }
 
 /// Delete a local branch. Without `force`, git refuses if it is not merged;
-/// the error then contains [`NOT_MERGED`].
+/// [`crate::refusal::not_merged`] then tells that refusal apart.
 pub fn delete_branch(git: &Git, name: &str, force: bool) -> Result<()> {
     git.run([
         "branch",
@@ -91,34 +135,9 @@ pub fn delete_branch(git: &Git, name: &str, force: bool) -> Result<()> {
     Ok(())
 }
 
-/// Part of git's message when `branch -d` refuses an unmerged branch.
-pub const NOT_MERGED: &str = "not fully merged";
-
-/// Delete a branch on its remote.
-pub fn delete_remote_branch(
-    git: &Git,
-    remote: &str,
-    branch: &str,
-    cancel: &CancelToken,
-    progress: impl FnMut(Progress),
-) -> Result<()> {
-    remote::run(
-        git,
-        &["push", "--progress", remote, "--delete", branch],
-        cancel,
-        progress,
-    )
-}
-
 /// Create a tag at `target`; with a message it is an annotated tag.
 pub fn create_tag(git: &Git, name: &str, target: &str, message: Option<&str>) -> Result<()> {
-    if name.trim().is_empty() || name.contains(char::is_whitespace) {
-        bail!("Give the tag a name without spaces.");
-    }
-    let out = git.run_raw(["check-ref-format", &format!("refs/tags/{name}")])?;
-    if !out.success() {
-        bail!("{name} is not a valid tag name.");
-    }
+    check_name(git, RefKind::Tag, name)?;
     match message.map(str::trim).filter(|m| !m.is_empty()) {
         Some(message) => git.run(["tag", "-a", name, "-m", message, target])?,
         None => git.run(["tag", name, target])?,
@@ -131,32 +150,6 @@ pub fn delete_tag(git: &Git, name: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn push_tag(
-    git: &Git,
-    remote: &str,
-    tag: &str,
-    cancel: &CancelToken,
-    progress: impl FnMut(Progress),
-) -> Result<()> {
-    let refspec = format!("refs/tags/{tag}");
-    remote::run(
-        git,
-        &["push", "--progress", remote, &refspec],
-        cancel,
-        progress,
-    )
-}
-
-/// Ok(true): stopped with conflicts (see [`crate::conflicts`]).
-pub fn cherry_pick(git: &Git, rev: &str) -> Result<bool> {
-    crate::conflicts::run_may_conflict(git, &["cherry-pick", "--end-of-options", rev])
-}
-
-/// Ok(true): stopped with conflicts (see [`crate::conflicts`]).
-pub fn revert(git: &Git, rev: &str) -> Result<bool> {
-    crate::conflicts::run_may_conflict(git, &["revert", "--no-edit", "--end-of-options", rev])
-}
-
 pub fn reset(git: &Git, rev: &str, mode: ResetMode) -> Result<()> {
     // `rev -- ` rather than `--end-of-options rev`: git before 2.44 (e.g.
     // Ubuntu 24.04's, in WSL) rejects the latter for reset.
@@ -166,9 +159,26 @@ pub fn reset(git: &Git, rev: &str, mode: ResetMode) -> Result<()> {
 
 /// Undo the last commit but keep its changes staged.
 pub fn undo_last_commit(git: &Git) -> Result<()> {
-    let out = git.run_raw(["rev-parse", "--verify", "--quiet", "HEAD~1"])?;
-    if !out.success() {
+    if git.rev("HEAD~1")?.is_none() {
         bail!("The first commit cannot be undone this way.");
     }
     reset(git, "HEAD~1", ResetMode::Soft)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn name_rules() {
+        assert!(check_ref_name(RefKind::Branch, "feature/x").is_ok());
+        assert_eq!(
+            check_ref_name(RefKind::Branch, " "),
+            Err("Give the branch a name.".to_owned())
+        );
+        assert_eq!(
+            check_ref_name(RefKind::Tag, "v 1"),
+            Err("Tag names cannot contain spaces.".to_owned())
+        );
+    }
 }
