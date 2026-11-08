@@ -261,6 +261,15 @@ pub struct CommitForm {
 }
 
 impl CommitForm {
+    /// Empty, for the next commit: what was typed goes, "Push after commit"
+    /// (a preference, not part of the message) stays.
+    pub fn cleared(&self) -> Self {
+        Self {
+            push_after: self.push_after,
+            ..Self::default()
+        }
+    }
+
     /// Can it be committed, with `staged` files staged? Amending needs no
     /// staged files.
     pub fn ready(&self, staged: usize) -> bool {
@@ -621,18 +630,14 @@ impl Project {
         let summary = self.commit_form.summary.trim().to_owned();
         // The follow-ups belong to this worktree even if another is
         // selected by the time the commit ends.
-        let worktree = self.nav.worktree.clone();
         self.run_op(
-            At::Path(worktree.clone()),
+            At::Selected,
             if amend { "Amending" } else { "Committing" },
             move |git| ops::commit(&git, &message, amend).map(|_| ()),
-            move |p, result| match result {
+            move |p, worktree, result| match result {
                 Ok(()) => {
                     if same_path(&p.nav.worktree, &worktree) {
-                        p.commit_form = CommitForm {
-                            push_after: p.commit_form.push_after,
-                            ..CommitForm::default()
-                        };
+                        p.commit_form = p.commit_form.cleared();
                     }
                     p.infos.push(format!("Committed: {summary}"));
                     if push {

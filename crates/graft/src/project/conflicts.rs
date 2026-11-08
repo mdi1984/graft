@@ -78,32 +78,24 @@ pub fn merge_dialog(project: &Project, rev: Option<&str>) -> Option<DialogKind> 
     })
 }
 
-/// The worktree an operation runs in, captured when it starts: its ending
-/// acts there even if another worktree is selected by then.
-pub(super) struct RanIn {
-    pub path: PathBuf,
-    /// How messages name it when it is not the selected one (e.g. its
-    /// branch); `None` when it was selected.
-    pub name: Option<String>,
-}
-
 /// The ending of a merge, rebase, cherry-pick, revert or continue (the job
 /// says whether it stopped with conflicts): say `done`, or say that `doing`
 /// ("Merging x") stopped and show the conflicts in File status of the
-/// worktree it ran in.
+/// worktree it ran in. `name` names that worktree in the message (e.g. by
+/// its branch) when it is not the selected one.
 pub(super) fn after_conflicts(
     done: String,
     doing: String,
-    ran_in: RanIn,
-) -> impl FnOnce(&mut Project, anyhow::Result<bool>) + Send {
-    let place = match &ran_in.name {
+    name: Option<String>,
+) -> impl FnOnce(&mut Project, PathBuf, anyhow::Result<bool>) + Send {
+    let place = match &name {
         Some(name) => format!("File status of {name}"),
         None => "File status".to_owned(),
     };
     let stopped =
         format!("{doing} stopped with conflicts. Resolve them in {place}, then Continue.");
-    move |p, result| {
-        let selected = same_path(&p.nav.worktree, &ran_in.path);
+    move |p, ran_in, result| {
+        let selected = same_path(&p.nav.worktree, &ran_in);
         match result {
             Ok(false) => {
                 p.infos.push(done);
@@ -116,7 +108,7 @@ pub(super) fn after_conflicts(
                 p.infos.push(stopped);
                 p.nav.tab = Tab::Workspace;
                 if !selected {
-                    p.open_worktree(ran_in.path);
+                    p.open_worktree(ran_in);
                 }
                 p.nav.view = WorkspaceView::FileStatus;
             }
@@ -126,14 +118,6 @@ pub(super) fn after_conflicts(
 }
 
 impl Project {
-    /// The selected worktree, as the place an operation starts in.
-    pub(super) fn here(&self) -> RanIn {
-        RanIn {
-            path: self.nav.worktree.clone(),
-            name: None,
-        }
-    }
-
     /// Whether `path` has conflicts in the selected worktree.
     pub fn is_conflicted(&self, path: &str) -> bool {
         self.worktree()
@@ -186,15 +170,11 @@ impl Project {
     pub(super) fn merge_reviewed(&mut self, worktree: PathBuf, branch: String, into: String) {
         let done = format!("Merged {branch} into {into}");
         let doing = format!("Merging {branch} into {into}");
-        let ran_in = RanIn {
-            path: worktree.clone(),
-            name: Some(into),
-        };
         self.run_op(
             At::Path(worktree),
             "Merging",
             move |git| conflicts::merge(&git, &branch, false),
-            after_conflicts(done, doing, ran_in),
+            after_conflicts(done, doing, Some(into)),
         );
     }
 
@@ -205,7 +185,7 @@ impl Project {
             At::Selected,
             "Rebasing",
             move |git| conflicts::rebase(&git, &onto),
-            after_conflicts(done, doing, self.here()),
+            after_conflicts(done, doing, None),
         );
     }
 
@@ -284,7 +264,7 @@ impl Project {
             At::Selected,
             &format!("Continuing {noun}"),
             move |git| conflicts::continue_op(&git, kind),
-            after_conflicts(done, doing, self.here()),
+            after_conflicts(done, doing, None),
         );
     }
 

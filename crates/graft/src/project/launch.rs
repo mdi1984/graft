@@ -8,14 +8,19 @@ use std::path::PathBuf;
 use anyhow::Context;
 
 use super::Project;
-use super::ops::quietly;
 use crate::launch;
 
 impl Project {
     /// Run `start` in the background; if it fails, say `failed` and why.
     fn launch(&self, failed: String, start: impl FnOnce() -> io::Result<()> + Send + 'static) {
-        self.jobs
-            .spawn_long(move |_| start().context(failed), quietly);
+        self.jobs.spawn_long(
+            move |_| start().context(failed),
+            |p, result: anyhow::Result<()>| {
+                if let Err(e) = result {
+                    p.report(e);
+                }
+            },
+        );
     }
 
     /// Open a file of the selected worktree with its default program.

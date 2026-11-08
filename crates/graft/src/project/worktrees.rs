@@ -210,7 +210,7 @@ impl Project {
                 ),
             }))
         };
-        let done = move |p: &mut Project, result: anyhow::Result<Option<String>>| match result {
+        let done = move |p: &mut Project, _, result: anyhow::Result<Option<String>>| match result {
             Ok(extra) => {
                 p.new_worktree = None;
                 p.infos.extend(extra);

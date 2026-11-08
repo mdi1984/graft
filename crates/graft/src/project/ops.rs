@@ -26,11 +26,12 @@ impl Project {
         self.git.at(&self.nav.worktree)
     }
 
-    fn git_at(&self, at: At) -> Git {
+    /// The folder `at` names now.
+    fn path_of(&self, at: At) -> PathBuf {
         match at {
-            At::Selected => self.wt_git(),
-            At::Main => self.git.clone(),
-            At::Path(path) => self.git.at(&path),
+            At::Selected => self.nav.worktree.clone(),
+            At::Main => self.root.clone(),
+            At::Path(path) => path,
         }
     }
 
@@ -58,23 +59,29 @@ impl Project {
         self.op.as_ref().map(Running::progress)
     }
 
-    /// Run a quick git command `at` a worktree, then refresh and hand the
-    /// result to `done`. False (and nothing runs) while another operation
-    /// runs.
+    /// Run a quick git command `at` a worktree, then refresh and hand
+    /// `done` the folder it ran in (resolved when it started) and the
+    /// result. False (and nothing runs) while another operation runs.
     pub(super) fn run_op<R: JobResult>(
         &mut self,
         at: At,
         label: &str,
         job: impl FnOnce(Git) -> R + Send + 'static,
-        done: impl FnOnce(&mut Project, R) + Send + 'static,
+        done: impl FnOnce(&mut Project, PathBuf, R) + Send + 'static,
     ) -> bool {
         if self.op.is_some() {
             return false;
         }
-        let git = self.git_at(at);
+        let path = self.path_of(at);
+        let git = self.git.at(&path);
         self.op = Some(Running::new(format!("{label}…")));
-        self.jobs
-            .spawn(move || job(git), |p, result| p.end_op(result, done));
+        self.jobs.spawn(
+            move || job(git),
+            |p, result| {
+                p.end_op();
+                done(p, path, result);
+            },
+        );
         true
     }
 
@@ -85,26 +92,29 @@ impl Project {
         at: At,
         label: &str,
         job: impl FnOnce(Git, &CancelToken, &dyn Fn(Progress)) -> R + Send + 'static,
-        done: impl FnOnce(&mut Project, R) + Send + 'static,
+        done: impl FnOnce(&mut Project, PathBuf, R) + Send + 'static,
     ) -> bool {
         if self.op.is_some() {
             return false;
         }
-        let git = self.git_at(at);
+        let path = self.path_of(at);
+        let git = self.git.at(&path);
         let (running, cancel) = Running::cancellable(format!("{label}…"));
         let report = running.reporter(self.jobs.waker());
         self.op = Some(running);
         self.jobs.spawn_long(
             move |_| job(git, &cancel, &report),
-            |p, result| p.end_op(result, done),
+            |p, result| {
+                p.end_op();
+                done(p, path, result);
+            },
         );
         true
     }
 
-    fn end_op<R>(&mut self, result: R, done: impl FnOnce(&mut Project, R)) {
+    fn end_op(&mut self) {
         self.op = None;
         self.refresh();
-        done(self, result);
     }
 
     pub(super) fn cancel_op(&self) {
@@ -135,15 +145,15 @@ impl Project {
 }
 
 /// The usual ending of an operation: nothing to say, or why it failed.
-pub(super) fn quietly(p: &mut Project, result: anyhow::Result<()>) {
+pub(super) fn quietly(p: &mut Project, _: PathBuf, result: anyhow::Result<()>) {
     if let Err(e) = result {
         p.report(e);
     }
 }
 
 /// The usual ending of an operation: say `done`, or why it failed.
-pub(super) fn say(done: String) -> impl FnOnce(&mut Project, anyhow::Result<()>) + Send {
-    move |p, result| match result {
+pub(super) fn say(done: String) -> impl FnOnce(&mut Project, PathBuf, anyhow::Result<()>) + Send {
+    move |p, _, result| match result {
         Ok(()) => p.infos.push(done),
         Err(e) => p.report(e),
     }

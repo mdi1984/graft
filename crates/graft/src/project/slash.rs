@@ -71,7 +71,7 @@ impl Project {
             At::Main,
             "Slash: fetching and scanning",
             move |git, cancel, report| slash::scan(&git, &protected, cancel, report),
-            Self::on_slash_plan,
+            |p, _, result| p.on_slash_plan(result),
         );
         if started {
             self.slash = Some(SlashView {
@@ -125,7 +125,7 @@ impl Project {
             At::Main,
             "Slashing",
             move |git, cancel, report| Some(slash::execute(&git, &chosen, cancel, report)),
-            Self::on_slash_done,
+            |p, _, outcome| p.on_slash_done(outcome),
         );
         if started && let Some(view) = &mut self.slash {
             view.running = true;
@@ -210,7 +210,7 @@ impl Project {
             At::Main,
             "Restoring",
             move |git| slash::restore(&git, &slashed),
-            move |p, result| match result {
+            move |p, _, result| match result {
                 Ok(()) => {
                     if let Some(i) = p.memory.slashed.iter().position(|s| *s == entry) {
                         p.memory.slashed.remove(i);

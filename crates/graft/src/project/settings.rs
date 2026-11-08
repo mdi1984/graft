@@ -71,7 +71,7 @@ impl Project {
             At::Main,
             "Saving identity",
             move |git| identity::save(&git, &saved),
-            move |p, result| match result {
+            move |p, _, result| match result {
                 Ok(()) => {
                     p.identity = Some(Ok(identity));
                     p.infos.push(done);

@@ -839,7 +839,7 @@ impl Project {
         self.nav.worktree = path;
         self.diff_view = None;
         self.conflict = None;
-        self.commit_form = CommitForm::default();
+        self.commit_form = self.commit_form.cleared();
         if let Some(snap) = &self.snapshot {
             self.labels = build_labels(snap, &self.nav.worktree);
         }

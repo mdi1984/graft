@@ -45,7 +45,7 @@ impl RemoteOp {
 }
 
 /// How a remote operation ends: what it says, or offers.
-type Ending = Box<dyn FnOnce(&mut Project, anyhow::Result<()>) + Send>;
+type Ending = Box<dyn FnOnce(&mut Project, PathBuf, anyhow::Result<()>) + Send>;
 
 impl Project {
     /// Talk to the remote from the selected worktree (a force push: from
@@ -65,10 +65,7 @@ impl Project {
         let done: Ending = match &op {
             RemoteOp::Fetch => Box::new(quietly),
             RemoteOp::Pull => Box::new(say("Pulled".to_owned())),
-            RemoteOp::Push => {
-                let worktree = worktree.clone();
-                Box::new(move |p: &mut Project, result| p.pushed(worktree, result))
-            }
+            RemoteOp::Push => Box::new(|p: &mut Project, ran_in, result| p.pushed(ran_in, result)),
             RemoteOp::ForcePush { .. } => Box::new(say("Force pushed".to_owned())),
             RemoteOp::PushTag { remote, tag } => {
                 Box::new(say(format!("Pushed tag {tag} to {remote}")))

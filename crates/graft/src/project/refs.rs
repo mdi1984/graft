@@ -1,6 +1,8 @@
 //! Branches, tags and commit actions: the small dialogs that ask for a name,
 //! and what happens when git says no (unmerged branch, changes in the way).
 
+use std::path::PathBuf;
+
 use graft_core::refs::{self, RefKind, ResetMode, check_ref_name};
 use graft_core::refusal::{blocked_by_changes, blocked_by_untracked, files_in_the_way, not_merged};
 use graft_core::{Git, Oid, Worktree, conflicts, remote, stash};
@@ -139,9 +141,9 @@ impl Dialog {
 /// The ending of an operation submitted from the open dialog: success
 /// closes it, then `then` runs; an error shows in the dialog.
 fn from_dialog<T>(
-    then: impl FnOnce(&mut Project, anyhow::Result<T>) + Send,
-) -> impl FnOnce(&mut Project, anyhow::Result<T>) + Send {
-    move |p, result| {
+    then: impl FnOnce(&mut Project, PathBuf, anyhow::Result<T>) + Send,
+) -> impl FnOnce(&mut Project, PathBuf, anyhow::Result<T>) + Send {
+    move |p, ran_in, result| {
         if let Err(e) = &result
             && let Some(dialog) = &mut p.dialog
         {
@@ -152,14 +154,16 @@ fn from_dialog<T>(
         if result.is_ok() {
             p.dialog = None;
         }
-        then(p, result);
+        then(p, ran_in, result);
     }
 }
 
 /// The ending of a switch to `branch`: if local changes are in the way,
 /// offer to stash them first.
-fn switched(branch: String) -> impl FnOnce(&mut Project, anyhow::Result<Option<String>>) + Send {
-    move |p, result| match result {
+fn switched(
+    branch: String,
+) -> impl FnOnce(&mut Project, PathBuf, anyhow::Result<Option<String>>) + Send {
+    move |p, _, result| match result {
         Ok(Some(extra)) => p.infos.push(format!("Switched to {branch}. {extra}")),
         Ok(None) => p.infos.push(format!("Switched to {branch}")),
         Err(e) if blocked_by_changes(&format!("{e:#}")) => {
@@ -356,7 +360,7 @@ impl Project {
                     At::Selected,
                     "Merging",
                     move |git| graft_core::conflicts::merge(&git, &rev, no_ff),
-                    from_dialog(after_conflicts(done, doing, self.here())),
+                    from_dialog(after_conflicts(done, doing, None)),
                 )
             }
             DialogKind::Remote {
@@ -442,7 +446,7 @@ impl Project {
         &mut self,
         label: &str,
         job: impl FnOnce(Git) -> anyhow::Result<R> + Send + 'static,
-        done: impl FnOnce(&mut Project, anyhow::Result<R>) + Send + 'static,
+        done: impl FnOnce(&mut Project, PathBuf, anyhow::Result<R>) + Send + 'static,
     ) {
         if self.is_operating() {
             return;
@@ -518,7 +522,7 @@ impl Project {
             At::Main,
             "Deleting branch",
             move |git| refs::delete_branch(&git, &target, force),
-            move |p, result| match result {
+            move |p, _, result| match result {
                 Ok(()) => p.infos.push(format!("Deleted branch {name}")),
                 Err(e) if not_merged(&format!("{e:#}")) => {
                     p.confirm = Some(Confirm {
@@ -564,7 +568,7 @@ impl Project {
             At::Selected,
             "Cherry-picking",
             move |git| conflicts::cherry_pick(&git, &id.to_string()),
-            after_conflicts(done, doing, self.here()),
+            after_conflicts(done, doing, None),
         );
     }
 
@@ -576,7 +580,7 @@ impl Project {
             At::Selected,
             "Reverting",
             move |git| conflicts::revert(&git, &id.to_string()),
-            after_conflicts(done, doing, self.here()),
+            after_conflicts(done, doing, None),
         );
     }
 
