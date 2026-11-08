@@ -404,19 +404,28 @@ pub enum ButtonKind {
     Danger,
 }
 
-/// A plain text button in Graft's style.
-pub fn button(ui: &mut Ui, label: &str, kind: ButtonKind, enabled: bool) -> Response {
-    const PAD_X: f32 = 14.0;
-    const HEIGHT: f32 = 30.0;
+const BUTTON_PAD_X: f32 = 14.0;
+const BUTTON_HEIGHT: f32 = 30.0;
+
+fn button_galley(ui: &Ui, label: &str, kind: ButtonKind) -> Arc<Galley> {
     let font = match kind {
         ButtonKind::Primary | ButtonKind::Danger => theme::semibold(theme::BODY_SIZE),
         ButtonKind::Secondary => theme::body(),
     };
+    ui.painter()
+        .layout_no_wrap(label.to_owned(), font, Color32::PLACEHOLDER)
+}
+
+/// How wide [`button`] makes a button, e.g. to center a row of them.
+pub fn button_width(ui: &Ui, label: &str, kind: ButtonKind) -> f32 {
+    button_galley(ui, label, kind).size().x + 2.0 * BUTTON_PAD_X
+}
+
+/// A plain text button in Graft's style.
+pub fn button(ui: &mut Ui, label: &str, kind: ButtonKind, enabled: bool) -> Response {
     // Placeholder color: `galley()` below paints it in the state's color.
-    let text = ui
-        .painter()
-        .layout_no_wrap(label.to_owned(), font, Color32::PLACEHOLDER);
-    let size = vec2(text.size().x + 2.0 * PAD_X, HEIGHT);
+    let text = button_galley(ui, label, kind);
+    let size = vec2(text.size().x + 2.0 * BUTTON_PAD_X, BUTTON_HEIGHT);
     let sense = if enabled {
         Sense::click()
     } else {

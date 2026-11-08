@@ -772,9 +772,6 @@ fn header(ui: &mut Ui, view: &DiffView, busy: bool, settings: &Settings, actions
                     ),
                     None => (String::new(), view.key.source.change()),
                 };
-                let (rect, _) = ui.allocate_exact_size(vec2(18.0, 30.0), Sense::hover());
-                paint_change_letter(ui, rect.left(), rect.center().y, letter);
-
                 let side = match view.key.source {
                     Source::Staged => "Staged",
                     Source::Unstaged => "Unstaged",
@@ -782,28 +779,7 @@ fn header(ui: &mut Ui, view: &DiffView, busy: bool, settings: &Settings, actions
                     Source::Commit(_) => "Commit",
                     Source::Base(_) => "Review",
                 };
-                let right_width = 330.0;
-                let room = (ui.available_width() - right_width - 140.0).max(80.0);
-                let galley = elided_path(
-                    ui,
-                    &path,
-                    theme::semibold(theme::BODY_SIZE),
-                    color::text(),
-                    room,
-                );
-                let (rect, _) = ui.allocate_exact_size(vec2(galley.size().x, 30.0), Sense::hover());
-                paint_galley_left(ui.painter(), rect.left(), rect.center().y, galley);
-                ui.label(
-                    RichText::new(side)
-                        .color(color::text_faint())
-                        .size(theme::SMALL_SIZE),
-                );
-                ui.label(
-                    RichText::new(stats)
-                        .color(color::text_weak())
-                        .size(theme::SMALL_SIZE),
-                );
-
+                // The buttons first, from the right; the path gets the rest.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let paths = vec![path.clone()];
                     match Staging::of(&view.key.source) {
@@ -817,7 +793,10 @@ fn header(ui: &mut Ui, view: &DiffView, busy: bool, settings: &Settings, actions
                                 actions.push(Action::StageFiles(paths));
                             }
                             if button(ui, "Discard…", ButtonKind::Secondary, !busy).clicked() {
-                                actions.push(file_status::discard_file(&view.key.source, path));
+                                actions.push(file_status::discard_file(
+                                    &view.key.source,
+                                    path.clone(),
+                                ));
                             }
                         }
                         None => {
@@ -830,6 +809,29 @@ fn header(ui: &mut Ui, view: &DiffView, busy: bool, settings: &Settings, actions
                         }
                     }
                     whole_file_button(ui, view, settings, actions);
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        let (rect, _) = ui.allocate_exact_size(vec2(18.0, 30.0), Sense::hover());
+                        paint_change_letter(ui, rect.left(), rect.center().y, letter);
+                        let small = |text: &str, fg| {
+                            ui.painter()
+                                .layout_no_wrap(text.to_owned(), theme::small(), fg)
+                        };
+                        let side = small(side, color::text_faint());
+                        let stats = small(&stats, color::text_weak());
+                        let gap = ui.spacing().item_spacing.x;
+                        let room =
+                            ui.available_width() - side.size().x - stats.size().x - 3.0 * gap;
+                        let path = elided_path(
+                            ui,
+                            &path,
+                            theme::semibold(theme::BODY_SIZE),
+                            color::text(),
+                            room.max(80.0),
+                        );
+                        ui.label(path);
+                        ui.label(side);
+                        ui.label(stats);
+                    });
                 });
             });
         });

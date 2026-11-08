@@ -10,7 +10,7 @@ use graft_core::conflicts::{
 };
 use graft_core::{InProgress, Operation, Worktree};
 
-use super::widgets::{ButtonKind, button, empty_state, section_heading_row, waiting};
+use super::widgets::{ButtonKind, button, button_width, empty_state, section_heading_row, waiting};
 use crate::project::{Action, ConflictView, Project};
 use crate::text::plural;
 use crate::theme::{self, RADIUS, color};
@@ -253,29 +253,21 @@ fn whole_file(
                 None => format!("Delete it ({name})"),
                 Some(_) => format!("Keep {name}"),
             };
-            let w = 2.0 * 180.0 + 8.0;
+            let (ours, theirs) = (
+                label(ours_name, &file.ours),
+                label(theirs_name, &file.theirs),
+            );
+            let w = button_width(ui, &ours, ButtonKind::Secondary)
+                + ui.spacing().item_spacing.x
+                + button_width(ui, &theirs, ButtonKind::Secondary);
             ui.add_space((ui.available_width() - w).max(0.0) / 2.0);
-            if button(
-                ui,
-                &label(ours_name, &file.ours),
-                ButtonKind::Secondary,
-                !busy,
-            )
-            .clicked()
-            {
+            if button(ui, &ours, ButtonKind::Secondary, !busy).clicked() {
                 actions.push(Action::TakeSide {
                     path: file.path.clone(),
                     ours: true,
                 });
             }
-            if button(
-                ui,
-                &label(theirs_name, &file.theirs),
-                ButtonKind::Secondary,
-                !busy,
-            )
-            .clicked()
-            {
+            if button(ui, &theirs, ButtonKind::Secondary, !busy).clicked() {
                 actions.push(Action::TakeSide {
                     path: file.path.clone(),
                     ours: false,
