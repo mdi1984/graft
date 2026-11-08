@@ -347,7 +347,8 @@ impl Project {
                     Ok(watcher) => p.watcher = Some(watcher),
                     Err(e) if is_panic(&e) => {}
                     Err(e) => p.notices.push(format!(
-                        "Graft cannot watch this repository's files, so changes made outside                          Graft show when you come back to its window: {e:#}"
+                        "Graft cannot watch this repository's files, so changes made outside \
+                         Graft show when you come back to its window: {e:#}"
                     )),
                 }
             },

@@ -81,6 +81,14 @@ pub struct Line {
 /// How a tab shows on screen.
 pub const TAB: &str = "    ";
 
+/// How many characters wide `line` shows at most (see [`display_text`]): a
+/// tab is as wide as [`TAB`], and a character of several bytes counts each
+/// byte, so this is never short of the real width.
+pub fn display_width(line: &[u8]) -> usize {
+    let tabs = line.iter().filter(|&&b| b == b'\t').count();
+    line.len() + tabs * (TAB.len() - 1)
+}
+
 /// A line of a file for display: lossy UTF-8, no trailing `\r`, tabs as
 /// spaces.
 pub fn display_text(line: &[u8]) -> String {
@@ -733,6 +741,13 @@ pub fn word_highlights(diff: &FileDiff) -> Vec<Vec<Option<Range<usize>>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tab_is_as_wide_as_it_shows() {
+        let line = b"\t\tfn main() {}";
+        assert_eq!(display_width(line), display_text(line).chars().count());
+        assert!(display_width("été".as_bytes()) >= 3);
+    }
 
     const SAMPLE: &[u8] = b"diff --git a/src/a.rs b/src/a.rs
 index 111..222 100644

@@ -6,7 +6,7 @@
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, Frame, Margin, Panel, RichText, ScrollArea, Stroke, TextEdit, Ui, vec2};
 use graft_core::conflicts::{
-    self, ConflictFile, Resolution, Segment, SideNames, count_lines, first_lines, last_lines,
+    self, ConflictFile, Piece, Resolution, Segment, SideNames, count_lines, first_lines, last_lines,
 };
 use graft_core::{InProgress, Operation, Worktree};
 
@@ -501,39 +501,29 @@ fn result_panel(ui: &mut Ui, view: &ConflictView, file: &ConflictFile) {
         color: color::text_weak(),
         ..Default::default()
     };
-    let mut index = 0;
-    for segment in &file.segments {
-        match segment {
-            Segment::Common(text) => {
+    for piece in conflicts::pieces(&file.segments, &resolutions) {
+        match piece {
+            Piece::Common(text) => {
                 job.append(&String::from_utf8_lossy(text), 0.0, plain.clone());
             }
-            Segment::Conflict { ours, theirs, .. } => {
-                let resolution = resolutions.get(index).cloned().flatten();
-                index += 1;
-                match resolution {
-                    Some(r) => {
-                        let bytes = r.apply(ours, theirs);
-                        job.append(
-                            &String::from_utf8_lossy(&bytes),
-                            0.0,
-                            TextFormat {
-                                color: color::text(),
-                                background: color::accent().gamma_multiply(0.12),
-                                ..plain.clone()
-                            },
-                        );
-                    }
-                    None => job.append(
-                        &format!("⟨ conflict {index} not resolved yet ⟩\n"),
-                        0.0,
-                        TextFormat {
-                            color: color::removed(),
-                            background: color::removed().gamma_multiply(0.12),
-                            ..plain.clone()
-                        },
-                    ),
-                }
-            }
+            Piece::Resolved(text) => job.append(
+                &String::from_utf8_lossy(&text),
+                0.0,
+                TextFormat {
+                    color: color::text(),
+                    background: color::accent().gamma_multiply(0.12),
+                    ..plain.clone()
+                },
+            ),
+            Piece::Unresolved(n) => job.append(
+                &format!("⟨ conflict {} not resolved yet ⟩\n", n + 1),
+                0.0,
+                TextFormat {
+                    color: color::removed(),
+                    background: color::removed().gamma_multiply(0.12),
+                    ..plain.clone()
+                },
+            ),
         }
     }
     ScrollArea::both()

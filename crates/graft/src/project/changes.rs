@@ -133,6 +133,27 @@ pub(super) enum Slot {
     ReadOnly,
 }
 
+/// What a diff can change in the worktree. Only File status stages; a
+/// commit's, stash's or review's diff changes nothing (it is read-only),
+/// even where the review shows an untracked file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Staging {
+    /// Staged changes: unstage them.
+    Staged,
+    /// Unstaged or untracked changes: stage or discard them.
+    Unstaged,
+}
+
+impl Staging {
+    fn of(slot: Slot, source: &Source) -> Option<Self> {
+        match (slot, source) {
+            (Slot::ReadOnly, _) | (_, Source::Commit(_) | Source::Base(_)) => None,
+            (Slot::Status, Source::Staged) => Some(Staging::Staged),
+            (Slot::Status, Source::Unstaged | Source::Untracked) => Some(Staging::Unstaged),
+        }
+    }
+}
+
 /// The diff shown next to the file lists.
 pub struct DiffView {
     pub key: FileKey,
@@ -142,8 +163,9 @@ pub struct DiffView {
     /// Selected changed lines as (hunk, line).
     pub selection: BTreeSet<(usize, usize)>,
     pub anchor: Option<(usize, usize)>,
-    /// No staging, discarding or line selection (commits, stashes, review).
-    pub read_only: bool,
+    /// What staging, discarding and line selection do; `None` when there
+    /// are none (read-only).
+    pub staging: Option<Staging>,
     /// Unchanged lines still hidden; `None` when they cannot be shown.
     pub gaps: Option<Vec<Gap>>,
     /// Unchanged lines the user asked to see, by the line numbers of the
@@ -155,13 +177,13 @@ pub struct DiffView {
 impl DiffView {
     fn new(key: FileKey, slot: Slot) -> Self {
         Self {
+            staging: Staging::of(slot, &key.source),
             key,
             diff: None,
             highlights: Highlights::default(),
             error: None,
             selection: BTreeSet::new(),
             anchor: None,
-            read_only: slot == Slot::ReadOnly,
             gaps: None,
             revealed: Vec::new(),
             ticket: 0,
@@ -576,5 +598,25 @@ impl Project {
         let (summary, body) = message.split_once('\n').unwrap_or((&message, ""));
         form.summary = summary.trim().to_owned();
         form.body = body.trim().to_owned();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_file_status_stages() {
+        assert_eq!(
+            Staging::of(Slot::Status, &Source::Untracked),
+            Some(Staging::Unstaged)
+        );
+        assert_eq!(
+            Staging::of(Slot::Status, &Source::Staged),
+            Some(Staging::Staged)
+        );
+        // Review shows untracked files too; they stay read-only there.
+        assert_eq!(Staging::of(Slot::ReadOnly, &Source::Untracked), None);
+        assert_eq!(Staging::of(Slot::ReadOnly, &Source::Staged), None);
     }
 }

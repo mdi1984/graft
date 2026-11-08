@@ -6,7 +6,7 @@ use graft_core::console::redact;
 use graft_core::paths::same_path;
 use graft_core::{Branch, RemoteBranch, RepoSnapshot, Upstream, Worktree, paths, remote};
 
-use super::branch_menu::{self, checkout_color, menu_item};
+use super::branch_menu::{self, Open, checkout_color, menu_item};
 use super::can;
 use super::icons::Icon;
 use super::widgets::{
@@ -90,7 +90,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
                     &mut |ui, branch, label, indent| {
                         let response = branch_row(ui, repo, branch, label, indent, head);
                         if response.double_clicked() {
-                            actions.extend(open_branch(project, repo, &branch.name));
+                            open(project, Open::local(project, repo, &branch.name), actions);
                         } else if response.clicked() {
                             actions.push(Action::Reveal(branch.target));
                         }
@@ -576,18 +576,8 @@ fn remote_branch_menu(
     let busy = project.is_operating();
     merge_items(ui, project, &branch.name, actions);
     let local = branch.branch_name();
-    // With a local branch of its name, that is what gets checked out.
-    if !branch_menu::tracking_items(ui, project, repo, branch, false, actions)
-        && repo.worktree_for_branch(local).is_none()
-    {
-        menu_item(
-            ui,
-            &format!("Check out {local}{}", project.in_main_suffix()),
-            !busy,
-            actions,
-            Action::Checkout(local.to_owned()),
-        );
-    }
+    // With a local branch of its name, that is what opens.
+    branch_menu::remote_items(ui, project, repo, branch, actions);
     menu_item(
         ui,
         "New branch from here…",
@@ -729,14 +719,10 @@ fn branch_row(
     response.on_hover_text(tip)
 }
 
-/// Double-click on a branch: go to the worktree that has it checked out, or
-/// check it out in the main folder.
-fn open_branch(project: &Project, repo: &RepoSnapshot, name: &str) -> Option<Action> {
-    match repo.worktree_for_branch(name) {
-        Some(wt) if same_path(&wt.path, &project.nav.worktree) => None,
-        Some(wt) => Some(Action::OpenWorktree(wt.path.clone())),
-        None if project.is_operating() => None,
-        None => Some(Action::Checkout(name.to_owned())),
+/// Double-click on a branch: what its menu offers first, if it can start.
+fn open(project: &Project, open: Option<Open>, actions: &mut Actions) {
+    if let Some(open) = open.filter(|o| o.can_start(project)) {
+        actions.push(open.action());
     }
 }
 
@@ -831,15 +817,7 @@ fn remote_branch_row(
         response
     };
     if response.double_clicked() {
-        let local = branch.branch_name();
-        if repo.branch(local).is_some() {
-            actions.extend(open_branch(project, repo, local));
-        } else if !project.is_operating() {
-            actions.push(Action::CheckoutRemote {
-                local: local.to_owned(),
-                remote: branch.name.clone(),
-            });
-        }
+        open(project, Open::remote(project, repo, branch), actions);
     } else if response.clicked() {
         actions.push(Action::Reveal(branch.target));
     }

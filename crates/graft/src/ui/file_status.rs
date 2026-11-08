@@ -20,7 +20,9 @@ use crate::theme::{self, RADIUS, color};
 use crate::ui::Actions;
 
 pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
-    let Some(status) = project.worktree().and_then(|wt| wt.status.clone()) else {
+    let snap = project.snapshot.clone();
+    let worktree = snap.as_deref().and_then(|s| project.worktree_in(s));
+    let Some(status) = worktree.and_then(|wt| wt.status.as_ref()) else {
         empty_state(
             ui,
             "No status",
@@ -29,7 +31,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
         return;
     };
 
-    keyboard(ui, project, &status, actions);
+    keyboard(ui, project, status, actions);
 
     Panel::bottom("commit-box")
         .frame(
@@ -37,7 +39,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
                 .fill(color::sidebar_bg())
                 .inner_margin(Margin::symmetric(14, 10)),
         )
-        .show(ui, |ui| commit_box(ui, project, &status, actions));
+        .show(ui, |ui| commit_box(ui, project, status, actions));
 
     Panel::left("file-lists")
         .resizable(true)
@@ -48,7 +50,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
                 .fill(color::app_bg())
                 .inner_margin(Margin::symmetric(8, 8)),
         )
-        .show(ui, |ui| file_lists(ui, project, &status, actions));
+        .show(ui, |ui| file_lists(ui, project, status, actions));
 
     if status.entries.is_empty() {
         empty_state(ui, "Nothing to commit", "The working tree is clean.");
@@ -98,12 +100,7 @@ fn keyboard(ui: &Ui, project: &Project, status: &WorktreeStatus, actions: &mut A
     if keys.pressed(ctx, Command::StageFile)
         && let Some((key, list)) = current.map(|i| &rows[i])
     {
-        let paths = vec![key.path.clone()];
-        match list {
-            FileList::Unstaged => actions.push(Action::StageFiles(paths)),
-            FileList::Staged => actions.push(Action::UnstageFiles(paths)),
-            FileList::Conflicts => {}
-        }
+        actions.extend(toggle_action(*list, vec![key.path.clone()]));
     }
     if keys.pressed(ctx, Command::StageAll) {
         let paths: Vec<String> = status.unstaged().map(|e| e.path.clone()).collect();
@@ -146,7 +143,7 @@ fn file_lists(ui: &mut Ui, project: &Project, status: &WorktreeStatus, actions: 
                         let tip = keys.tip("Unstage every staged file", Command::UnstageAll);
                         let link = Some(("Unstage all", tip.as_str()));
                         if section(ui, "STAGED", entries.len(), link, busy) {
-                            actions.push(Action::UnstageFiles(paths()));
+                            actions.extend(toggle_action(list, paths()));
                         }
                         if entries.is_empty() {
                             list_hint(ui, "Stage files, hunks or lines to commit them.");
@@ -156,7 +153,7 @@ fn file_lists(ui: &mut Ui, project: &Project, status: &WorktreeStatus, actions: 
                         let tip = keys.tip("Stage every changed file", Command::StageAll);
                         let link = Some(("Stage all", tip.as_str()));
                         if section(ui, "UNSTAGED", entries.len(), link, busy) {
-                            actions.push(Action::StageFiles(paths()));
+                            actions.extend(toggle_action(list, paths()));
                         }
                         if entries.is_empty() {
                             list_hint(ui, "No unstaged changes.");
@@ -223,6 +220,16 @@ fn list_hint(ui: &mut Ui, text: &str) {
     ui.add_space(2.0);
 }
 
+/// Moving `paths` of `list` to the other list: unstaged files are staged,
+/// staged ones unstaged. Conflicts move by being resolved instead.
+fn toggle_action(list: FileList, paths: Vec<String>) -> Option<Action> {
+    match list {
+        FileList::Unstaged => Some(Action::StageFiles(paths)),
+        FileList::Staged => Some(Action::UnstageFiles(paths)),
+        FileList::Conflicts => None,
+    }
+}
+
 /// One file of `list`: staged files offer unstaging, unstaged ones staging.
 #[allow(clippy::too_many_arguments)]
 fn file_row(
@@ -236,15 +243,16 @@ fn file_row(
     actions: &mut Actions,
 ) {
     let change = list.change(entry);
-    let stage = match list {
-        FileList::Unstaged => Some(true),
-        FileList::Staged => Some(false),
-        FileList::Conflicts => None,
-    };
+    let toggle = toggle_action(list, vec![entry.path.clone()]);
     let (rect, response) = file_row::allocate(ui, selected, Sense::click());
     let y = rect.center().y;
     let button_rect = Rect::from_center_size(pos2(rect.right() - 14.0, y), vec2(20.0, 20.0));
-    let show_button = stage.is_some() && (response.hovered() || selected) && !busy;
+    let show_button = toggle.is_some() && (response.hovered() || selected) && !busy;
+    let (icon, label) = if list == FileList::Unstaged {
+        (Icon::Plus, "Stage")
+    } else {
+        (Icon::Minus, "Unstage")
+    };
     let right = if show_button {
         button_rect.left() - 6.0
     } else {
@@ -252,12 +260,6 @@ fn file_row(
     };
     file_row::paint_file(ui, rect.left() + 6.0, y, change, &entry.path, right);
 
-    let paths = vec![entry.path.clone()];
-    let toggle = |actions: &mut Actions| match stage {
-        Some(true) => actions.push(Action::StageFiles(paths.clone())),
-        Some(false) => actions.push(Action::UnstageFiles(paths.clone())),
-        None => {}
-    };
     let mut button_clicked = false;
     if show_button {
         let b = ui.interact(
@@ -266,29 +268,19 @@ fn file_row(
                 .with(("stage-btn", &key.path, key.is_staged())),
             Sense::click(),
         );
-        let icon = if stage == Some(true) {
-            Icon::Plus
-        } else {
-            Icon::Minus
-        };
         paint_icon_button(ui, button_rect, &b, icon);
-        let label = if stage == Some(true) {
-            "Stage"
-        } else {
-            "Unstage"
-        };
         // Built only while hovered: there is one per row.
         let tip = |ui: &mut Ui| {
             ui.label(keys.tip(label, Command::StageFile));
         };
         if b.on_hover_ui(tip).clicked() {
             button_clicked = true;
-            toggle(actions);
+            actions.extend(toggle.clone());
         }
     }
     if !button_clicked {
         if response.double_clicked() && !busy {
-            toggle(actions);
+            actions.extend(toggle.clone());
         } else if response.clicked() {
             actions.push(Action::SelectFile(key.clone()));
         }
@@ -298,25 +290,19 @@ fn file_row(
         egui::Button::new(label).shortcut_text(keys.text(command).unwrap_or_default())
     };
     response.context_menu(|ui| {
-        match stage {
-            Some(true) => {
-                if ui.add(item("Stage", Command::StageFile)).clicked() {
-                    toggle(actions);
-                    ui.close();
-                }
-                if ui
-                    .add(item("Discard changes…", Command::DiscardFile))
-                    .clicked()
-                {
-                    actions.push(discard_file(&key.source, entry.path.clone()));
-                    ui.close();
-                }
-            }
-            Some(false) if ui.add(item("Unstage", Command::StageFile)).clicked() => {
-                toggle(actions);
-                ui.close();
-            }
-            _ => {}
+        if let Some(toggle) = &toggle
+            && ui.add(item(label, Command::StageFile)).clicked()
+        {
+            actions.push(toggle.clone());
+            ui.close();
+        }
+        if list == FileList::Unstaged
+            && ui
+                .add(item("Discard changes…", Command::DiscardFile))
+                .clicked()
+        {
+            actions.push(discard_file(&key.source, entry.path.clone()));
+            ui.close();
         }
         ui.separator();
         file_row::menu_items(ui, &entry.path, actions);

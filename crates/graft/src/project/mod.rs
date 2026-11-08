@@ -37,7 +37,7 @@ use graft_core::{
     null_oid, snapshot,
 };
 
-pub use changes::{CommitForm, DiffView, FileKey};
+pub use changes::{CommitForm, DiffView, FileKey, Staging};
 pub use conflicts::{ConflictView, merge_dialog};
 pub use file_history::{FileHistoryMode, FileHistoryView};
 pub use refs::{Dialog, DialogKind};
@@ -625,7 +625,13 @@ impl Project {
 
     /// The selected worktree.
     pub fn worktree(&self) -> Option<&Worktree> {
-        self.snapshot.as_ref()?.worktree_at(&self.nav.worktree)
+        self.worktree_in(self.snapshot.as_ref()?)
+    }
+
+    /// The selected worktree in `snap`: a screen holding its own handle on
+    /// the snapshot can borrow from it while it changes the project.
+    pub fn worktree_in<'a>(&self, snap: &'a RepoSnapshot) -> Option<&'a Worktree> {
+        snap.worktree_at(&self.nav.worktree)
     }
 
     fn on_snapshot(&mut self, result: anyhow::Result<RepoSnapshot>) {

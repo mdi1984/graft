@@ -374,7 +374,9 @@ pub fn tab(ui: &mut Ui, label: &str, badge: Option<Badge>, selected: bool) -> Re
     response
 }
 
-/// Text centered in the available space, for screens that are not built yet.
+/// A title and a line of detail centered in the available space, for a
+/// screen with nothing to show (nothing selected, nothing loaded, a
+/// failure).
 pub fn empty_state(ui: &mut Ui, title: &str, detail: &str) {
     let rect = ui.available_rect_before_wrap();
     let painter = ui.painter();

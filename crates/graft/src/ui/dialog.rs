@@ -1,4 +1,5 @@
-//! Small dialogs: new branch, rename branch, new tag, reset.
+//! Small dialogs: new branch, rename branch, new tag, stash, branch from a
+//! stash, reset, add or edit a remote, and merge.
 
 use egui::{RichText, Ui};
 use graft_core::refs::ResetMode;

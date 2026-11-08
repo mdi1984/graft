@@ -2,6 +2,7 @@
 //! conflicted file, and Continue / Abort for whatever stopped part-way.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use graft_core::Operation;
 use graft_core::conflicts::{self, ConflictFile, Resolution, Segment};
@@ -12,7 +13,8 @@ use super::{DialogKind, Project, Tab, WorkspaceView, readable};
 /// The resolver for one conflicted file of the selected worktree.
 pub struct ConflictView {
     pub path: String,
-    pub file: Option<Result<ConflictFile, String>>,
+    /// Shared, so the screen can hold it without copying it every frame.
+    pub file: Option<Result<Arc<ConflictFile>, String>>,
     /// One per conflict; `None` until the user picks.
     pub resolutions: Vec<Option<Resolution>>,
     /// Text of conflicts the user edits by hand (their resolution is Custom).
@@ -161,7 +163,7 @@ impl Project {
                     view.resolutions = vec![None; file.conflicts()];
                     view.edits = vec![None; file.conflicts()];
                 }
-                view.file = Some(readable(result));
+                view.file = Some(readable(result).map(Arc::new));
             },
         );
     }

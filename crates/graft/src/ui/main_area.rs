@@ -13,12 +13,11 @@ use crate::theme::{self, color};
 use crate::ui::{Actions, AppAction};
 
 pub fn show(ui: &mut Ui, project: &mut Project, actions: &mut Actions) {
-    if project.snapshot.is_none() {
+    let Some(snap) = project.snapshot.clone() else {
         not_loaded(ui, project, actions);
         return;
-    }
-    let worktree = project.worktree().cloned();
-    let worktree = worktree.as_ref();
+    };
+    let worktree = project.worktree_in(&snap);
     preview_banner(ui, project, actions);
     match project.nav.tab {
         Tab::Workspace => match project.nav.view {

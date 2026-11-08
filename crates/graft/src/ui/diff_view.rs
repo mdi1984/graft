@@ -15,7 +15,7 @@ use egui::{
     Align, Align2, Color32, Frame, Galley, Key, Margin, Painter, Panel, Pos2, Rect, RichText,
     ScrollArea, Sense, Stroke, StrokeKind, Ui, pos2, vec2,
 };
-use graft_core::diff::{FileDiff, Gap, Hunk, Kind, Line, Source, TAB};
+use graft_core::diff::{FileDiff, Gap, Hunk, Kind, Line, Source, display_width};
 use graft_core::ops::LineOp;
 use graft_core::syntax::{Spans, Token};
 
@@ -28,7 +28,7 @@ use super::widgets::{
 };
 use crate::keys::{self, Command};
 use crate::project::comments::{LineComment, Pick, Placed, Side};
-use crate::project::{Action, Confirm, DiffView, Project};
+use crate::project::{Action, Confirm, DiffView, Project, Staging};
 use crate::settings::Settings;
 use crate::text::plural;
 use crate::theme::{self, color};
@@ -59,26 +59,6 @@ fn text_x(split: bool) -> f32 {
 /// How wide a line's text may get before it wraps, in a row `row_width` wide.
 fn wrap_width(row_width: f32, split: bool) -> f32 {
     (row_width - text_x(split) - 8.0).max(80.0)
-}
-
-/// What a diff can change in the worktree; a commit's or a review's diff
-/// changes nothing (it is read-only).
-#[derive(Clone, Copy)]
-enum Staging {
-    /// Staged changes: unstage them.
-    Staged,
-    /// Unstaged or untracked changes: stage or discard them.
-    Unstaged,
-}
-
-impl Staging {
-    fn of(source: &Source) -> Option<Self> {
-        match source {
-            Source::Staged => Some(Staging::Staged),
-            Source::Unstaged | Source::Untracked => Some(Staging::Unstaged),
-            Source::Commit(_) | Source::Base(_) => None,
-        }
-    }
 }
 
 /// The text to draw for a line, and how many of its bytes that keeps.
@@ -179,6 +159,16 @@ fn paint_word(
 }
 
 /// How many rows a line takes when wrapped at `width` (one without wrapping).
+/// How many characters wide the widest line shows, cut lines included.
+fn longest_line(diff: &FileDiff) -> usize {
+    diff.hunks
+        .iter()
+        .flat_map(|h| &h.lines)
+        .map(|l| display_width(&l.content).min(MAX_SHOWN_CHARS + CUT_NOTE_CHARS))
+        .max()
+        .unwrap_or(0)
+}
+
 fn line_rows(
     painter: &Painter,
     view: &DiffView,
@@ -191,9 +181,8 @@ fn line_rows(
         return 1;
     };
     let line = &diff.hunks[at.0].lines[at.1];
-    // Tabs show as TAB; anything shorter than the row fits for sure.
-    let tabs = line.content.iter().filter(|&&b| b == b'\t').count();
-    if (line.content.len() + (TAB.len() - 1) * tabs) as f32 * char_width <= width {
+    // Anything shorter than the row fits for sure.
+    if display_width(&line.content) as f32 * char_width <= width {
         return 1;
     }
     let (text, _) = shown(line.text());
@@ -592,7 +581,7 @@ fn side_by_side(
     let wrap_width = wrap.then_some(wrap_width(width / 2.0 - 1.0, true));
     let char_width = char_width(ui);
     let painter = ui.painter().clone();
-    let layout = layout(diff, view.gaps.as_deref(), !view.read_only);
+    let layout = layout(diff, view.gaps.as_deref(), view.staging.is_some());
     let rows = rows(diff, &layout, &blocks, true, |at| {
         line_rows(&painter, view, diff, at, wrap_width, char_width)
     });
@@ -782,7 +771,7 @@ fn header(ui: &mut Ui, view: &DiffView, busy: bool, settings: &Settings, actions
                 // The buttons first, from the right; the path gets the rest.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let paths = vec![path.clone()];
-                    match Staging::of(&view.key.source) {
+                    match view.staging {
                         Some(Staging::Staged) => {
                             if button(ui, "Unstage file", ButtonKind::Secondary, !busy).clicked() {
                                 actions.push(Action::UnstageFiles(paths));
@@ -880,7 +869,7 @@ fn selection_bar(ui: &mut Ui, view: &DiffView, busy: bool, actions: &mut Actions
                         .size(theme::SMALL_SIZE),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    match Staging::of(&view.key.source) {
+                    match view.staging {
                         Some(Staging::Staged) => {
                             if button(ui, "Unstage lines", ButtonKind::Primary, !busy).clicked() {
                                 actions.push(Action::LinesOp(LineOp::Unstage));
@@ -930,21 +919,14 @@ fn lines(
     let wrap_width = wrap.then_some(wrap_width(width, false));
     let char_width = char_width(ui);
     let painter = ui.painter().clone();
-    let layout = layout(diff, view.gaps.as_deref(), !view.read_only);
+    let layout = layout(diff, view.gaps.as_deref(), view.staging.is_some());
     let rows = rows(diff, &layout, &blocks, false, |at| {
         line_rows(&painter, view, diff, at, wrap_width, char_width)
     });
     let content_width = if wrap {
         width
     } else {
-        let longest = diff
-            .hunks
-            .iter()
-            .flat_map(|h| &h.lines)
-            .map(|l| l.content.len().min(MAX_SHOWN_CHARS + CUT_NOTE_CHARS))
-            .max()
-            .unwrap_or(0);
-        (text_x + longest as f32 * char_width + 40.0).max(width)
+        (text_x + longest_line(diff) as f32 * char_width + 40.0).max(width)
     };
 
     ui.spacing_mut().item_spacing.y = 0.0;
@@ -970,7 +952,7 @@ fn lines(
                         let line = &diff.hunks[at.0].lines[at.1];
                         // Review picks lines to comment on; File status
                         // selects them to stage.
-                        let editable = marks.is_none() && !view.read_only;
+                        let editable = marks.is_none() && view.staging.is_some();
                         let selected = editable && view.selection.contains(&at);
                         paint_line(
                             ui, rect, view, line, at, part, text_x, wrap_width, selected, editable,
@@ -1015,7 +997,7 @@ fn hunk_row(
 ) {
     paint_hunk_header(ui, rect, &diff.hunks[h], GUTTER);
 
-    let Some(staging) = Staging::of(&view.key.source) else {
+    let Some(staging) = view.staging else {
         return;
     };
     // Buttons stick to the visible right edge, not the scrolled content.
@@ -1239,6 +1221,28 @@ fn paint_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_indented_lines_get_room_for_their_tabs() {
+        let diff = FileDiff {
+            hunks: vec![graft_core::diff::Hunk {
+                lines: vec![graft_core::diff::Line {
+                    kind: Kind::Added,
+                    old_no: None,
+                    new_no: Some(1),
+                    content: b"\t\t\tx".to_vec(),
+                    no_newline: false,
+                }],
+                old_start: 0,
+                old_count: 0,
+                new_start: 1,
+                new_count: 1,
+                section: String::new(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(longest_line(&diff), 13, "three tabs of four, then x");
+    }
 
     #[test]
     fn a_wrapped_pair_takes_the_rows_of_its_longer_side() {

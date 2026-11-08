@@ -345,19 +345,45 @@ fn parse_merged(text: &[u8]) -> Vec<Segment> {
     segments
 }
 
+/// A piece of the file being resolved, in order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Piece<'a> {
+    /// Text outside the conflicts.
+    Common(&'a [u8]),
+    /// A conflict's text as its resolution says.
+    Resolved(Vec<u8>),
+    /// Conflict number `n` (from 0) has no resolution yet.
+    Unresolved(usize),
+}
+
+/// The file as far as `resolutions` (one per conflict) resolve it.
+pub fn pieces<'a>(
+    segments: &'a [Segment],
+    resolutions: &'a [Option<Resolution>],
+) -> impl Iterator<Item = Piece<'a>> {
+    let mut conflict = 0;
+    segments.iter().map(move |segment| match segment {
+        Segment::Common(text) => Piece::Common(text),
+        Segment::Conflict { ours, theirs, .. } => {
+            let n = conflict;
+            conflict += 1;
+            match resolutions.get(n).and_then(Option::as_ref) {
+                Some(resolution) => Piece::Resolved(resolution.apply(ours, theirs)),
+                None => Piece::Unresolved(n),
+            }
+        }
+    })
+}
+
 /// The file's content with every conflict resolved. `None` while any
 /// conflict has no resolution.
 pub fn assemble(segments: &[Segment], resolutions: &[Option<Resolution>]) -> Option<Vec<u8>> {
     let mut out = Vec::new();
-    let mut i = 0;
-    for segment in segments {
-        match segment {
-            Segment::Common(text) => out.extend_from_slice(text),
-            Segment::Conflict { ours, theirs, .. } => {
-                let resolution = resolutions.get(i)?.as_ref()?;
-                i += 1;
-                out.extend(resolution.apply(ours, theirs));
-            }
+    for piece in pieces(segments, resolutions) {
+        match piece {
+            Piece::Common(text) => out.extend_from_slice(text),
+            Piece::Resolved(text) => out.extend(text),
+            Piece::Unresolved(_) => return None,
         }
     }
     Some(out)
@@ -463,6 +489,8 @@ mod tests {
             ]
         );
         assert_eq!(assemble(&segments, &[None]), None);
+        let unresolved: Vec<Piece> = pieces(&segments, &[None]).collect();
+        assert_eq!(unresolved[1], Piece::Unresolved(0));
         assert_eq!(
             assemble(&segments, &[Some(Resolution::TheirsThenOurs)]).unwrap(),
             b"a\nB2\nB1\nc\n"

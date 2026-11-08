@@ -757,12 +757,7 @@ mod tests {
     /// A repo with one commit and an extra branch `branch`, opened as a tab.
     fn open_with(dir: &Path, branch: &str) -> Project {
         git(dir, &["init", "-q", "-b", "main"]);
-        std::fs::write(
-            dir.join("a.txt"),
-            "a
-",
-        )
-        .unwrap();
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
         git(dir, &["add", "a.txt"]);
         git(dir, &["commit", "-q", "-m", "first"]);
         git(dir, &["branch", branch]);

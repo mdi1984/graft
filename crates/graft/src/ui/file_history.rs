@@ -5,7 +5,7 @@
 use egui::{
     Align, Frame, Key, Layout, Margin, Panel, Rect, RichText, ScrollArea, Sense, Ui, pos2, vec2,
 };
-use graft_core::diff::{TAB, display_text};
+use graft_core::diff::{display_text, display_width};
 use graft_core::file_log::Blame;
 
 use super::diff_view;
@@ -179,7 +179,7 @@ fn blame_view(
     let longest = blame
         .lines
         .iter()
-        .map(|l| l.text.chars().count() + l.text.matches('\t').count() * (TAB.len() - 1))
+        .map(|l| display_width(l.text.as_bytes()))
         .max()
         .unwrap_or(0);
     let content_width = GUTTER + number_width + 24.0 + longest as f32 * char_width;

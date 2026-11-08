@@ -364,12 +364,7 @@ mod tests {
         };
         let state = crate::project::ReviewState {
             notes: BTreeMap::from([
-                (
-                    "src/a.rs".to_owned(),
-                    " Split the module.
-"
-                    .to_owned(),
-                ),
+                ("src/a.rs".to_owned(), " Split the module.\n".to_owned()),
                 ("empty.rs".to_owned(), "  ".to_owned()),
             ]),
             comments: vec![c],
