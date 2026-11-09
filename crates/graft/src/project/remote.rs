@@ -70,17 +70,19 @@ fn pulled(done: String) -> Ending {
 }
 
 impl Project {
-    /// Pull `branch` (a branch's menu): in the worktree that has it checked
-    /// out, else a fast-forward from the main folder (any worktree's folder
-    /// may be gone). The job checks again where it is checked out, see
-    /// [`remote::pull_branch`].
+    /// Pull `branch` (a branch's menu) if [`remote::pull_plan`] allows it:
+    /// in the worktree that has it checked out, else a fast-forward from the
+    /// main folder (any worktree's folder may be gone). The job checks again
+    /// where it is checked out, see [`remote::pull_branch`].
     fn pull_branch(&mut self, branch: String) {
-        let worktree = self
-            .snapshot
-            .as_ref()
-            .and_then(|s| s.worktree_for_branch(&branch))
-            .map_or_else(|| self.main_path(), |wt| wt.path.clone());
-        self.remote_in(worktree, RemoteOp::PullBranch { branch });
+        let Some(snap) = &self.snapshot else { return };
+        match remote::pull_plan(snap, &branch, &self.nav.worktree) {
+            Ok(plan) => {
+                let worktree = plan.worktree.unwrap_or_else(|| self.main_path());
+                self.remote_in(worktree, RemoteOp::PullBranch { branch });
+            }
+            Err(why) => self.notices.push(why),
+        }
     }
 
     /// Talk to the remote from the selected worktree (a force push: from
@@ -382,6 +384,15 @@ mod tests {
         git(&colleague, &["push", "-q", "origin", "HEAD:b", "HEAD:c"]);
         let theirs = tip(&colleague, "HEAD");
         let a_before = tip(&a, "HEAD");
+        project.refresh();
+        wait(&mut project, "b and c never showed their upstreams", |p| {
+            let snap = p.snapshot.as_ref().unwrap();
+            let tracks = |name: &str| {
+                let up = snap.branch(name).map(|b| &b.upstream);
+                matches!(up, Some(graft_core::Upstream::Tracking { .. }))
+            };
+            tracks("b") && tracks("c")
+        });
         for branch in ["b", "c"] {
             let branch = branch.to_owned();
             project.apply(Action::Remote(RemoteOp::PullBranch { branch }));

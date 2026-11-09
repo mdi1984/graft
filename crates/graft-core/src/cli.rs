@@ -424,8 +424,16 @@ impl Git {
             .stdin(if stdin { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        cmd.spawn()
-            .with_context(|| "could not start git — is Git for Windows installed?")
+        cmd.spawn().with_context(|| {
+            if self.cwd.is_dir() {
+                "could not start git — is Git for Windows installed?".to_owned()
+            } else {
+                format!(
+                    "could not start git: the folder {} is missing",
+                    self.cwd.display()
+                )
+            }
+        })
     }
 
     /// `program` (git, or a shell for scripts around it) in this directory
@@ -642,6 +650,18 @@ mod tests {
     fn config_value(mut cmd: Command, key: &str) -> String {
         let out = cmd.args(["config", "--get", key]).output().unwrap();
         String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// git in a folder that is gone (a worktree deleted by hand) says so,
+    /// not that git may be missing.
+    #[test]
+    fn git_in_a_missing_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("gone");
+        let git = Git::new(&gone, Console::default());
+        let error = format!("{:#}", git.run(["status"]).unwrap_err());
+        assert!(error.contains("folder"), "{error}");
+        assert!(error.contains("is missing"), "{error}");
     }
 
     #[test]

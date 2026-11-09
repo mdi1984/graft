@@ -263,7 +263,10 @@ fn pull_a_diverged_branch_that_is_not_checked_out() {
     let git = common::git(&mine);
     let error = remote::pull_branch(&git, "feature", &CancelToken::default(), |_| {});
     let error = format!("{:#}", error.unwrap_err());
-    assert!(error.contains("Check it out and pull there"), "{error}");
+    assert!(
+        error.contains("feature and its upstream have diverged"),
+        "{error}"
+    );
     assert_eq!(common::rev(&mine, "feature"), before);
 }
 
@@ -303,8 +306,7 @@ fn pull_a_branch_without_upstream() {
 }
 
 /// With a fetch refspec without `+`, git refuses to move a force-pushed
-/// origin/feature, but still moves feature ahead: that is a pull that
-/// worked, not a failure.
+/// origin/feature, but still moves feature ahead: the error says both.
 #[test]
 fn pull_a_branch_when_only_the_remote_tracking_branch_is_refused() {
     let (_tmp, mine, theirs) = behind_on_feature();
@@ -322,8 +324,10 @@ fn pull_a_branch_when_only_the_remote_tracking_branch_is_refused() {
         ],
     );
     let git = common::git(&mine);
-    let stopped = remote::pull_branch(&git, "feature", &CancelToken::default(), |_| {});
-    assert!(!stopped.unwrap());
+    let error = remote::pull_branch(&git, "feature", &CancelToken::default(), |_| {});
+    let error = format!("{:#}", error.unwrap_err());
+    assert!(error.contains("feature moved ahead, but"), "{error}");
+    assert!(error.contains("origin/feature"), "{error}");
     assert_eq!(common::rev(&mine, "feature"), common::rev(&theirs, "HEAD"));
 }
 
@@ -344,4 +348,19 @@ fn pull_a_branch_whose_upstream_was_force_pushed() {
     let error = format!("{:#}", error.unwrap_err());
     assert!(error.contains("rewritten on the remote"), "{error}");
     assert_eq!(common::rev(&mine, "feature"), pulled);
+}
+
+/// A branch whose upstream is another local branch (remote ".") moves
+/// ahead to it.
+#[test]
+fn pull_a_branch_tracking_a_local_branch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = common::init(&tmp.path().join("app"));
+    common::commit(&dir, "a.txt", "a\n", "a");
+    sh(&dir, &["branch", "-q", "--track", "follow", "main"]);
+    common::commit(&dir, "b.txt", "b\n", "b");
+    let git = common::git(&dir);
+    let stopped = remote::pull_branch(&git, "follow", &CancelToken::default(), |_| {});
+    assert!(!stopped.unwrap());
+    assert_eq!(common::rev(&dir, "follow"), common::rev(&dir, "main"));
 }

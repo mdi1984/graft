@@ -1,12 +1,15 @@
 //! Talking to remotes: fetch, pull and push, with progress and cancel.
 //! Credentials go through git's own helpers (Git Credential Manager).
 
+use std::path::{Path, PathBuf};
+
 use anyhow::{Result, bail};
 
 use crate::cli::{Git, Progress};
 use crate::conflicts;
 use crate::jobs::CancelToken;
-use crate::model::{ORIGIN, Upstream, branch_name, local_ref};
+use crate::model::{ORIGIN, RepoSnapshot, Upstream, branch_name, local_ref};
+use crate::paths::{folder_name, same_path};
 use crate::refs::{self, RefKind};
 use crate::refusal::{forced_update, not_fast_forward};
 
@@ -81,6 +84,82 @@ pub fn pull_check<'a>(branch: &str, upstream: &'a Upstream) -> Result<&'a str, S
     }
 }
 
+/// Where a pull of a branch runs, and what it does in words.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullPlan {
+    /// The worktree that has the branch checked out; `None`: nowhere, so
+    /// it only fast-forwards (see [`pull_branch`]).
+    pub worktree: Option<PathBuf>,
+    pub hint: String,
+}
+
+/// Whether the local branch `branch` can be pulled now, and where, or why
+/// not. `selected` is the worktree on screen.
+pub fn pull_plan(snap: &RepoSnapshot, branch: &str, selected: &Path) -> Result<PullPlan, String> {
+    if snap.remotes.is_empty() {
+        return Err("No remote to pull from. Add one under Remotes in the sidebar.".to_owned());
+    }
+    let Some(local) = snap.branch(branch) else {
+        return Err("Check out a branch to pull from".to_owned());
+    };
+    let upstream = pull_check(branch, &local.upstream)?;
+    // The selected worktree first: during a preview git sees main detached
+    // and lets main's branch be checked out in another worktree too.
+    let here = snap
+        .worktrees
+        .iter()
+        .find(|wt| same_path(&wt.path, selected) && wt.branch.as_deref() == Some(branch));
+    let Some(wt) = here.or_else(|| snap.worktree_for_branch(branch)) else {
+        return match local.upstream {
+            Upstream::Tracking { ahead, .. } if ahead > 0 => Err(diverged(branch, upstream)),
+            _ => Ok(PullPlan {
+                worktree: None,
+                hint: format!(
+                    "Move {branch} ahead to {upstream}'s newest commit (it is not checked \
+                     out, so only a fast-forward)"
+                ),
+            }),
+        };
+    };
+    if wt.prunable {
+        return Err(format!(
+            "{branch} is checked out in a worktree whose folder is missing. \
+             Prune missing worktrees first."
+        ));
+    }
+    if let Some(reason) = snap.head_blocked(&wt.path) {
+        return Err(reason.to_owned());
+    }
+    if wt.in_progress.is_some() {
+        return Err(format!(
+            "Finish or abort what is in progress in {} first",
+            folder_name(&wt.path)
+        ));
+    }
+    let hint = if same_path(&wt.path, selected) {
+        format!("Pull {upstream} into {branch}")
+    } else {
+        format!(
+            "Pull {upstream} into {branch}, in its worktree {}",
+            folder_name(&wt.path)
+        )
+    };
+    Ok(PullPlan {
+        worktree: Some(wt.path.clone()),
+        hint,
+    })
+}
+
+/// Why a branch checked out nowhere can't simply move ahead to `upstream`.
+/// Its own commits look the same as a rewritten upstream, so this doesn't
+/// suggest merging them back.
+fn diverged(branch: &str, upstream: &str) -> String {
+    format!(
+        "{branch} and {upstream} have diverged: {branch} has commits {upstream} lacks, \
+         or {upstream} was force-pushed. Check {branch} out to sort it out."
+    )
+}
+
 /// Pull the current branch from its upstream (merge or rebase, as
 /// configured). Ok(true): stopped with conflicts.
 pub fn pull(git: &Git, cancel: &CancelToken, on_progress: impl FnMut(Progress)) -> Result<bool> {
@@ -134,12 +213,12 @@ pub fn pull_branch(
     let Err(error) = git.run_progress(&args, cancel, on_progress) else {
         return Ok(false);
     };
+    let text = format!("{error:#}");
     // One fetch updates the remote-tracking branch too; git can refuse
     // that one (a fetch refspec without `+`) after moving the branch.
     if tip()? != before {
-        return Ok(false);
+        bail!("{branch} moved ahead, but git also reported a problem:\n{text}");
     }
-    let text = format!("{error:#}");
     if !not_fast_forward(&text) {
         return Err(error);
     }
@@ -149,10 +228,7 @@ pub fn pull_branch(
              can't simply move ahead to it. Check {branch} out to decide what to keep."
         );
     }
-    bail!(
-        "{branch} has commits its upstream lacks, so it can't simply move ahead. \
-         Check it out and pull there to merge or rebase them."
-    )
+    bail!(diverged(branch, "its upstream"))
 }
 
 /// Whether any config scope says how a pull of `branch` reconciles a
