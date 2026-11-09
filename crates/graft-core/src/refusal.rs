@@ -70,6 +70,11 @@ pub(crate) fn not_fast_forward(error: &str) -> bool {
     error.contains("non-fast-forward")
 }
 
+/// A fetch found that a remote branch was force-pushed (rewritten).
+pub(crate) fn forced_update(output: &str) -> bool {
+    output.contains("(forced update)")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

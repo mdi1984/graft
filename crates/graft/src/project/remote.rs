@@ -71,14 +71,15 @@ fn pulled(done: String) -> Ending {
 
 impl Project {
     /// Pull `branch` (a branch's menu): in the worktree that has it checked
-    /// out, else a fast-forward from the selected one. The job checks again
-    /// where it is checked out, see [`remote::pull_branch`].
+    /// out, else a fast-forward from the main folder (any worktree's folder
+    /// may be gone). The job checks again where it is checked out, see
+    /// [`remote::pull_branch`].
     fn pull_branch(&mut self, branch: String) {
         let worktree = self
             .snapshot
             .as_ref()
             .and_then(|s| s.worktree_for_branch(&branch))
-            .map_or_else(|| self.nav.worktree.clone(), |wt| wt.path.clone());
+            .map_or_else(|| self.main_path(), |wt| wt.path.clone());
         self.remote_in(worktree, RemoteOp::PullBranch { branch });
     }
 

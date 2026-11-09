@@ -73,7 +73,8 @@ Promises the code doesn't make obvious; keep them when changing a feature.
   locked worktrees; removes worktrees before their branches; "never pushed"
   starts unchecked; every deletion goes to the undo log ("Recently slashed").
 - Push forces only as `--force-with-lease`; Pull follows the repo's pull
-  settings. Reset hard asks first; Undo last commit is guarded by the reflog.
+  settings, where the branch is checked out; a branch checked out nowhere
+  (Pull in its menu) only fast-forwards. Reset hard asks first; Undo last commit is guarded by the reflog.
 - Line staging builds a patch from the selected lines (unselected `-` become
   context, unselected `+` are dropped) and runs `git apply --cached --recount`.
 - Preview in main needs a clean main folder and always offers "Restore main".

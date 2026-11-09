@@ -104,6 +104,10 @@ pub fn pull(snap: &RepoSnapshot, branch: &str, selected: &Path) -> Can {
         Err(why) => return no(why),
     };
     match snap.worktree_for_branch(branch) {
+        Some(wt) if wt.prunable => no(format!(
+            "{branch} is checked out in a worktree whose folder is missing. \
+             Prune missing worktrees first."
+        )),
         Some(wt) if let Some(reason) = snap.head_blocked(&wt.path) => no(reason),
         Some(wt) if wt.in_progress.is_some() => no(FINISH_FIRST),
         Some(wt) if same_path(&wt.path, selected) => yes(format!("Pull {upstream} into {branch}")),
@@ -272,5 +276,68 @@ mod tests {
         assert_eq!(project.notices.len(), 1, "{:?}", project.notices);
         assert!(project.notices[0].contains("Restore main first"));
         assert_eq!(tip(&main, "HEAD"), before);
+    }
+    /// Pull in a branch's menu: where it can run, and why not.
+    #[test]
+    fn pull_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = repo(dir.path());
+        git(
+            dir.path(),
+            &["init", "-q", "--bare", "-b", "main", "origin.git"],
+        );
+        let url = dir.path().join("origin.git");
+        git(&main, &["remote", "add", "origin", url.to_str().unwrap()]);
+        for branch in ["main", "other", "agent"] {
+            git(&main, &["push", "-q", "-u", "origin", branch]);
+        }
+        // `other` gets a commit origin lacks; `gone` loses its folder.
+        git(&main, &["branch", "-q", "-f", "behind", "main"]);
+        git(&main, &["push", "-q", "-u", "origin", "behind"]);
+        let gone = dir.path().join("gone");
+        git(
+            &main,
+            &["worktree", "add", "-q", gone.to_str().unwrap(), "behind"],
+        );
+        std::fs::remove_dir_all(&gone).unwrap();
+        git(&main, &["switch", "-q", "other"]);
+        std::fs::write(
+            main.join("o.txt"),
+            "o
+",
+        )
+        .unwrap();
+        git(&main, &["add", "o.txt"]);
+        git(&main, &["commit", "-q", "-m", "more"]);
+        git(&main, &["switch", "-q", "main"]);
+        git(&main, &["branch", "-q", "local-only"]);
+        let project = open(&main);
+        let snap = project.snapshot.clone().unwrap();
+        let here = project.nav.worktree.clone();
+        let hint = |branch: &str| {
+            let can = pull(&snap, branch, &here);
+            (can.ok, can.hint)
+        };
+
+        assert_eq!(
+            hint("main"),
+            (true, "Pull origin/main into main".to_owned())
+        );
+        let (ok, text) = hint("agent");
+        assert!(ok && text.ends_with("in its worktree agent"), "{text}");
+        let (ok, text) = hint("other");
+        assert!(
+            !ok && text.contains("commits that origin/other lacks"),
+            "{text}"
+        );
+        let (ok, text) = hint("behind");
+        assert!(!ok && text.contains("folder is missing"), "{text}");
+        let (ok, text) = hint("local-only");
+        assert!(!ok && text.contains("no upstream"), "{text}");
+        git(&main, &["worktree", "prune"]);
+        let project = open(&main);
+        let snap = project.snapshot.clone().unwrap();
+        let can = pull(&snap, "behind", &here);
+        assert!(can.ok && can.hint.contains("fast-forward"), "{}", can.hint);
     }
 }

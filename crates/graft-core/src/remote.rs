@@ -8,7 +8,7 @@ use crate::conflicts;
 use crate::jobs::CancelToken;
 use crate::model::{ORIGIN, Upstream, branch_name, local_ref};
 use crate::refs::{self, RefKind};
-use crate::refusal::not_fast_forward;
+use crate::refusal::{forced_update, not_fast_forward};
 
 /// Fetch every remote. With `prune`, remote branches deleted there go too,
 /// so local branches tracking them show as gone.
@@ -126,13 +126,33 @@ pub fn pull_branch(
         &remote,
         &refspec,
     ];
-    match git.run_progress(&args, cancel, on_progress) {
-        Err(e) if not_fast_forward(&format!("{e:#}")) => bail!(
-            "{branch} has commits its upstream lacks, so it can't simply move ahead. \
-             Check it out and pull there to merge or rebase them."
-        ),
-        ran => ran.map(|()| false),
+    let tip = || -> Result<String> {
+        let out = git.run_raw(["rev-parse", "--verify", "-q", &local_ref(branch)])?;
+        Ok(out.stdout_str().trim().to_owned())
+    };
+    let before = tip()?;
+    let Err(error) = git.run_progress(&args, cancel, on_progress) else {
+        return Ok(false);
+    };
+    // One fetch updates the remote-tracking branch too; git can refuse
+    // that one (a fetch refspec without `+`) after moving the branch.
+    if tip()? != before {
+        return Ok(false);
     }
+    let text = format!("{error:#}");
+    if !not_fast_forward(&text) {
+        return Err(error);
+    }
+    if forced_update(&text) {
+        bail!(
+            "{branch}'s upstream was rewritten on the remote (force-pushed), so {branch} \
+             can't simply move ahead to it. Check {branch} out to decide what to keep."
+        );
+    }
+    bail!(
+        "{branch} has commits its upstream lacks, so it can't simply move ahead. \
+         Check it out and pull there to merge or rebase them."
+    )
 }
 
 /// Whether any config scope says how a pull of `branch` reconciles a

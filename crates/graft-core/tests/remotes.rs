@@ -281,7 +281,8 @@ fn pull_a_branch_checked_out_in_another_worktree_from_elsewhere() {
     let before = common::rev(&mine, "feature");
     let git = common::git(&mine);
     let pulled = remote::pull_branch(&git, "feature", &CancelToken::default(), |_| {});
-    assert!(pulled.is_err());
+    let error = format!("{:#}", pulled.unwrap_err());
+    assert!(error.contains("checked out at"), "{error}");
     assert_eq!(common::rev(&mine, "feature"), before);
     // From its own worktree it is a normal pull.
     let git = common::git(&other);
@@ -299,4 +300,48 @@ fn pull_a_branch_without_upstream() {
     let error = remote::pull_branch(&git, "local-only", &CancelToken::default(), |_| {});
     let error = format!("{:#}", error.unwrap_err());
     assert!(error.contains("no upstream"), "{error}");
+}
+
+/// With a fetch refspec without `+`, git refuses to move a force-pushed
+/// origin/feature, but still moves feature ahead: that is a pull that
+/// worked, not a failure.
+#[test]
+fn pull_a_branch_when_only_the_remote_tracking_branch_is_refused() {
+    let (_tmp, mine, theirs) = behind_on_feature();
+    let start = common::rev(&mine, "feature");
+    sh(&mine, &["fetch", "-q"]);
+    sh(&theirs, &["reset", "-q", "--hard", &start]);
+    common::commit(&theirs, "z.txt", "z\n", "rewritten");
+    sh(&theirs, &["push", "-q", "--force"]);
+    sh(
+        &mine,
+        &[
+            "config",
+            "remote.origin.fetch",
+            "refs/heads/*:refs/remotes/origin/*",
+        ],
+    );
+    let git = common::git(&mine);
+    let stopped = remote::pull_branch(&git, "feature", &CancelToken::default(), |_| {});
+    assert!(!stopped.unwrap());
+    assert_eq!(common::rev(&mine, "feature"), common::rev(&theirs, "HEAD"));
+}
+
+/// A branch whose upstream was force-pushed away from it is not moved, and
+/// the error says the upstream was rewritten (not that the branch has
+/// commits of its own).
+#[test]
+fn pull_a_branch_whose_upstream_was_force_pushed() {
+    let (_tmp, mine, theirs) = behind_on_feature();
+    let start = common::rev(&mine, "feature");
+    let git = common::git(&mine);
+    remote::pull_branch(&git, "feature", &CancelToken::default(), |_| {}).unwrap();
+    let pulled = common::rev(&mine, "feature");
+    sh(&theirs, &["reset", "-q", "--hard", &start]);
+    common::commit(&theirs, "z.txt", "z\n", "rewritten");
+    sh(&theirs, &["push", "-q", "--force"]);
+    let error = remote::pull_branch(&git, "feature", &CancelToken::default(), |_| {});
+    let error = format!("{:#}", error.unwrap_err());
+    assert!(error.contains("rewritten on the remote"), "{error}");
+    assert_eq!(common::rev(&mine, "feature"), pulled);
 }
