@@ -65,6 +65,16 @@ pub fn rejected_push(error: &str) -> bool {
         || error.contains("fetch first")
 }
 
+/// Git refused to move a branch to commits that don't contain its own.
+pub(crate) fn not_fast_forward(error: &str) -> bool {
+    error.contains("non-fast-forward")
+}
+
+/// A fetch found that a remote branch was force-pushed (rewritten).
+pub(crate) fn forced_update(output: &str) -> bool {
+    output.contains("(forced update)")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

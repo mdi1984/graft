@@ -7,7 +7,7 @@ use egui::Response;
 use graft_core::paths::{folder_name, same_path};
 use graft_core::preview::{self, Step};
 use graft_core::review::Review;
-use graft_core::{RepoSnapshot, Worktree};
+use graft_core::{RepoSnapshot, Worktree, remote};
 
 use crate::project::{Action, Project};
 
@@ -87,6 +87,15 @@ pub fn new_worktree(project: &Project) -> Can {
 /// Adding a remote (the sidebar's REMOTES).
 pub fn add_remote(project: &Project) -> Can {
     act(project, "Add a remote to fetch from and push to")
+}
+
+/// Pulling the local branch `branch` (the toolbar for the selected
+/// worktree's, a branch's menu for any), see [`remote::pull_plan`].
+pub fn pull(snap: &RepoSnapshot, branch: &str, selected: &Path) -> Can {
+    match remote::pull_plan(snap, branch, selected) {
+        Ok(plan) => yes(plan.hint),
+        Err(why) => no(why),
+    }
 }
 
 /// Merging another branch into `wt`'s branch, or rebasing it.
@@ -237,5 +246,145 @@ mod tests {
         assert_eq!(project.notices.len(), 1, "{:?}", project.notices);
         assert!(project.notices[0].contains("Restore main first"));
         assert_eq!(tip(&main, "HEAD"), before);
+    }
+    /// Pull in a branch's menu: where it can run, and why not.
+    #[test]
+    fn pull_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = repo(dir.path());
+        git(
+            dir.path(),
+            &["init", "-q", "--bare", "-b", "main", "origin.git"],
+        );
+        let url = dir.path().join("origin.git");
+        git(&main, &["remote", "add", "origin", url.to_str().unwrap()]);
+        for branch in ["main", "other", "agent"] {
+            git(&main, &["push", "-q", "-u", "origin", branch]);
+        }
+        // `other` gets a commit origin lacks; `gone` loses its folder.
+        git(&main, &["branch", "-q", "-f", "behind", "main"]);
+        git(&main, &["push", "-q", "-u", "origin", "behind"]);
+        let gone = dir.path().join("gone");
+        git(
+            &main,
+            &["worktree", "add", "-q", gone.to_str().unwrap(), "behind"],
+        );
+        std::fs::remove_dir_all(&gone).unwrap();
+        git(&main, &["switch", "-q", "other"]);
+        std::fs::write(main.join("o.txt"), "o\n").unwrap();
+        git(&main, &["add", "o.txt"]);
+        git(&main, &["commit", "-q", "-m", "more"]);
+        // `split` and origin/split each get a commit the other lacks.
+        git(&main, &["switch", "-q", "-c", "split", "main"]);
+        git(&main, &["push", "-q", "-u", "origin", "split"]);
+        std::fs::write(main.join("s.txt"), "s\n").unwrap();
+        git(&main, &["add", "s.txt"]);
+        git(&main, &["commit", "-q", "-m", "split"]);
+        git(
+            &main,
+            &["update-ref", "refs/remotes/origin/split", "other~1"],
+        );
+        git(&main, &["switch", "-q", "main"]);
+        git(&main, &["branch", "-q", "local-only"]);
+        let project = open(&main);
+        let snap = project.snapshot.clone().unwrap();
+        let here = project.nav.worktree.clone();
+        let hint = |branch: &str| {
+            let can = pull(&snap, branch, &here);
+            (can.ok, can.hint)
+        };
+
+        assert_eq!(
+            hint("main"),
+            (true, "Pull origin/main into main".to_owned())
+        );
+        let (ok, text) = hint("agent");
+        assert!(ok && text.ends_with("in its worktree agent"), "{text}");
+        let (ok, text) = hint("other");
+        assert!(!ok && text.starts_with("Nothing to pull"), "{text}");
+        let (ok, text) = hint("split");
+        assert!(
+            !ok && text.contains("split and origin/split have diverged"),
+            "{text}"
+        );
+        let (ok, text) = hint("behind");
+        assert!(!ok && text.contains("folder is missing"), "{text}");
+        let (ok, text) = hint("local-only");
+        assert!(!ok && text.contains("no upstream"), "{text}");
+        git(&main, &["worktree", "prune"]);
+        let project = open(&main);
+        let snap = project.snapshot.clone().unwrap();
+        let can = pull(&snap, "behind", &here);
+        assert!(can.ok && can.hint.contains("fast-forward"), "{}", can.hint);
+    }
+
+    /// No pull of main's branch while main shows a preview or merges; asked
+    /// anyway, Pull says the same and does nothing. During a preview the
+    /// branch can be checked out in a linked worktree, and pulls there.
+    #[test]
+    fn no_pull_while_main_previews_or_merges() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = repo(dir.path());
+        git(
+            dir.path(),
+            &["init", "-q", "--bare", "-b", "main", "origin.git"],
+        );
+        let url = dir.path().join("origin.git");
+        git(&main, &["remote", "add", "origin", url.to_str().unwrap()]);
+        git(&main, &["push", "-q", "-u", "origin", "main"]);
+        let mut project = open(&main);
+        let agent = project.snapshot.as_ref().unwrap().worktrees[1].path.clone();
+        project.apply(Action::PreviewInMain(agent.clone()));
+        wait(&mut project, "the preview never showed", |p| {
+            p.snapshot.as_ref().is_some_and(|s| s.preview.is_some())
+        });
+        let pull_main = || {
+            Action::Remote(crate::project::RemoteOp::PullBranch {
+                branch: "main".to_owned(),
+            })
+        };
+        let snap = project.snapshot.clone().unwrap();
+        let can = pull(&snap, "main", &project.nav.worktree);
+        assert!(!can.ok && can.hint.contains("Restore main"), "{}", can.hint);
+        project.apply(pull_main());
+        assert!(!project.is_operating());
+        assert_eq!(project.notices, [can.hint]);
+        project.notices.clear();
+
+        // While main is detached, agent's folder checks out main too.
+        git(&agent, &["switch", "-q", "main"]);
+        project.refresh();
+        wait(&mut project, "agent never showed main", |p| {
+            let snap = p.snapshot.as_ref().unwrap();
+            let wt = snap.worktrees.iter().find(|wt| same_path(&wt.path, &agent));
+            wt.and_then(|wt| wt.branch.as_deref()) == Some("main")
+        });
+        let snap = project.snapshot.clone().unwrap();
+        let can = pull(&snap, "main", &agent);
+        assert_eq!(can.hint, "Pull origin/main into main");
+        assert!(can.ok);
+        git(&agent, &["switch", "-q", "agent"]);
+        project.apply(Action::RestoreMain);
+        wait(&mut project, "the preview never ended", |p| {
+            p.snapshot.as_ref().is_some_and(|s| s.preview.is_none())
+        });
+
+        std::fs::write(main.join("a.txt"), "main\n").unwrap();
+        git(&main, &["commit", "-q", "-am", "main"]);
+        merge_stops(&main, "other");
+        project.refresh();
+        wait(&mut project, "the merge never showed", |p| {
+            p.main_worktree().is_some_and(|wt| wt.in_progress.is_some())
+        });
+        let snap = project.snapshot.clone().unwrap();
+        let can = pull(&snap, "main", &agent);
+        assert!(
+            !can.ok && can.hint.contains("in progress in main"),
+            "{}",
+            can.hint
+        );
+        project.apply(pull_main());
+        assert!(!project.is_operating());
+        assert_eq!(project.notices, [can.hint]);
     }
 }

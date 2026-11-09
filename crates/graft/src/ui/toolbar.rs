@@ -237,12 +237,10 @@ fn branch_upstream<'a>(
 }
 
 fn can_pull(snap: Option<&RepoSnapshot>, wt: Option<&Worktree>) -> Can {
-    match branch_upstream(snap, wt, "pull from") {
-        Err(can) => can,
-        Ok((branch, upstream)) => match remote::pull_check(branch, upstream) {
-            Ok(name) => yes(format!("Pull {name} into {branch}")),
-            Err(why) => no(why),
-        },
+    match (branch_upstream(snap, wt, "pull from"), snap, wt) {
+        (Ok((branch, _)), Some(snap), Some(wt)) => can::pull(snap, branch, &wt.path),
+        (Err(can), ..) => can,
+        _ => no("Select a worktree first"),
     }
 }
 

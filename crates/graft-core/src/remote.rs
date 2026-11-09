@@ -1,13 +1,17 @@
 //! Talking to remotes: fetch, pull and push, with progress and cancel.
 //! Credentials go through git's own helpers (Git Credential Manager).
 
+use std::path::{Path, PathBuf};
+
 use anyhow::{Result, bail};
 
 use crate::cli::{Git, Progress};
 use crate::conflicts;
 use crate::jobs::CancelToken;
-use crate::model::{ORIGIN, Upstream, branch_name, local_ref};
+use crate::model::{ORIGIN, RepoSnapshot, Upstream, branch_name, local_ref};
+use crate::paths::{folder_name, same_path};
 use crate::refs::{self, RefKind};
+use crate::refusal::{forced_update, not_fast_forward};
 
 /// Fetch every remote. With `prune`, remote branches deleted there go too,
 /// so local branches tracking them show as gone.
@@ -80,6 +84,88 @@ pub fn pull_check<'a>(branch: &str, upstream: &'a Upstream) -> Result<&'a str, S
     }
 }
 
+/// Where a pull of a branch runs, and what it does in words.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullPlan {
+    /// The worktree that has the branch checked out; `None`: nowhere, so
+    /// it only fast-forwards (see [`pull_branch`]).
+    pub worktree: Option<PathBuf>,
+    pub hint: String,
+}
+
+/// Whether the local branch `branch` can be pulled now, and where, or why
+/// not. `selected` is the worktree on screen.
+pub fn pull_plan(snap: &RepoSnapshot, branch: &str, selected: &Path) -> Result<PullPlan, String> {
+    if snap.remotes.is_empty() {
+        return Err("No remote to pull from. Add one under Remotes in the sidebar.".to_owned());
+    }
+    let Some(local) = snap.branch(branch) else {
+        return Err("Check out a branch to pull from".to_owned());
+    };
+    let upstream = pull_check(branch, &local.upstream)?;
+    // The selected worktree first: during a preview git sees main detached
+    // and lets main's branch be checked out in another worktree too.
+    let here = snap
+        .worktrees
+        .iter()
+        .find(|wt| same_path(&wt.path, selected) && wt.branch.as_deref() == Some(branch));
+    let Some(wt) = here.or_else(|| snap.worktree_for_branch(branch)) else {
+        return match local.upstream {
+            Upstream::Tracking {
+                ahead, behind: 0, ..
+            } if ahead > 0 => Err(format!(
+                "Nothing to pull: {branch} only has commits that {upstream} lacks. \
+                 Check it out to push them."
+            )),
+            Upstream::Tracking { ahead, .. } if ahead > 0 => Err(diverged(branch, upstream)),
+            _ => Ok(PullPlan {
+                worktree: None,
+                hint: format!(
+                    "Move {branch} ahead to {upstream}'s newest commit (it is not checked \
+                     out, so only a fast-forward)"
+                ),
+            }),
+        };
+    };
+    if wt.prunable {
+        return Err(format!(
+            "{branch} is checked out in a worktree whose folder is missing. \
+             Prune missing worktrees first."
+        ));
+    }
+    if let Some(reason) = snap.head_blocked(&wt.path) {
+        return Err(reason.to_owned());
+    }
+    if wt.in_progress.is_some() {
+        return Err(format!(
+            "Finish or abort what is in progress in {} first",
+            folder_name(&wt.path)
+        ));
+    }
+    let hint = if same_path(&wt.path, selected) {
+        format!("Pull {upstream} into {branch}")
+    } else {
+        format!(
+            "Pull {upstream} into {branch}, in its worktree {}",
+            folder_name(&wt.path)
+        )
+    };
+    Ok(PullPlan {
+        worktree: Some(wt.path.clone()),
+        hint,
+    })
+}
+
+/// Why a branch checked out nowhere can't simply move ahead to `upstream`.
+/// Its own commits look the same as a rewritten upstream, so this doesn't
+/// suggest merging them back.
+fn diverged(branch: &str, upstream: &str) -> String {
+    format!(
+        "{branch} and {upstream} have diverged: {branch} has commits {upstream} lacks, \
+         or {upstream} was force-pushed. Check {branch} out to sort it out."
+    )
+}
+
 /// Pull the current branch from its upstream (merge or rebase, as
 /// configured). Ok(true): stopped with conflicts.
 pub fn pull(git: &Git, cancel: &CancelToken, on_progress: impl FnMut(Progress)) -> Result<bool> {
@@ -97,6 +183,58 @@ pub fn pull(git: &Git, cancel: &CancelToken, on_progress: impl FnMut(Progress)) 
     let accept = conflicts::done_or_stopped(git)?;
     let out = git.run_progress_accepting(&args, cancel, on_progress, accept)?;
     Ok(!out.success())
+}
+
+/// Pull `branch`, checked out here or not. Checked out here: [`pull`]
+/// (merge or rebase, as configured). Elsewhere: fetch its upstream and
+/// move it ahead only when that loses nothing (a fast-forward); git
+/// refuses a branch that diverged, and one checked out in any worktree.
+/// Ok(true): stopped with conflicts.
+pub fn pull_branch(
+    git: &Git,
+    branch: &str,
+    cancel: &CancelToken,
+    on_progress: impl FnMut(Progress),
+) -> Result<bool> {
+    if git.current_branch()?.as_deref() == Some(branch) {
+        return pull(git, cancel, on_progress);
+    }
+    let key = |what: &str| git.config(&["--get", &format!("branch.{branch}.{what}")]);
+    let (Some(remote), Some(merge)) = (key("remote")?, key("merge")?) else {
+        bail!("{branch} has no upstream yet, so there is nothing to pull. Push publishes it.");
+    };
+    let refspec = format!("{merge}:{}", local_ref(branch));
+    let args = [
+        "fetch",
+        "--progress",
+        "--no-write-fetch-head",
+        &remote,
+        &refspec,
+    ];
+    let tip = || -> Result<String> {
+        let out = git.run_raw(["rev-parse", "--verify", "-q", &local_ref(branch)])?;
+        Ok(out.stdout_str().trim().to_owned())
+    };
+    let before = tip()?;
+    let Err(error) = git.run_progress(&args, cancel, on_progress) else {
+        return Ok(false);
+    };
+    let text = format!("{error:#}");
+    // One fetch updates the remote-tracking branch too; git can refuse
+    // that one (a fetch refspec without `+`) after moving the branch.
+    if tip()? != before {
+        bail!("{branch} moved ahead, but git also reported a problem:\n{text}");
+    }
+    if !not_fast_forward(&text) {
+        return Err(error);
+    }
+    if forced_update(&text) {
+        bail!(
+            "{branch}'s upstream was rewritten on the remote (force-pushed), so {branch} \
+             can't simply move ahead to it. Check {branch} out to decide what to keep."
+        );
+    }
+    bail!(diverged(branch, "its upstream"))
 }
 
 /// Whether any config scope says how a pull of `branch` reconciles a
