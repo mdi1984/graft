@@ -274,6 +274,16 @@ mod tests {
         std::fs::write(main.join("o.txt"), "o\n").unwrap();
         git(&main, &["add", "o.txt"]);
         git(&main, &["commit", "-q", "-m", "more"]);
+        // `split` and origin/split each get a commit the other lacks.
+        git(&main, &["switch", "-q", "-c", "split", "main"]);
+        git(&main, &["push", "-q", "-u", "origin", "split"]);
+        std::fs::write(main.join("s.txt"), "s\n").unwrap();
+        git(&main, &["add", "s.txt"]);
+        git(&main, &["commit", "-q", "-m", "split"]);
+        git(
+            &main,
+            &["update-ref", "refs/remotes/origin/split", "other~1"],
+        );
         git(&main, &["switch", "-q", "main"]);
         git(&main, &["branch", "-q", "local-only"]);
         let project = open(&main);
@@ -291,8 +301,10 @@ mod tests {
         let (ok, text) = hint("agent");
         assert!(ok && text.ends_with("in its worktree agent"), "{text}");
         let (ok, text) = hint("other");
+        assert!(!ok && text.starts_with("Nothing to pull"), "{text}");
+        let (ok, text) = hint("split");
         assert!(
-            !ok && text.contains("other and origin/other have diverged"),
+            !ok && text.contains("split and origin/split have diverged"),
             "{text}"
         );
         let (ok, text) = hint("behind");

@@ -111,6 +111,12 @@ pub fn pull_plan(snap: &RepoSnapshot, branch: &str, selected: &Path) -> Result<P
         .find(|wt| same_path(&wt.path, selected) && wt.branch.as_deref() == Some(branch));
     let Some(wt) = here.or_else(|| snap.worktree_for_branch(branch)) else {
         return match local.upstream {
+            Upstream::Tracking {
+                ahead, behind: 0, ..
+            } if ahead > 0 => Err(format!(
+                "Nothing to pull: {branch} only has commits that {upstream} lacks. \
+                 Check it out to push them."
+            )),
             Upstream::Tracking { ahead, .. } if ahead > 0 => Err(diverged(branch, upstream)),
             _ => Ok(PullPlan {
                 worktree: None,
