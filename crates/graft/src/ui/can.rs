@@ -7,7 +7,7 @@ use egui::Response;
 use graft_core::paths::{folder_name, same_path};
 use graft_core::preview::{self, Step};
 use graft_core::review::Review;
-use graft_core::{RepoSnapshot, Worktree};
+use graft_core::{RepoSnapshot, Upstream, Worktree, remote};
 
 use crate::project::{Action, Project};
 
@@ -87,6 +87,41 @@ pub fn new_worktree(project: &Project) -> Can {
 /// Adding a remote (the sidebar's REMOTES).
 pub fn add_remote(project: &Project) -> Can {
     act(project, "Add a remote to fetch from and push to")
+}
+
+/// Pulling the local branch `branch` (the toolbar for the selected
+/// worktree's, a branch's menu for any): where it is checked out, a merge
+/// or rebase as configured; where it isn't, only a fast-forward.
+pub fn pull(snap: &RepoSnapshot, branch: &str, selected: &Path) -> Can {
+    if snap.remotes.is_empty() {
+        return no("No remote to pull from. Add one under Remotes in the sidebar.");
+    }
+    let Some(local) = snap.branch(branch) else {
+        return no("Check out a branch to pull from");
+    };
+    let upstream = match remote::pull_check(branch, &local.upstream) {
+        Ok(name) => name,
+        Err(why) => return no(why),
+    };
+    match snap.worktree_for_branch(branch) {
+        Some(wt) if let Some(reason) = snap.head_blocked(&wt.path) => no(reason),
+        Some(wt) if wt.in_progress.is_some() => no(FINISH_FIRST),
+        Some(wt) if same_path(&wt.path, selected) => yes(format!("Pull {upstream} into {branch}")),
+        Some(wt) => yes(format!(
+            "Pull {upstream} into {branch}, in its worktree {}",
+            folder_name(&wt.path)
+        )),
+        None => match local.upstream {
+            Upstream::Tracking { ahead, .. } if ahead > 0 => no(format!(
+                "{branch} has commits that {upstream} lacks, so it can only be pulled \
+                 where it is checked out (a merge or rebase)"
+            )),
+            _ => yes(format!(
+                "Move {branch} ahead to {upstream}'s newest commit (it is not checked \
+                 out, so only a fast-forward)"
+            )),
+        },
+    }
 }
 
 /// Merging another branch into `wt`'s branch, or rebasing it.

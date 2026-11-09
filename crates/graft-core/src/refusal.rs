@@ -65,6 +65,11 @@ pub fn rejected_push(error: &str) -> bool {
         || error.contains("fetch first")
 }
 
+/// Git refused to move a branch to commits that don't contain its own.
+pub(crate) fn not_fast_forward(error: &str) -> bool {
+    error.contains("non-fast-forward")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

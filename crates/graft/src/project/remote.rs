@@ -14,6 +14,11 @@ use super::{Action, Confirm, Project};
 pub enum RemoteOp {
     Fetch,
     Pull,
+    /// Pull this branch, wherever it is checked out, or nowhere (see
+    /// [`Project::pull_branch`]).
+    PullBranch {
+        branch: String,
+    },
     Push,
     /// Push over a diverged upstream, with lease, from the worktree whose
     /// push the remote rejected (not whichever is selected by then).
@@ -35,6 +40,7 @@ impl RemoteOp {
         match self {
             Self::Fetch => "Fetching".to_owned(),
             Self::Pull => "Pulling".to_owned(),
+            Self::PullBranch { branch } => format!("Pulling {branch}"),
             Self::Push => "Pushing".to_owned(),
             Self::ForcePush { .. } => "Force pushing".to_owned(),
             Self::PushTag { tag, .. } => format!("Pushing tag {tag}"),
@@ -54,12 +60,34 @@ fn plain(end: impl FnOnce(&mut Project, PathBuf, anyhow::Result<()>) + Send + 's
     Box::new(move |p, ran_in, result| end(p, ran_in, result.map(|_| ())))
 }
 
+/// How a pull ends: like a merge when it stops with conflicts; otherwise
+/// the view stays (unlike a merge, a pull is often done mid-work).
+fn pulled(done: String) -> Ending {
+    Box::new(move |p: &mut Project, ran_in, result| match result {
+        Ok(false) => p.infos.push(done),
+        result => after_conflicts(done, "Pulling".into(), None)(p, ran_in, result),
+    })
+}
+
 impl Project {
+    /// Pull `branch` (a branch's menu): in the worktree that has it checked
+    /// out, else a fast-forward from the selected one. The job checks again
+    /// where it is checked out, see [`remote::pull_branch`].
+    fn pull_branch(&mut self, branch: String) {
+        let worktree = self
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.worktree_for_branch(&branch))
+            .map_or_else(|| self.nav.worktree.clone(), |wt| wt.path.clone());
+        self.remote_in(worktree, RemoteOp::PullBranch { branch });
+    }
+
     /// Talk to the remote from the selected worktree (a force push: from
     /// its own). Nothing happens while another operation runs.
     pub(super) fn remote(&mut self, op: RemoteOp) {
-        let worktree = match &op {
-            RemoteOp::ForcePush { worktree } => worktree.clone(),
+        let worktree = match op {
+            RemoteOp::PullBranch { branch } => return self.pull_branch(branch),
+            RemoteOp::ForcePush { ref worktree } => worktree.clone(),
             _ => self.nav.worktree.clone(),
         };
         self.remote_in(worktree, op);
@@ -73,12 +101,8 @@ impl Project {
             RemoteOp::Fetch => plain(quietly),
             // Like a merge when it stops with conflicts; otherwise the view
             // stays (unlike a merge, a pull is often done mid-work).
-            RemoteOp::Pull => Box::new(|p: &mut Project, ran_in, result| match result {
-                Ok(false) => p.infos.push("Pulled".to_owned()),
-                result => {
-                    after_conflicts("Pulled".into(), "Pulling".into(), None)(p, ran_in, result)
-                }
-            }),
+            RemoteOp::Pull => pulled("Pulled".to_owned()),
+            RemoteOp::PullBranch { branch } => pulled(format!("Pulled {branch}")),
             RemoteOp::Push => plain(|p: &mut Project, ran_in, result| p.pushed(ran_in, result)),
             RemoteOp::ForcePush { .. } => plain(say("Force pushed".to_owned())),
             RemoteOp::PushTag { remote, tag } => {
@@ -91,6 +115,9 @@ impl Project {
         let job = move |git: Git, cancel: &CancelToken, report: &dyn Fn(Progress)| {
             let ran = match op {
                 RemoteOp::Pull => return remote::pull(&git, cancel, report),
+                RemoteOp::PullBranch { branch } => {
+                    return remote::pull_branch(&git, &branch, cancel, report);
+                }
                 RemoteOp::Fetch => remote::fetch(&git, false, cancel, report),
                 RemoteOp::Push => remote::push(&git, cancel, report),
                 RemoteOp::ForcePush { .. } => remote::force_push(&git, cancel, report),
@@ -325,5 +352,46 @@ mod tests {
         assert!(said.contains("Pulling stopped with conflicts"), "{said}");
         assert!(same_path(&project.nav.worktree, &a));
         assert_eq!(project.nav.view, crate::project::WorkspaceView::FileStatus);
+    }
+    /// Pull from b's menu with a selected: b's worktree pulls (merging),
+    /// and a branch checked out nowhere moves ahead; a stays as it was.
+    #[test]
+    fn pull_a_branch_from_its_menu() {
+        let Setup {
+            _dir: dir,
+            mut project,
+            origin,
+            a,
+            b,
+        } = setup();
+        git(&b, &["push", "-q", "-u", "origin", "b"]);
+        git(&b, &["push", "-q", "origin", "b:c"]);
+        git(&b, &["branch", "-q", "--track", "c", "origin/c"]);
+        let colleague = dir.path().join("colleague");
+        let url = origin.to_str().unwrap();
+        git(dir.path(), &["clone", "-q", "-b", "b", url, "colleague"]);
+        std::fs::write(
+            colleague.join("theirs.txt"),
+            "theirs
+",
+        )
+        .unwrap();
+        git(&colleague, &["add", "theirs.txt"]);
+        git(&colleague, &["commit", "-q", "-m", "theirs"]);
+        git(&colleague, &["push", "-q", "origin", "HEAD:b", "HEAD:c"]);
+        let theirs = tip(&colleague, "HEAD");
+        let a_before = tip(&a, "HEAD");
+        for branch in ["b", "c"] {
+            let branch = branch.to_owned();
+            project.apply(Action::Remote(RemoteOp::PullBranch { branch }));
+            wait(&mut project, "the pull never ended", |p| !p.is_operating());
+            assert!(project.notices.is_empty(), "{:?}", project.notices);
+        }
+        assert_eq!(tip(&b, "b"), theirs);
+        assert!(b.join("theirs.txt").exists());
+        assert_eq!(tip(&a, "c"), theirs);
+        assert_eq!(tip(&a, "HEAD"), a_before);
+        assert!(!a.join("theirs.txt").exists());
+        assert!(same_path(&project.nav.worktree, &a));
     }
 }

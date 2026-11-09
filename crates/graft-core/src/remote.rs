@@ -8,6 +8,7 @@ use crate::conflicts;
 use crate::jobs::CancelToken;
 use crate::model::{ORIGIN, Upstream, branch_name, local_ref};
 use crate::refs::{self, RefKind};
+use crate::refusal::not_fast_forward;
 
 /// Fetch every remote. With `prune`, remote branches deleted there go too,
 /// so local branches tracking them show as gone.
@@ -97,6 +98,41 @@ pub fn pull(git: &Git, cancel: &CancelToken, on_progress: impl FnMut(Progress)) 
     let accept = conflicts::done_or_stopped(git)?;
     let out = git.run_progress_accepting(&args, cancel, on_progress, accept)?;
     Ok(!out.success())
+}
+
+/// Pull `branch`, checked out here or not. Checked out here: [`pull`]
+/// (merge or rebase, as configured). Elsewhere: fetch its upstream and
+/// move it ahead only when that loses nothing (a fast-forward); git
+/// refuses a branch that diverged, and one checked out in any worktree.
+/// Ok(true): stopped with conflicts.
+pub fn pull_branch(
+    git: &Git,
+    branch: &str,
+    cancel: &CancelToken,
+    on_progress: impl FnMut(Progress),
+) -> Result<bool> {
+    if git.current_branch()?.as_deref() == Some(branch) {
+        return pull(git, cancel, on_progress);
+    }
+    let key = |what: &str| git.config(&["--get", &format!("branch.{branch}.{what}")]);
+    let (Some(remote), Some(merge)) = (key("remote")?, key("merge")?) else {
+        bail!("{branch} has no upstream yet, so there is nothing to pull. Push publishes it.");
+    };
+    let refspec = format!("{merge}:{}", local_ref(branch));
+    let args = [
+        "fetch",
+        "--progress",
+        "--no-write-fetch-head",
+        &remote,
+        &refspec,
+    ];
+    match git.run_progress(&args, cancel, on_progress) {
+        Err(e) if not_fast_forward(&format!("{e:#}")) => bail!(
+            "{branch} has commits its upstream lacks, so it can't simply move ahead. \
+             Check it out and pull there to merge or rebase them."
+        ),
+        ran => ran.map(|()| false),
+    }
 }
 
 /// Whether any config scope says how a pull of `branch` reconciles a

@@ -449,6 +449,16 @@ fn branch_menu(
     if !is_head {
         merge_items(ui, project, name, actions);
     }
+    let pull = can::pull(repo, name, &project.nav.worktree).unless(project.can_act().err());
+    can_item(
+        ui,
+        "Pull",
+        &pull,
+        actions,
+        Action::Remote(RemoteOp::PullBranch {
+            branch: name.to_owned(),
+        }),
+    );
     can_item(
         ui,
         "New branch from here…",

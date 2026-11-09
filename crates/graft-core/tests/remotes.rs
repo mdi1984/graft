@@ -202,3 +202,101 @@ fn a_failed_pull_is_not_taken_for_conflicts() {
     assert!(pull.failed());
     assert!(!mine.join(".git").join("MERGE_HEAD").exists());
 }
+
+/// A clone of a server with branches `main` and `feature` (tracking
+/// origin/feature, not checked out), and a second clone `theirs` that
+/// pushed one more commit to `feature`. Returns (tmp, mine, theirs).
+fn behind_on_feature() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let server = common::init_bare(&tmp.path().join("server.git"));
+    let dir = common::init(&tmp.path().join("app"));
+    common::commit(&dir, "a.txt", "a\n", "a");
+    sh(
+        &dir,
+        &[
+            "push",
+            "-q",
+            server.to_str().unwrap(),
+            "main",
+            "main:feature",
+        ],
+    );
+    let mine = common::clone(&server, &tmp.path().join("mine"));
+    sh(
+        &mine,
+        &["branch", "-q", "--track", "feature", "origin/feature"],
+    );
+    let theirs = common::clone(&server, &tmp.path().join("theirs"));
+    sh(&theirs, &["switch", "-q", "feature"]);
+    common::commit(&theirs, "b.txt", "b\n", "theirs");
+    sh(&theirs, &["push", "-q"]);
+    (tmp, mine, theirs)
+}
+
+/// Pulling a branch that is checked out nowhere moves it ahead to its
+/// upstream, and leaves the checked-out branch and its files alone.
+#[test]
+fn pull_a_branch_that_is_not_checked_out() {
+    let (_tmp, mine, theirs) = behind_on_feature();
+    let main = common::rev(&mine, "main");
+    let git = common::git(&mine);
+    let stopped = remote::pull_branch(&git, "feature", &CancelToken::default(), |_| {});
+    assert!(!stopped.unwrap());
+    assert_eq!(common::rev(&mine, "feature"), common::rev(&theirs, "HEAD"));
+    assert_eq!(
+        common::rev(&mine, "origin/feature"),
+        common::rev(&theirs, "HEAD")
+    );
+    assert_eq!(common::rev(&mine, "HEAD"), main);
+    assert!(!mine.join("b.txt").exists());
+}
+
+/// A branch with commits its upstream lacks is not moved (nothing is
+/// lost), and the error says to pull where it is checked out.
+#[test]
+fn pull_a_diverged_branch_that_is_not_checked_out() {
+    let (_tmp, mine, _theirs) = behind_on_feature();
+    sh(&mine, &["switch", "-q", "feature"]);
+    common::commit(&mine, "c.txt", "c\n", "mine");
+    sh(&mine, &["switch", "-q", "main"]);
+    let before = common::rev(&mine, "feature");
+    let git = common::git(&mine);
+    let error = remote::pull_branch(&git, "feature", &CancelToken::default(), |_| {});
+    let error = format!("{:#}", error.unwrap_err());
+    assert!(error.contains("Check it out and pull there"), "{error}");
+    assert_eq!(common::rev(&mine, "feature"), before);
+}
+
+/// Pulling a branch from a worktree it is not checked out in, while
+/// another worktree has it: git refuses rather than move that worktree's
+/// branch under its files.
+#[test]
+fn pull_a_branch_checked_out_in_another_worktree_from_elsewhere() {
+    let (tmp, mine, _theirs) = behind_on_feature();
+    let other = tmp.path().join("other");
+    sh(
+        &mine,
+        &["worktree", "add", "-q", other.to_str().unwrap(), "feature"],
+    );
+    let before = common::rev(&mine, "feature");
+    let git = common::git(&mine);
+    let pulled = remote::pull_branch(&git, "feature", &CancelToken::default(), |_| {});
+    assert!(pulled.is_err());
+    assert_eq!(common::rev(&mine, "feature"), before);
+    // From its own worktree it is a normal pull.
+    let git = common::git(&other);
+    let stopped = remote::pull_branch(&git, "feature", &CancelToken::default(), |_| {});
+    assert!(!stopped.unwrap());
+    assert!(other.join("b.txt").exists());
+}
+
+/// A branch without upstream says so.
+#[test]
+fn pull_a_branch_without_upstream() {
+    let (_tmp, mine, _theirs) = behind_on_feature();
+    sh(&mine, &["branch", "-q", "local-only"]);
+    let git = common::git(&mine);
+    let error = remote::pull_branch(&git, "local-only", &CancelToken::default(), |_| {});
+    let error = format!("{:#}", error.unwrap_err());
+    assert!(error.contains("no upstream"), "{error}");
+}
