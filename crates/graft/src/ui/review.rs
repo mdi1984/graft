@@ -844,7 +844,7 @@ mod tests {
         };
 
         let ctx = egui::Context::default();
-        crate::fonts::install(&ctx);
+        crate::fonts::install(&ctx, &crate::fonts::Loaded::default());
         theme::apply(&ctx, egui::ThemePreference::Dark);
         let needed = Id::unique("review-header-width");
         let measure = |width: f32| {

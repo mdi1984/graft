@@ -166,6 +166,7 @@ shortcut for each action.
 | Ctrl+, | Settings |
 | F5 | Refresh |
 | Ctrl+J | Show or hide the git console |
+| Ctrl++, Ctrl+-, Ctrl+0 | Zoom in, zoom out, back to 100% |
 | ↑ / ↓ | Move through files, commits and search results |
 | Space | Stage or unstage the selected file (File status) |
 | Ctrl+S, Ctrl+Shift+S | Stage all / unstage all (File status) |
@@ -190,6 +191,8 @@ shortcut for each action.
 - Diffs use the histogram algorithm with word-level highlights; syntax colors come from
   [syntect](https://github.com/trishume/syntect).
 - Settings, review marks and comments are stored in `%APPDATA%\Graft`.
+- Inter and JetBrains Mono are built in. Settings → Appearance can switch to any font on your PC
+  (or a font file) and zoom the whole window.
 
 `CLAUDE.md` has the design notes.
 

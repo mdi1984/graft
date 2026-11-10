@@ -1837,7 +1837,7 @@ dependencies = [
 
 [[package]]
 name = "graft"
-version = "1.0.11"
+version = "1.0.12"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -1845,12 +1845,14 @@ dependencies = [
  "egui",
  "graft-core",
  "jiff",
+ "memmap2",
  "open",
  "raw-window-handle",
  "rfd",
  "serde",
  "serde_json",
  "sha2",
+ "skrifa",
  "tempfile",
  "tracing",
  "tracing-subscriber",
@@ -1862,7 +1864,7 @@ dependencies = [
 
 [[package]]
 name = "graft-core"
-version = "1.0.11"
+version = "1.0.12"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -2015,7 +2017,7 @@ dependencies = [
 
 [[package]]
 name = "icon-gen"
-version = "1.0.11"
+version = "1.0.12"
 dependencies = [
  "ico",
  "resvg",

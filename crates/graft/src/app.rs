@@ -116,6 +116,11 @@ pub struct GraftApp {
     memories: HashMap<PathBuf, RepoMemory>,
     settings: Settings,
     settings_form: Option<SettingsForm>,
+    /// The fonts egui has now, and the ones being read for it.
+    fonts_shown: fonts::Fonts,
+    fonts_loading: Option<fonts::Fonts>,
+    /// The fonts on this PC, found once when Settings first opens.
+    font_list: FontList,
     update: update::Status,
     about_open: bool,
     /// An update is installed and the new Graft started: close this one.
@@ -135,8 +140,6 @@ impl GraftApp {
         forwarded: Receiver<Vec<PathBuf>>,
         last_update: Option<Result<String, String>>,
     ) -> Self {
-        fonts::install(&cc.egui_ctx);
-
         let ctx = cc.egui_ctx.clone();
         let waker: Waker = Arc::new(move || ctx.request_repaint());
         let threads = std::thread::available_parallelism()
@@ -163,6 +166,13 @@ impl GraftApp {
         let mut memories = persisted.memories();
         let settings = std::mem::take(&mut persisted.settings);
         theme::apply(&cc.egui_ctx, settings.theme.preference());
+        // Read before the first frame, so Graft never shows the wrong font.
+        let fonts_shown = settings.fonts();
+        let (loaded, font_errors) = fonts::load(&fonts_shown);
+        fonts::install(&cc.egui_ctx, &loaded);
+        // Zoom is Graft's own setting, with shortcuts the user can change.
+        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        cc.egui_ctx.set_zoom_factor(settings.zoom_factor());
         let projects: Vec<Project> = persisted
             .open
             .iter()
@@ -201,6 +211,9 @@ impl GraftApp {
             memories,
             settings,
             settings_form: None,
+            fonts_shown,
+            fonts_loading: None,
+            font_list: FontList::NotLoaded,
             update: update::Status::Idle,
             about_open: false,
             closing: false,
@@ -210,6 +223,9 @@ impl GraftApp {
         };
         app.arrange();
         app.check_recent();
+        for error in font_errors {
+            app.toasts.error(error);
+        }
         match last_update {
             Some(Ok(done)) => app.toasts.info(done),
             Some(Err(failed)) => app.toasts.error(failed),
@@ -255,7 +271,9 @@ impl GraftApp {
             return true;
         };
         self.window_checked = true;
-        if inner.width() >= MIN_WINDOW_SIZE.x && inner.height() >= MIN_WINDOW_SIZE.y {
+        // Zoom shrinks the window measured in points; compare unzoomed.
+        let inner = inner.size() * ctx.zoom_factor();
+        if inner.x >= MIN_WINDOW_SIZE.x && inner.y >= MIN_WINDOW_SIZE.y {
             return false;
         }
         let size = monitor.map_or(WINDOW_SIZE, |m| WINDOW_SIZE.min(m));
@@ -861,6 +879,16 @@ impl GraftApp {
         if let Some(i) = self.active {
             self.projects[i].apply(Action::LoadIdentity);
         }
+        if matches!(self.font_list, FontList::NotLoaded) {
+            self.font_list = FontList::Loading;
+            self.jobs.spawn(
+                || Some(fonts::scan()),
+                |app, found| {
+                    // A failed search leaves the built-in fonts to pick.
+                    app.font_list = FontList::Loaded(found.unwrap_or_default().into());
+                },
+            );
+        }
     }
 
     fn settings_ui(&mut self, ctx: &egui::Context) {
@@ -871,32 +899,84 @@ impl GraftApp {
             let p = &self.projects[i];
             (p.name.as_str(), p.identity.as_ref())
         });
-        let outcome = ui::settings::show(ctx, form, repo);
-        // The theme choice previews live; Cancel puts the saved one back.
-        let mut theme = form.draft.theme;
-        match outcome {
+        let installed = match &self.font_list {
+            FontList::Loaded(list) => Some(&list[..]),
+            FontList::NotLoaded | FontList::Loading => None,
+        };
+        match ui::settings::show(ctx, form, repo, installed) {
             settings_ui::Outcome::Open => {}
-            settings_ui::Outcome::Cancel => {
-                self.settings_form = None;
-                theme = self.settings.theme;
-            }
+            settings_ui::Outcome::Cancel => self.settings_form = None,
             settings_ui::Outcome::About => {
                 self.settings_form = None;
-                theme = self.settings.theme;
                 self.about_open = true;
             }
+            settings_ui::Outcome::AddFontFile(kind) => self.add_font_file(kind),
             settings_ui::Outcome::Save(settings, identity) => {
                 self.settings_form = None;
-                self.change_settings(|s| *s = settings.clone());
+                self.change_settings(|s| *s = (*settings).clone());
                 if let (Some(identity), Some(i)) = (identity, self.active) {
                     self.projects[i].apply(Action::SaveIdentity(identity));
                 }
             }
         }
-        if ctx.options(|o| o.theme_preference) != theme.preference() {
-            ctx.set_theme(theme.preference());
+    }
+
+    /// Ask for a font file and add its family to the open Settings window.
+    fn add_font_file(&self, kind: fonts::Kind) {
+        self.jobs.spawn_long(
+            |_| {
+                let path = launch::pick_font_file()?;
+                Some(fonts::inspect(&path).map_err(|e| format!("{e:#}")))
+            },
+            move |app, picked| {
+                if let (Some(form), Some(picked)) = (&mut app.settings_form, picked) {
+                    form.font_file_added(kind, picked);
+                }
+            },
+        );
+    }
+
+    /// Show the appearance settings: while Settings is open its draft, so
+    /// changes show at once and Cancel puts the saved ones back.
+    fn sync_appearance(&mut self, ctx: &egui::Context) {
+        let shown = self
+            .settings_form
+            .as_ref()
+            .map_or(&self.settings, |form| &form.draft);
+        let theme = shown.theme.preference();
+        if ctx.options(|o| o.theme_preference) != theme {
+            ctx.set_theme(theme);
             ctx.request_repaint();
         }
+        let zoom = shown.zoom_factor();
+        if (ctx.zoom_factor() - zoom).abs() > f32::EPSILON {
+            ctx.set_zoom_factor(zoom);
+        }
+        let wanted = shown.fonts();
+        if wanted == self.fonts_shown || self.fonts_loading.as_ref() == Some(&wanted) {
+            return;
+        }
+        self.fonts_loading = Some(wanted.clone());
+        let ctx = ctx.clone();
+        self.jobs.spawn(
+            {
+                let wanted = wanted.clone();
+                move || Some(fonts::load(&wanted))
+            },
+            move |app, loaded| {
+                // Only the latest choice counts; an older one may finish later.
+                if app.fonts_loading.as_ref() != Some(&wanted) {
+                    return;
+                }
+                app.fonts_loading = None;
+                let (loaded, errors) = loaded.unwrap_or_default();
+                fonts::install(&ctx, &loaded);
+                app.fonts_shown = wanted;
+                for error in errors {
+                    app.toasts.error(error);
+                }
+            },
+        );
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
@@ -950,6 +1030,15 @@ impl GraftApp {
         }
         if pressed(Command::WholeFile) {
             self.toggle_whole_file();
+        }
+        if pressed(Command::ZoomIn) {
+            self.change_settings(|s| s.zoom_step(true));
+        }
+        if pressed(Command::ZoomOut) {
+            self.change_settings(|s| s.zoom_step(false));
+        }
+        if pressed(Command::ZoomReset) {
+            self.change_settings(|s| s.zoom = 100);
         }
     }
 
@@ -1080,6 +1169,7 @@ impl eframe::App for GraftApp {
         self.refresh_on_focus(&ctx);
         self.sync_window_title(&ctx);
         self.settings_ui(&ctx);
+        self.sync_appearance(&ctx);
         self.about_ui(&ctx);
         self.group_form_ui(&ctx);
         if self.closing {
@@ -1246,6 +1336,13 @@ fn wait_first(waits: &[String], doing: &str) -> Option<String> {
             .collect::<Vec<_>>()
             .join("\n")
     })
+}
+
+/// The fonts on this PC, for the font lists in Settings.
+enum FontList {
+    NotLoaded,
+    Loading,
+    Loaded(Arc<[fonts::Family]>),
 }
 
 #[cfg(test)]

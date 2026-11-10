@@ -4,6 +4,7 @@ use graft_core::slash::default_protected;
 use graft_core::worktree::DEFAULT_COPY_PATTERNS;
 use serde::{Deserialize, Serialize};
 
+use crate::fonts::{FontChoice, Fonts};
 use crate::keys::Keymap;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +29,12 @@ pub struct Settings {
     pub review_folders: bool,
     /// Keyboard shortcuts; only the ones changed from the defaults are saved.
     pub keys: Keymap,
+    /// Font for everything but code; the built-in Inter by default.
+    pub ui_font: FontChoice,
+    /// Font for diffs, commit hashes and the console; JetBrains Mono by default.
+    pub code_font: FontChoice,
+    /// Zoom in percent, on top of the Windows display scale.
+    pub zoom: u32,
 }
 
 impl Default for Settings {
@@ -43,7 +50,46 @@ impl Default for Settings {
             whole_file: false,
             review_folders: false,
             keys: Keymap::default(),
+            ui_font: FontChoice::default(),
+            code_font: FontChoice::default(),
+            zoom: 100,
         }
+    }
+}
+
+/// The zoom range, in percent.
+pub const ZOOM_MIN: u32 = 50;
+pub const ZOOM_MAX: u32 = 200;
+/// How much one Zoom in or Zoom out changes it.
+const ZOOM_STEP: u32 = 10;
+
+impl Settings {
+    pub fn fonts(&self) -> Fonts {
+        Fonts {
+            ui: self.ui_font.clone(),
+            code: self.code_font.clone(),
+        }
+    }
+
+    pub fn set_fonts(&mut self, fonts: Fonts) {
+        self.ui_font = fonts.ui;
+        self.code_font = fonts.code;
+    }
+
+    /// The zoom as egui takes it; a saved value out of range is clamped.
+    pub fn zoom_factor(&self) -> f32 {
+        self.zoom.clamp(ZOOM_MIN, ZOOM_MAX) as f32 / 100.0
+    }
+
+    /// One step bigger (`in_`) or smaller, to the next multiple of the step.
+    pub fn zoom_step(&mut self, in_: bool) {
+        let zoom = self.zoom.clamp(ZOOM_MIN, ZOOM_MAX);
+        let next = if in_ {
+            (zoom / ZOOM_STEP + 1) * ZOOM_STEP
+        } else {
+            zoom.div_ceil(ZOOM_STEP).saturating_sub(1) * ZOOM_STEP
+        };
+        self.zoom = next.clamp(ZOOM_MIN, ZOOM_MAX);
     }
 }
 
@@ -81,4 +127,37 @@ pub fn default_clone_parent() -> std::path::PathBuf {
     std::env::var_os("USERPROFILE")
         .map(|home| std::path::PathBuf::from(home).join("source").join("repos"))
         .unwrap_or_else(|| std::path::PathBuf::from(r"C:\dev"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stepped(zoom: u32, in_: bool) -> u32 {
+        let mut settings = Settings {
+            zoom,
+            ..Settings::default()
+        };
+        settings.zoom_step(in_);
+        settings.zoom
+    }
+
+    #[test]
+    fn zoom_steps_land_on_multiples_of_ten_and_stay_in_range() {
+        assert_eq!(stepped(100, true), 110);
+        assert_eq!(stepped(100, false), 90);
+        assert_eq!(stepped(105, true), 110);
+        assert_eq!(stepped(105, false), 100);
+        assert_eq!(stepped(ZOOM_MAX, true), ZOOM_MAX);
+        assert_eq!(stepped(ZOOM_MIN, false), ZOOM_MIN);
+        assert_eq!(stepped(999, false), 190);
+    }
+
+    #[test]
+    fn settings_saved_by_an_older_graft_get_the_new_defaults() {
+        let old: Settings =
+            serde_json::from_str(r#"{"theme":"Dark","ide_command":"code"}"#).unwrap();
+        assert_eq!(old.zoom, 100);
+        assert!(old.ui_font.is_built_in() && old.code_font.is_built_in());
+    }
 }
