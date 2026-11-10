@@ -408,7 +408,10 @@ fn nav(ui: &mut Ui, form: &mut SettingsForm, view: &View) {
     ui.spacing_mut().item_spacing.y = 2.0;
     title(ui, "Settings");
     ui.add_space(6.0);
-    text_field(ui, &mut form.search, "Search settings", NAV_WIDTH);
+    if text_field(ui, &mut form.search, "Search settings", NAV_WIDTH).changed() {
+        // Typed letters must not become the shortcut being recorded.
+        form.recording = None;
+    }
     let terms: Vec<String> = form
         .search
         .split_whitespace()
@@ -422,6 +425,8 @@ fn nav(ui: &mut Ui, form: &mut SettingsForm, view: &View) {
         if nav_item(ui, page.label(), selected, has_hits(page)).clicked() {
             form.page = page;
             form.search.clear();
+            // A shortcut being recorded must not take a key pressed later.
+            form.recording = None;
         }
     };
     ui.add_space(10.0);

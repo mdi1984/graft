@@ -121,6 +121,9 @@ pub struct GraftApp {
     fonts_loading: Option<fonts::Fonts>,
     /// The fonts on this PC, found once when Settings first opens.
     font_list: FontList,
+    /// The window's smallest size as last set, and the zoom it was set at:
+    /// egui turns it into pixels at that zoom.
+    min_size: Option<(egui::Vec2, f32)>,
     update: update::Status,
     about_open: bool,
     /// An update is installed and the new Graft started: close this one.
@@ -214,6 +217,7 @@ impl GraftApp {
             fonts_shown,
             fonts_loading: None,
             font_list: FontList::NotLoaded,
+            min_size: None,
             update: update::Status::Idle,
             about_open: false,
             closing: false,
@@ -276,7 +280,8 @@ impl GraftApp {
         if inner.x >= MIN_WINDOW_SIZE.x && inner.y >= MIN_WINDOW_SIZE.y {
             return false;
         }
-        let size = monitor.map_or(WINDOW_SIZE, |m| WINDOW_SIZE.min(m));
+        let wanted = WINDOW_SIZE / ctx.zoom_factor();
+        let size = monitor.map_or(wanted, |m| wanted.min(m));
         let corner = monitor.map_or(egui::Pos2::ZERO, |m| {
             ((m - size) / 2.0).max(egui::Vec2::ZERO).to_pos2()
         });
@@ -948,8 +953,15 @@ impl GraftApp {
             ctx.set_theme(theme);
             ctx.request_repaint();
         }
+        // Points here are this frame's, which the command is applied in.
+        let current = ctx.zoom_factor();
+        let min_size = min_window_size(ctx.input(|i| i.viewport().monitor_size));
+        if self.min_size != Some((min_size, current)) {
+            self.min_size = Some((min_size, current));
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(min_size));
+        }
         let zoom = shown.zoom_factor();
-        if (ctx.zoom_factor() - zoom).abs() > f32::EPSILON {
+        if (current - zoom).abs() > f32::EPSILON {
             ctx.set_zoom_factor(zoom);
         }
         let wanted = shown.fonts();
@@ -1344,6 +1356,12 @@ fn wait_first(waits: &[String], doing: &str) -> Option<String> {
     })
 }
 
+/// The smallest window, in points: what the layout needs, which grows on
+/// screen with the zoom, but never more than fits on the monitor.
+fn min_window_size(monitor: Option<egui::Vec2>) -> egui::Vec2 {
+    monitor.map_or(MIN_WINDOW_SIZE, |m| MIN_WINDOW_SIZE.min(m * 0.9))
+}
+
 /// The fonts on this PC, for the font lists in Settings.
 enum FontList {
     NotLoaded,
@@ -1354,6 +1372,19 @@ enum FontList {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_smallest_window_fits_a_small_zoomed_screen() {
+        // 1920x1080 at 125% Windows scale, zoomed to 150%: 1024x576 points,
+        // of which the 48-pixel taskbar takes about 26.
+        let small = egui::vec2(1024.0, 576.0);
+        let above_taskbar = small.y - 48.0 / (1.25 * 1.5);
+        let min = min_window_size(Some(small));
+        assert!(min.x <= small.x && min.y <= above_taskbar, "{min:?}");
+        // A large screen keeps what the layout needs.
+        let large = egui::vec2(2293.0, 960.0);
+        assert_eq!(min_window_size(Some(large)), MIN_WINDOW_SIZE);
+    }
 
     #[test]
     fn a_second_close_soon_after_quits_anyway() {

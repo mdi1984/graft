@@ -60,6 +60,11 @@ impl Default for Settings {
 /// The zoom range, in percent.
 pub const ZOOM_MIN: u32 = 75;
 pub const ZOOM_MAX: u32 = 150;
+/// The largest zoom as egui takes it.
+pub fn max_zoom_factor() -> f32 {
+    ZOOM_MAX as f32 / 100.0
+}
+
 /// How much one Zoom in or Zoom out changes it.
 const ZOOM_STEP: u32 = 10;
 
