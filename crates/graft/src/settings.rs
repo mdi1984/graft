@@ -58,8 +58,8 @@ impl Default for Settings {
 }
 
 /// The zoom range, in percent.
-pub const ZOOM_MIN: u32 = 50;
-pub const ZOOM_MAX: u32 = 200;
+pub const ZOOM_MIN: u32 = 75;
+pub const ZOOM_MAX: u32 = 150;
 /// How much one Zoom in or Zoom out changes it.
 const ZOOM_STEP: u32 = 10;
 
@@ -150,7 +150,8 @@ mod tests {
         assert_eq!(stepped(105, false), 100);
         assert_eq!(stepped(ZOOM_MAX, true), ZOOM_MAX);
         assert_eq!(stepped(ZOOM_MIN, false), ZOOM_MIN);
-        assert_eq!(stepped(999, false), 190);
+        assert_eq!(stepped(999, false), 140);
+        assert_eq!(stepped(80, false), ZOOM_MIN);
     }
 
     #[test]

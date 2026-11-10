@@ -953,7 +953,13 @@ impl GraftApp {
             ctx.set_zoom_factor(zoom);
         }
         let wanted = shown.fonts();
-        if wanted == self.fonts_shown || self.fonts_loading.as_ref() == Some(&wanted) {
+        if wanted == self.fonts_shown {
+            // A font still loading for a choice since undone (Cancel) must
+            // not be installed when it arrives.
+            self.fonts_loading = None;
+            return;
+        }
+        if self.fonts_loading.as_ref() == Some(&wanted) {
             return;
         }
         self.fonts_loading = Some(wanted.clone());

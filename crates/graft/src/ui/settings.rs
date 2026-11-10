@@ -313,8 +313,8 @@ pub fn show(
     }
     // At a high zoom the window must still fit.
     let screen = ctx.content_rect();
-    let width = WIDTH.min(screen.width() - 64.0).max(480.0);
-    let body_height = BODY_HEIGHT.min(screen.height() - 180.0).max(160.0);
+    let width = (screen.width() - 64.0).clamp(360.0, WIDTH);
+    let body_height = (screen.height() - 180.0).clamp(120.0, BODY_HEIGHT);
     let mut view = View {
         repo,
         installed,
@@ -327,7 +327,12 @@ pub fn show(
         let row = vec2(ui.available_width(), body_height);
         ui.allocate_ui_with_layout(row, Layout::left_to_right(Align::Min), |ui| {
             ui.set_height(body_height);
-            ui.vertical(|ui| nav(ui, form, &view));
+            ui.vertical(|ui| {
+                ScrollArea::vertical()
+                    .id_salt("settings-nav")
+                    .max_height(body_height)
+                    .show(ui, |ui| nav(ui, form, &view));
+            });
             ui.add_space(12.0);
             let (line, _) = ui.allocate_exact_size(vec2(1.0, body_height), Sense::hover());
             ui.painter().rect_filled(line, 0.0, color::border());
@@ -347,9 +352,12 @@ pub fn show(
                 } else {
                     "search"
                 };
-                ScrollArea::vertical()
+                // Sideways too: in a small, zoomed window a row wider than
+                // the page must not widen the dialog past the window.
+                ScrollArea::both()
                     .id_salt(("settings-body", scroll))
                     .auto_shrink([false, false])
+                    .max_width(body_width)
                     .max_height(body_height)
                     .show(ui, |ui| body(ui, form, &mut view));
             });
