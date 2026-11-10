@@ -69,7 +69,10 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("Graft")
             .with_inner_size(app::WINDOW_SIZE)
-            .with_min_inner_size(app::MIN_WINDOW_SIZE)
+            // egui multiplies this by the saved zoom before Graft can say
+            // otherwise, so start small enough for any zoom to fit the
+            // screen; the app sets the real minimum on the first frame.
+            .with_min_inner_size(app::MIN_WINDOW_SIZE / settings::max_zoom_factor())
             // Graft draws its own title bar (see ui::window_frame).
             .with_decorations(false)
             .with_icon(window_icon()),

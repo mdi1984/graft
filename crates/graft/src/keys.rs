@@ -22,6 +22,9 @@ pub enum Command {
     Console,
     WrapLines,
     WholeFile,
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
     StageFile,
     StageAll,
     UnstageAll,
@@ -122,7 +125,7 @@ use Command as C;
 use Scope::{FileStatus, General, Review};
 
 /// In the order of [`Command`].
-const COMMANDS: [Spec; 21] = [
+const COMMANDS: [Spec; 24] = [
     spec(C::Search, "search", "Search", General, ctrl(Key::K)),
     spec(
         C::NewTab,
@@ -200,6 +203,30 @@ const COMMANDS: [Spec; 21] = [
         "Show whole files in diffs",
         General,
         alt(Key::F),
+    ),
+    // The + key is Shift+= on US keyboards and its own key on others (and
+    // the number pad): all of them zoom in.
+    with_aliases(
+        spec(C::ZoomIn, "zoom-in", "Zoom in", General, ctrl(Key::Plus)),
+        &[
+            shortcut(CTRL, Key::Equals),
+            shortcut(CTRL_SHIFT, Key::Equals),
+            shortcut(CTRL_SHIFT, Key::Plus),
+        ],
+    ),
+    spec(
+        C::ZoomOut,
+        "zoom-out",
+        "Zoom out",
+        General,
+        ctrl(Key::Minus),
+    ),
+    spec(
+        C::ZoomReset,
+        "zoom-reset",
+        "Reset zoom to 100%",
+        General,
+        ctrl(Key::Num0),
     ),
     spec(
         C::StageFile,
@@ -318,7 +345,12 @@ impl Command {
     fn repeats(self) -> bool {
         matches!(
             self,
-            Command::NextFile | Command::PreviousFile | Command::NextTab | Command::PreviousTab
+            Command::NextFile
+                | Command::PreviousFile
+                | Command::NextTab
+                | Command::PreviousTab
+                | Command::ZoomIn
+                | Command::ZoomOut
         )
     }
 }
@@ -563,6 +595,9 @@ pub fn format(shortcut: KeyboardShortcut) -> String {
     }
     let key = match shortcut.logical_key {
         Key::Comma => ",",
+        Key::Plus => "+",
+        Key::Minus => "-",
+        Key::Equals => "=",
         Key::Backtick => "`",
         Key::ArrowUp => "Up",
         Key::ArrowDown => "Down",
@@ -752,6 +787,8 @@ mod tests {
             [
                 Command::NextTab,
                 Command::PreviousTab,
+                Command::ZoomIn,
+                Command::ZoomOut,
                 Command::NextFile,
                 Command::PreviousFile
             ]

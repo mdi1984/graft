@@ -21,6 +21,15 @@ pub fn pick_folder(title: &str, start: Option<PathBuf>) -> Option<PathBuf> {
     dialog.pick_folder()
 }
 
+/// Ask for a font file (.ttf, .otf, .ttc). Waits for the user: run it on a
+/// thread of its own.
+pub fn pick_font_file() -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .set_title("Add a font file")
+        .add_filter("Fonts", &["ttf", "otf", "ttc", "otc"])
+        .pick_file()
+}
+
 /// Extensions that Windows runs, or follows to something it runs, instead of
 /// opening them as a document. `PATHEXT` adds to these.
 const RUNNABLE: &[&str] = &[
