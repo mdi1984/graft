@@ -98,6 +98,22 @@ impl SlashView {
         !shown.is_empty() && shown.iter().all(|(i, _)| self.is_checked(*i))
     }
 
+    /// What the list says instead of rows, given whether any row of any
+    /// list (candidates, Kept, Recently slashed) shows: a filter that
+    /// matches nothing says so before "Nothing to clean up".
+    pub fn empty_note(&self, any_shown: bool) -> Option<String> {
+        let filter = self.filter.trim();
+        if !filter.is_empty() && !any_shown {
+            return Some(format!("Nothing matches '{filter}'."));
+        }
+        let Some(Ok(plan)) = &self.plan else {
+            return None;
+        };
+        plan.candidates
+            .is_empty()
+            .then(|| "Nothing to clean up.".to_owned())
+    }
+
     pub fn is_checked(&self, index: usize) -> bool {
         self.checked.get(index).copied().unwrap_or(false)
     }
@@ -438,6 +454,31 @@ mod tests {
         assert!(folder.exists(), "the hidden row's worktree stays");
         let slashed: Vec<_> = project.memory.slashed.iter().map(|s| &s.branch).collect();
         assert_eq!(slashed, ["alpha-fix"]);
+    }
+
+    /// With nothing to slash but Kept or Recently slashed entries, a filter
+    /// that matches none of them says so, not "Nothing to clean up".
+    #[test]
+    fn a_filter_matching_nothing_says_so_without_candidates() {
+        let mut view = SlashView {
+            plan: Some(Ok(graft_core::slash::Plan {
+                kept: vec![("main".into(), "current branch".into())],
+                ..Default::default()
+            })),
+            checked: Vec::new(),
+            filter: String::new(),
+            running: false,
+            outcome: None,
+        };
+        assert_eq!(
+            view.empty_note(true).as_deref(),
+            Some("Nothing to clean up.")
+        );
+        view.filter = "xyz".into();
+        assert_eq!(
+            view.empty_note(false).as_deref(),
+            Some("Nothing matches 'xyz'.")
+        );
     }
 
     /// Saved as before, when the id was a hex string.

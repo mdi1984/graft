@@ -104,14 +104,10 @@ fn plan_ui(
         .max_height(380.0)
         .auto_shrink([false, true])
         .show(ui, |ui| {
-            if plan.candidates.is_empty() {
+            let any_shown = !shown.is_empty() || !kept.is_empty() || !recent.is_empty();
+            if let Some(text) = view.empty_note(any_shown) {
                 ui.add_space(4.0);
-                ui.label(RichText::new("Nothing to clean up.").color(color::text()));
-            } else if shown.is_empty() && kept.is_empty() && recent.is_empty() {
-                ui.add_space(4.0);
-                let filter = view.filter.trim();
-                let text = format!("Nothing matches '{filter}'.");
-                ui.label(RichText::new(text).color(color::text_weak()));
+                ui.label(RichText::new(text).color(color::text()));
             }
             // One section per reason, in the plan's order, with the rows
             // the filter shows: "Slash" acts on every checked row that shows.
