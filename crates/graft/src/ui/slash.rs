@@ -1,14 +1,14 @@
 //! The Slash dialog: a preview of the branches and worktrees that can go,
 //! with checkboxes. Nothing is deleted until "Slash N" is clicked.
 
-use egui::{Align, Layout, RichText, ScrollArea, Ui};
+use egui::{Align, CursorIcon, Layout, RichText, ScrollArea, Sense, Ui};
 use graft_core::Progress;
 use graft_core::slash::{Candidate, Plan, Reason};
 
 use super::widgets::dialog::{self, footer_row};
 use super::widgets::{
     ButtonKind, button, elided_path, error_label, hint, inline_spinner, note, progress_bar,
-    section_label, small_text, title, warning_label,
+    section_label, small_text, text_field, title, warning_label,
 };
 use crate::project::{Action, SlashView, SlashedBranch};
 use crate::theme::{self, color};
@@ -85,19 +85,34 @@ fn plan_ui(
         );
     }
 
+    let shown = view.shown();
+    let kept: Vec<_> = plan
+        .kept
+        .iter()
+        .filter(|(name, _)| view.shows(Some(name), None))
+        .collect();
+    let recent: Vec<_> = slashed
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| view.shows(Some(&s.branch), None))
+        .collect();
+    if !plan.candidates.is_empty() || !plan.kept.is_empty() || !slashed.is_empty() {
+        filter_row(ui, view, !shown.is_empty(), actions);
+    }
+
     ScrollArea::vertical()
         .max_height(380.0)
         .auto_shrink([false, true])
         .show(ui, |ui| {
-            if plan.candidates.is_empty() {
+            let any_shown = !shown.is_empty() || !kept.is_empty() || !recent.is_empty();
+            if let Some(text) = view.empty_note(any_shown) {
                 ui.add_space(4.0);
-                ui.label(RichText::new("Nothing to clean up.").color(color::text()));
+                ui.label(RichText::new(text).color(color::text()));
             }
-            // One section per reason, in the plan's order: every candidate
-            // shows, since "Slash" acts on every checked one.
-            let mut first = 0;
-            for rows in plan.candidates.chunk_by(|a, b| a.reason == b.reason) {
-                let reason = rows[0].reason;
+            // One section per reason, in the plan's order, with the rows
+            // the filter shows: "Slash" acts on every checked row that shows.
+            for rows in shown.chunk_by(|(_, a), (_, b)| a.reason == b.reason) {
+                let reason = rows[0].1.reason;
                 let (title, detail) = section(reason);
                 ui.add_space(6.0);
                 section_label(ui, title);
@@ -106,20 +121,19 @@ fn plan_ui(
                 } else {
                     hint(ui, detail);
                 }
-                for (i, candidate) in rows.iter().enumerate() {
-                    candidate_row(ui, view, first + i, candidate, actions);
+                for (i, candidate) in rows {
+                    candidate_row(ui, view, *i, candidate, actions);
                 }
-                first += rows.len();
             }
 
-            if !plan.kept.is_empty() {
+            if !kept.is_empty() {
                 ui.add_space(6.0);
                 egui::CollapsingHeader::new(
-                    RichText::new(format!("Kept ({})", plan.kept.len())).color(color::text_mid()),
+                    RichText::new(format!("Kept ({})", kept.len())).color(color::text_mid()),
                 )
                 .id_salt("slash-kept")
                 .show(ui, |ui| {
-                    for (name, why) in &plan.kept {
+                    for (name, why) in kept {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(name).font(theme::mono()).color(color::text()));
                             hint(ui, why);
@@ -128,13 +142,13 @@ fn plan_ui(
                 });
             }
 
-            if !slashed.is_empty() {
+            if !recent.is_empty() {
                 egui::CollapsingHeader::new(
-                    RichText::new(format!("Recently slashed ({})", slashed.len()))
+                    RichText::new(format!("Recently slashed ({})", recent.len()))
                         .color(color::text_mid()),
                 )
                 .id_salt("slash-recent")
-                .show(ui, |ui| recent_ui(ui, slashed, view.running, actions));
+                .show(ui, |ui| recent_ui(ui, &recent, view.running, actions));
             }
         });
 
@@ -151,7 +165,8 @@ fn plan_ui(
         ui.label(RichText::new(line).color(color::text_mid()));
         progress_bar(ui, progress.and_then(|p| p.fraction), WIDTH);
     }
-    let count = view.checked.iter().filter(|on| **on).count();
+    let chosen = view.chosen_indexes();
+    let count = chosen.len();
     let ((), action) = footer_row(
         ui,
         |_| {},
@@ -161,7 +176,7 @@ fn plan_ui(
                 n => format!("Slash {n}"),
             };
             if button(ui, &label, ButtonKind::Primary, count > 0 && !view.running).clicked() {
-                return Some(Action::RunSlash);
+                return Some(Action::RunSlash(chosen));
             }
             if view.running {
                 // Stops after the current item; what is done stays restorable.
@@ -175,6 +190,52 @@ fn plan_ui(
         },
     );
     actions.extend(action);
+}
+
+/// The filter field, and at its right a link that checks the shown rows
+/// (or unchecks them, when all are checked) while `any_shown`.
+fn filter_row(ui: &mut Ui, view: &SlashView, any_shown: bool, actions: &mut Actions) {
+    let all = view.all_shown_checked();
+    let link = if all {
+        "Uncheck all shown"
+    } else {
+        "Check all shown"
+    };
+    ui.add_space(4.0);
+    ui.add_enabled_ui(!view.running, |ui| {
+        ui.horizontal(|ui| {
+            let link_width = ui
+                .painter()
+                .layout_no_wrap(link.to_owned(), theme::small(), color::text())
+                .size()
+                .x;
+            let gap = ui.spacing().item_spacing.x;
+            let width = if any_shown {
+                WIDTH - link_width - 3.0 * gap
+            } else {
+                WIDTH
+            };
+            let mut filter = view.filter.clone();
+            if text_field(ui, &mut filter, "Filter by branch or folder", width).changed() {
+                actions.push(Action::SetSlashFilter(filter));
+            }
+            if any_shown {
+                let text = RichText::new(link)
+                    .font(theme::small())
+                    .color(if view.running {
+                        color::text_faint()
+                    } else {
+                        color::ahead_fg()
+                    });
+                let response = ui
+                    .add(egui::Label::new(text).sense(Sense::click()))
+                    .on_hover_cursor(CursorIcon::PointingHand);
+                if response.clicked() {
+                    actions.push(Action::CheckShownSlash(!all));
+                }
+            }
+        });
+    });
 }
 
 /// A section's title and what it means.
@@ -207,7 +268,7 @@ fn candidate_row(
     candidate: &Candidate,
     actions: &mut Actions,
 ) {
-    let mut on = view.checked.get(index).copied().unwrap_or(false);
+    let mut on = view.is_checked(index);
     let name = match (&candidate.branch, &candidate.worktree) {
         (Some(branch), _) => branch.clone(),
         (None, Some(path)) => graft_core::paths::folder_name(path),
@@ -242,9 +303,11 @@ fn candidate_row(
     }
 }
 
-fn recent_ui(ui: &mut Ui, slashed: &[SlashedBranch], running: bool, actions: &mut Actions) {
+/// The shown entries of "Recently slashed", each with its index in the
+/// whole list.
+fn recent_ui(ui: &mut Ui, shown: &[(usize, &SlashedBranch)], running: bool, actions: &mut Actions) {
     let now = crate::time::now();
-    for (i, entry) in slashed.iter().enumerate() {
+    for &(i, entry) in shown {
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(&entry.branch)
