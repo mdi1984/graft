@@ -35,6 +35,8 @@ pub struct Settings {
     pub code_font: FontChoice,
     /// Zoom in percent, on top of the Windows display scale.
     pub zoom: u32,
+    /// "Push to <remote>" in the New tag dialog, as last chosen.
+    pub push_new_tags: bool,
 }
 
 impl Default for Settings {
@@ -53,6 +55,7 @@ impl Default for Settings {
             ui_font: FontChoice::default(),
             code_font: FontChoice::default(),
             zoom: 100,
+            push_new_tags: false,
         }
     }
 }
@@ -165,5 +168,9 @@ mod tests {
             serde_json::from_str(r#"{"theme":"Dark","ide_command":"code"}"#).unwrap();
         assert_eq!(old.zoom, 100);
         assert!(old.ui_font.is_built_in() && old.code_font.is_built_in());
+        assert!(
+            !old.push_new_tags,
+            "the New tag dialog starts without pushing"
+        );
     }
 }

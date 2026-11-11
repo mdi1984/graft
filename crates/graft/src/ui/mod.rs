@@ -51,6 +51,9 @@ pub enum AppAction {
     ToggleWholeFile,
     /// Review lists files under their folders, or flat (an app setting).
     ToggleReviewFolders,
+    /// The New tag dialog's "Push to <remote>" was ticked or cleared; the
+    /// next one starts that way (an app setting).
+    PushNewTags(bool),
 }
 
 /// What the user did this frame.

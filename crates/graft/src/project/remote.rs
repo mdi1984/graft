@@ -9,6 +9,7 @@ use graft_core::{CancelToken, Git, Progress, remote};
 use super::conflicts::after_conflicts;
 use super::ops::{At, quietly, say};
 use super::{Action, Confirm, Project};
+use crate::jobs::shown_error;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemoteOp {
@@ -28,6 +29,9 @@ pub enum RemoteOp {
     PushTag {
         remote: String,
         tag: String,
+        /// Just created by the New tag dialog: a failed push says the tag
+        /// is still there.
+        created: bool,
     },
     DeleteRemoteBranch {
         remote: String,
@@ -69,6 +73,32 @@ fn pulled(done: String) -> Ending {
     })
 }
 
+/// The ending of pushing a tag the New tag dialog just created: if the push
+/// fails, the tag is still there and can be pushed again.
+fn pushed_new_tag(
+    remote: String,
+    tag: String,
+) -> impl FnOnce(&mut Project, PathBuf, anyhow::Result<()>) + Send {
+    move |p, _, result| match result {
+        Ok(()) => p
+            .infos
+            .push(format!("Created tag {tag} and pushed it to {remote}")),
+        Err(e) => {
+            let again = "The tag is still here; push it again from its menu under TAGS \
+                         in the sidebar.";
+            if let Some(error) = shown_error(&e) {
+                p.notices.push(format!(
+                    "Created tag {tag}, but pushing it to {remote} failed. {again}\n\n{error}"
+                ));
+            } else {
+                // Cancelled: the tag stays, unpushed.
+                p.infos
+                    .push(format!("Created tag {tag}, but did not push it. {again}"));
+            }
+        }
+    }
+}
+
 impl Project {
     /// Pull `branch` (a branch's menu) if [`remote::pull_plan`] allows it:
     /// in the worktree that has it checked out, else a fast-forward from the
@@ -108,9 +138,16 @@ impl Project {
             RemoteOp::PullBranch { branch } => pulled(format!("Pulled {branch}")),
             RemoteOp::Push => plain(|p: &mut Project, ran_in, result| p.pushed(ran_in, result)),
             RemoteOp::ForcePush { .. } => plain(say("Force pushed".to_owned())),
-            RemoteOp::PushTag { remote, tag } => {
-                plain(say(format!("Pushed tag {tag} to {remote}")))
-            }
+            RemoteOp::PushTag {
+                remote,
+                tag,
+                created: false,
+            } => plain(say(format!("Pushed tag {tag} to {remote}"))),
+            RemoteOp::PushTag {
+                remote,
+                tag,
+                created: true,
+            } => plain(pushed_new_tag(remote.clone(), tag.clone())),
             RemoteOp::DeleteRemoteBranch { remote, branch } => {
                 plain(say(format!("Deleted {remote}/{branch}")))
             }
@@ -124,7 +161,7 @@ impl Project {
                 RemoteOp::Fetch => remote::fetch(&git, false, cancel, report),
                 RemoteOp::Push => remote::push(&git, cancel, report),
                 RemoteOp::ForcePush { .. } => remote::force_push(&git, cancel, report),
-                RemoteOp::PushTag { remote, tag } => {
+                RemoteOp::PushTag { remote, tag, .. } => {
                     remote::push_tag(&git, &remote, &tag, cancel, report)
                 }
                 RemoteOp::DeleteRemoteBranch { remote, branch } => {
@@ -223,6 +260,128 @@ mod tests {
             a,
             b,
         }
+    }
+
+    /// Submit the New tag dialog for `tag` at `target`, with "Push to
+    /// origin" ticked or not, and wait until everything it started ended.
+    fn new_tag(project: &mut Project, tag: &str, target: &str, push: bool) {
+        let snap = project.snapshot.clone().unwrap();
+        let mut kind = crate::project::DialogKind::new_tag(target, target, &snap, push);
+        if let crate::project::DialogKind::NewTag { name, message, .. } = &mut kind {
+            *name = tag.to_owned();
+            *message = "Release".to_owned();
+        }
+        project.apply(Action::OpenDialog(kind));
+        project.apply(Action::SubmitDialog);
+        wait(project, "the new tag never ended", |p| {
+            !p.is_operating() && p.dialog.as_ref().is_none_or(|d| !d.submitting)
+        });
+    }
+
+    /// New tag with "Push to origin" ticked creates the tag and pushes it;
+    /// unticked, origin never gets it.
+    #[test]
+    fn a_new_tag_is_pushed_only_when_asked() {
+        let Setup {
+            _dir,
+            mut project,
+            origin,
+            a,
+            ..
+        } = setup();
+        new_tag(&mut project, "v1", "HEAD", true);
+        assert!(project.notices.is_empty(), "{:?}", project.notices);
+        assert!(project.dialog.is_none());
+        assert_eq!(tip(&origin, "refs/tags/v1"), tip(&a, "refs/tags/v1"));
+        assert!(!tip(&origin, "refs/tags/v1").is_empty());
+        let said = project.infos.last().unwrap();
+        assert_eq!(said, "Created tag v1 and pushed it to origin");
+
+        new_tag(&mut project, "v2", "HEAD", false);
+        assert!(project.notices.is_empty(), "{:?}", project.notices);
+        assert!(!tip(&a, "refs/tags/v2").is_empty());
+        assert_eq!(tip(&origin, "refs/tags/v2"), "", "v2 was not pushed");
+        assert_eq!(project.infos.last().unwrap(), "Created tag v2");
+    }
+
+    /// When git refuses to create the tag, the dialog shows why and stays
+    /// open, and nothing is pushed.
+    #[test]
+    fn a_tag_that_could_not_be_created_is_not_pushed() {
+        let Setup {
+            _dir,
+            mut project,
+            origin,
+            a,
+            ..
+        } = setup();
+        let missing = "0123456789abcdef0123456789abcdef01234567";
+        new_tag(&mut project, "v1", missing, true);
+        let dialog = project.dialog.as_ref().expect("the dialog stays open");
+        assert!(dialog.error.is_some());
+        assert_eq!(tip(&a, "refs/tags/v1"), "");
+        assert_eq!(tip(&origin, "refs/tags/v1"), "");
+        // A push of the missing tag would have failed with a notice.
+        assert!(project.notices.is_empty(), "{:?}", project.notices);
+    }
+
+    /// When the push fails, the tag stays, and the notice says so and where
+    /// to push it again.
+    #[test]
+    fn a_new_tag_whose_push_failed_stays() {
+        let Setup {
+            _dir: dir,
+            mut project,
+            a,
+            ..
+        } = setup();
+        let gone = dir.path().join("gone.git");
+        git(&a, &["remote", "set-url", "origin", gone.to_str().unwrap()]);
+        new_tag(&mut project, "v1", "HEAD", true);
+        assert!(project.dialog.is_none());
+        assert!(!tip(&a, "refs/tags/v1").is_empty());
+        assert_eq!(project.notices.len(), 1, "{:?}", project.notices);
+        let notice = &project.notices[0];
+        assert!(notice.contains("still here"), "{notice}");
+        assert!(notice.contains("TAGS in the sidebar"), "{notice}");
+    }
+
+    /// A cancelled push also says the tag stays and where to push it again.
+    #[test]
+    fn a_new_tag_whose_push_was_cancelled_says_where_to_push_it() {
+        let Setup {
+            _dir,
+            mut project,
+            a,
+            ..
+        } = setup();
+        let cancel = graft_core::CancelToken::default();
+        cancel.cancel();
+        let end = pushed_new_tag("origin".into(), "v1".into());
+        end(&mut project, a, cancel.check());
+        assert!(project.notices.is_empty(), "{:?}", project.notices);
+        let info = project.infos.last().expect("an info");
+        assert!(info.contains("did not push"), "{info}");
+        assert!(info.contains("TAGS in the sidebar"), "{info}");
+    }
+
+    /// The dialog offers to push only with a remote to push to, ticked as
+    /// last chosen.
+    #[test]
+    fn the_new_tag_dialog_offers_the_tag_remote() {
+        let Setup { _dir, project, .. } = setup();
+        let mut snap = (*project.snapshot.clone().unwrap()).clone();
+        let kind = crate::project::DialogKind::new_tag("HEAD", "HEAD", &snap, true);
+        let crate::project::DialogKind::NewTag { remote, push, .. } = kind else {
+            unreachable!()
+        };
+        assert_eq!((remote.as_deref(), push), (Some("origin"), true));
+        snap.remotes.clear();
+        let kind = crate::project::DialogKind::new_tag("HEAD", "HEAD", &snap, false);
+        let crate::project::DialogKind::NewTag { remote, .. } = kind else {
+            unreachable!()
+        };
+        assert_eq!(remote, None);
     }
 
     /// Commit with "Push after commit" in worktree a, then select b before

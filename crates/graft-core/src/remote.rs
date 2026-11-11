@@ -50,6 +50,12 @@ pub fn default_remote<'a>(remotes: impl IntoIterator<Item = &'a str>) -> Option<
     }
 }
 
+/// Where a tag is pushed (its menu in the sidebar, the New tag dialog): the
+/// [`default_remote`] of `snap`.
+pub fn tag_remote(snap: &RepoSnapshot) -> Option<&str> {
+    default_remote(snap.remotes.iter().map(|r| r.name.as_str()))
+}
+
 /// Where pushing a branch with this upstream goes, given the repository's
 /// remotes: a branch without upstream goes to the [`default_remote`].
 pub fn push_plan<'a>(
