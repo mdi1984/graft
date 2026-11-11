@@ -296,6 +296,11 @@ pub enum Action {
     OpenSlash,
     CloseSlash,
     ToggleSlashItem(usize),
+    /// Show only the Slash rows that match this text.
+    SetSlashFilter(String),
+    /// Check (true) or uncheck every Slash row the filter shows.
+    CheckShownSlash(bool),
+    /// Slash the rows that are checked and shown.
     RunSlash,
     /// Bring back an entry of "Recently slashed".
     RestoreSlashed(usize),
@@ -1113,6 +1118,8 @@ impl Project {
             Action::OpenSlash => self.open_slash(),
             Action::CloseSlash => self.close_slash(),
             Action::ToggleSlashItem(i) => self.toggle_slash_item(i),
+            Action::SetSlashFilter(filter) => self.set_slash_filter(filter),
+            Action::CheckShownSlash(on) => self.check_shown_slash(on),
             Action::RunSlash => self.run_slash(),
             Action::RestoreSlashed(i) => self.restore_slashed(i),
 
