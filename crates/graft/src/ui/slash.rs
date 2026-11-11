@@ -169,7 +169,8 @@ fn plan_ui(
         ui.label(RichText::new(line).color(color::text_mid()));
         progress_bar(ui, progress.and_then(|p| p.fraction), WIDTH);
     }
-    let count = view.chosen().len();
+    let chosen = view.chosen_indexes();
+    let count = chosen.len();
     let ((), action) = footer_row(
         ui,
         |_| {},
@@ -179,7 +180,7 @@ fn plan_ui(
                 n => format!("Slash {n}"),
             };
             if button(ui, &label, ButtonKind::Primary, count > 0 && !view.running).clicked() {
-                return Some(Action::RunSlash);
+                return Some(Action::RunSlash(chosen));
             }
             if view.running {
                 // Stops after the current item; what is done stays restorable.

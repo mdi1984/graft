@@ -300,8 +300,9 @@ pub enum Action {
     SetSlashFilter(String),
     /// Check (true) or uncheck every Slash row the filter shows.
     CheckShownSlash(bool),
-    /// Slash the rows that are checked and shown.
-    RunSlash,
+    /// Slash the rows that are checked and shown: their indexes as the
+    /// user saw them, so a change made meanwhile refuses instead.
+    RunSlash(Vec<usize>),
     /// Bring back an entry of "Recently slashed".
     RestoreSlashed(usize),
 
@@ -1120,7 +1121,7 @@ impl Project {
             Action::ToggleSlashItem(i) => self.toggle_slash_item(i),
             Action::SetSlashFilter(filter) => self.set_slash_filter(filter),
             Action::CheckShownSlash(on) => self.check_shown_slash(on),
-            Action::RunSlash => self.run_slash(),
+            Action::RunSlash(seen) => self.run_slash(seen),
             Action::RestoreSlashed(i) => self.restore_slashed(i),
 
             Action::PreviewInMain(worktree) => self.preview_in_main(worktree),

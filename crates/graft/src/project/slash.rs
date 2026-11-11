@@ -81,12 +81,13 @@ impl SlashView {
             .collect()
     }
 
-    /// What Slash acts on: the candidates that are checked and shown.
-    pub fn chosen(&self) -> Vec<Candidate> {
+    /// What Slash acts on: the indexes of the candidates that are checked
+    /// and shown.
+    pub fn chosen_indexes(&self) -> Vec<usize> {
         self.shown()
             .into_iter()
-            .filter(|(i, _)| self.is_checked(*i))
-            .map(|(_, c)| c.clone())
+            .map(|(i, _)| i)
+            .filter(|i| self.is_checked(*i))
             .collect()
     }
 
@@ -176,12 +177,21 @@ impl Project {
         }
     }
 
-    pub(super) fn run_slash(&mut self) {
+    /// Slash the rows at `seen`, the checked and shown rows when the user
+    /// pressed Slash; if they changed since (the filter, a check), nothing
+    /// runs, so Slash never acts on rows the user did not see.
+    pub(super) fn run_slash(&mut self, seen: Vec<usize>) {
         let Some(view) = &self.slash else { return };
-        let chosen = view.chosen();
-        if chosen.is_empty() || view.running {
+        if seen.is_empty() || view.running {
             return;
         }
+        if view.chosen_indexes() != seen {
+            self.infos
+                .push("The Slash list changed; check it and press Slash again.".to_owned());
+            return;
+        }
+        let Some(Ok(plan)) = &view.plan else { return };
+        let chosen: Vec<_> = seen.iter().map(|&i| plan.candidates[i].clone()).collect();
         let started = self.run_long(
             At::Main,
             "Slashing",
@@ -295,7 +305,14 @@ mod tests {
         let view = project.slash.as_ref().unwrap();
         let name = |c: &Candidate| c.branch.clone().unwrap();
         let shown = view.shown().into_iter().map(|(_, c)| name(c)).collect();
-        let chosen = view.chosen().iter().map(name).collect();
+        let Some(Ok(plan)) = &view.plan else {
+            panic!("no plan")
+        };
+        let chosen = view
+            .chosen_indexes()
+            .into_iter()
+            .map(|i| name(&plan.candidates[i]))
+            .collect();
         (shown, chosen)
     }
 
@@ -393,9 +410,24 @@ mod tests {
         project.apply(Action::SetSlashFilter(String::new()));
         assert_eq!(rows(&project).1, ["alpha-fix", "beta", "zeta"]);
 
+        // Slash pressed on what the user saw, then the filter changed in
+        // the same frame (Backspace): nothing runs.
+        project.apply(Action::SetSlashFilter("alpha".to_owned()));
+        let seen = project.slash.as_ref().unwrap().chosen_indexes();
+        project.apply(Action::SetSlashFilter(String::new()));
+        project.apply(Action::RunSlash(seen.clone()));
+        assert!(
+            !project.slash.as_ref().unwrap().running,
+            "ran on a changed list"
+        );
+        for branch in all {
+            let tip = tip(&root, &format!("refs/heads/{branch}"));
+            assert!(!tip.is_empty(), "{branch} was slashed");
+        }
+
         // Slash under a filter: beta and zeta are checked but hidden.
         project.apply(Action::SetSlashFilter("alpha".to_owned()));
-        project.apply(Action::RunSlash);
+        project.apply(Action::RunSlash(seen));
         wait(&mut project, "Slash never ended", |p| p.slash.is_none());
         assert!(project.notices.is_empty(), "{:?}", project.notices);
         let exists = |branch: &str| !tip(&root, &format!("refs/heads/{branch}")).is_empty();
