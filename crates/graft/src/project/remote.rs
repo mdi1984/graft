@@ -84,15 +84,16 @@ fn pushed_new_tag(
             .infos
             .push(format!("Created tag {tag} and pushed it to {remote}")),
         Err(e) => {
+            let again = "The tag is still here; push it again from its menu under TAGS \
+                         in the sidebar.";
             if let Some(error) = shown_error(&e) {
                 p.notices.push(format!(
-                    "Created tag {tag}, but pushing it to {remote} failed. The tag is still \
-                     here; push it again from its menu under TAGS in the sidebar.\n\n{error}"
+                    "Created tag {tag}, but pushing it to {remote} failed. {again}\n\n{error}"
                 ));
             } else {
                 // Cancelled: the tag stays, unpushed.
                 p.infos
-                    .push(format!("Created tag {tag}; it was not pushed"));
+                    .push(format!("Created tag {tag}, but did not push it. {again}"));
             }
         }
     }
@@ -343,6 +344,25 @@ mod tests {
         let notice = &project.notices[0];
         assert!(notice.contains("still here"), "{notice}");
         assert!(notice.contains("TAGS in the sidebar"), "{notice}");
+    }
+
+    /// A cancelled push also says the tag stays and where to push it again.
+    #[test]
+    fn a_new_tag_whose_push_was_cancelled_says_where_to_push_it() {
+        let Setup {
+            _dir,
+            mut project,
+            a,
+            ..
+        } = setup();
+        let cancel = graft_core::CancelToken::default();
+        cancel.cancel();
+        let end = pushed_new_tag("origin".into(), "v1".into());
+        end(&mut project, a, cancel.check());
+        assert!(project.notices.is_empty(), "{:?}", project.notices);
+        let info = project.infos.last().expect("an info");
+        assert!(info.contains("did not push"), "{info}");
+        assert!(info.contains("TAGS in the sidebar"), "{info}");
     }
 
     /// The dialog offers to push only with a remote to push to, ticked as
