@@ -1160,6 +1160,7 @@ impl GraftApp {
                     self.change_settings(|s| s.review_folders = folders);
                 }
                 AppAction::PushNewTags(push) => self.change_settings(|s| s.push_new_tags = push),
+                AppAction::SidebarOrder(order) => self.change_settings(|s| s.sidebar_order = order),
                 AppAction::InProject { project, actions } if project < self.projects.len() => {
                     self.activate(Some(project));
                     for action in actions {
