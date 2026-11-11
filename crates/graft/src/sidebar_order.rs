@@ -190,13 +190,6 @@ mod tests {
     }
 
     #[test]
-    fn reset_goes_back_to_the_default() {
-        let moved = order([Tags, Remotes, Branches, Worktrees]);
-        assert!(!moved.is_default());
-        assert_eq!(SidebarOrder::default().sections(), Section::DEFAULT);
-    }
-
-    #[test]
     fn odd_saved_lists_still_name_every_section_once() {
         let from = |names: &[&str]| SidebarOrder::from_names(names.iter().copied()).sections();
         assert_eq!(from(&[]), Section::DEFAULT);

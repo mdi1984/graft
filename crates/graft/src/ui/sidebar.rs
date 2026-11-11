@@ -71,9 +71,12 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
                 let heading = list_section(ui, project, repo, section, actions);
                 placed.push(Placed {
                     top,
+                    heading: heading.rect.center().y,
                     bottom: ui.cursor().top(),
                 });
-                heading.dnd_set_drag_payload(section);
+                if heading.drag_started_by(egui::PointerButton::Primary) {
+                    DragAndDrop::set_payload(ui.ctx(), section);
+                }
                 heading.context_menu(|ui| order_menu(ui, order, section, actions));
             }
             drop_section(ui, order, &placed, actions);
@@ -181,6 +184,8 @@ fn list_section(
 /// Where a section was drawn, in screen points.
 struct Placed {
     top: f32,
+    /// The middle of its heading.
+    heading: f32,
     bottom: f32,
 }
 
@@ -198,12 +203,17 @@ fn drop_section(ui: &Ui, order: SidebarOrder, placed: &[Placed], actions: &mut A
     if !area.contains(pointer) {
         return;
     }
-    // Above a section's middle drops before it, below drops after it.
-    let gap = placed
-        .iter()
-        .filter(|p| (p.top + p.bottom) / 2.0 < pointer.y)
-        .count();
+    // Above a heading's middle drops before its section. Headings, not
+    // whole sections: an open section can be taller than the sidebar.
+    let gap = placed.iter().filter(|p| p.heading < pointer.y).count();
+    let moved = order.moved_to(*dragged, gap);
+    if moved == order {
+        // Right above or below itself: dropping there changes nothing.
+        return;
+    }
+    // Kept on screen, also when that edge of the section is scrolled away.
     let y = placed.get(gap).map_or(last.bottom, |p| p.top) - 1.0;
+    let y = y.clamp(area.top() + 1.0, area.bottom() - 1.0);
     ui.painter().hline(
         area.x_range().shrink(4.0),
         y,
@@ -211,10 +221,7 @@ fn drop_section(ui: &Ui, order: SidebarOrder, placed: &[Placed], actions: &mut A
     );
     if ui.input(|i| i.pointer.any_released()) {
         DragAndDrop::clear_payload(ui.ctx());
-        let moved = order.moved_to(*dragged, gap);
-        if moved != order {
-            actions.app(AppAction::SidebarOrder(moved));
-        }
+        actions.app(AppAction::SidebarOrder(moved));
     }
 }
 
