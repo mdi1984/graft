@@ -8,7 +8,7 @@ use super::widgets::dialog::{self, footer};
 use super::widgets::{ButtonKind, error_label, field_label, note, text_field, title};
 use crate::project::{Action, Dialog, DialogKind};
 use crate::theme::{self, color};
-use crate::ui::Actions;
+use crate::ui::{Actions, AppAction};
 
 const WIDTH: f32 = 440.0;
 
@@ -46,6 +46,8 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Actions) {
                 name,
                 message,
                 target_label,
+                remote,
+                push,
                 ..
             } => {
                 title(ui, "New tag");
@@ -54,7 +56,18 @@ pub fn show(ctx: &egui::Context, dialog: &mut Dialog, actions: &mut Actions) {
                 edited |= focused_field(ui, name, "e.g. v1.2.0", WIDTH, focus);
                 field_label(ui, "Message (optional; makes an annotated tag)");
                 edited |= text_field(ui, message, "Release notes, …", WIDTH).changed();
-                "Create tag"
+                if let Some(remote) = remote {
+                    ui.add_space(4.0);
+                    if ui.checkbox(push, format!("Push to {remote}")).changed() {
+                        edited = true;
+                        actions.app.push(AppAction::PushNewTags(*push));
+                    }
+                }
+                if remote.is_some() && *push {
+                    "Create and push"
+                } else {
+                    "Create tag"
+                }
             }
             DialogKind::Stash {
                 message,

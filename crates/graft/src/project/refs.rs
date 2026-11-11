@@ -9,6 +9,7 @@ use graft_core::{Git, Oid, Worktree, conflicts, remote, stash};
 
 use super::conflicts::after_conflicts;
 use super::ops::{At, say};
+use super::remote::RemoteOp;
 use super::{Action, Confirm, Project, Selection, Tab, WorkspaceView};
 use crate::jobs::shown_error;
 
@@ -32,6 +33,11 @@ pub enum DialogKind {
         message: String,
         target: String,
         target_label: String,
+        /// Where "Push to" sends it, fixed when the dialog opens; `None`:
+        /// no remote to push to, so the dialog doesn't offer it.
+        remote: Option<String>,
+        /// Push it there once created.
+        push: bool,
     },
     Reset {
         target: String,
@@ -80,6 +86,24 @@ impl DialogKind {
             start: start.into(),
             start_label: start_label.into(),
             checkout: true,
+        }
+    }
+
+    /// A new tag at `target`; with a remote in `snap`, it offers to push
+    /// there too, ticked as last chosen (`push`).
+    pub fn new_tag(
+        target: impl Into<String>,
+        target_label: impl Into<String>,
+        snap: &graft_core::RepoSnapshot,
+        push: bool,
+    ) -> Self {
+        Self::NewTag {
+            name: String::new(),
+            message: String::new(),
+            target: target.into(),
+            target_label: target_label.into(),
+            remote: remote::tag_remote(snap).map(str::to_owned),
+            push,
         }
     }
 
@@ -351,15 +375,29 @@ impl Project {
                 name,
                 message,
                 target,
+                remote,
+                push,
                 ..
             } => {
-                let name = name.trim().to_owned();
-                let done = format!("Created tag {name}");
+                let tag = name.trim().to_owned();
+                let name = tag.clone();
+                // Pushed only once it exists, from where it was created.
+                let push_to = remote.filter(|_| push);
                 self.run_op(
                     At::Selected,
                     "Creating tag",
                     move |git| refs::create_tag(&git, &name, &target, Some(&message)),
-                    from_dialog(say(done)),
+                    from_dialog(move |p, ran_in, result| match (result, push_to) {
+                        (Ok(()), Some(remote)) => p.remote_in(
+                            ran_in,
+                            RemoteOp::PushTag {
+                                remote,
+                                tag,
+                                created: true,
+                            },
+                        ),
+                        (result, _) => say(format!("Created tag {tag}"))(p, ran_in, result),
+                    }),
                 )
             }
             DialogKind::Stash {

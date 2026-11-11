@@ -575,17 +575,19 @@ fn commit_menu(ui: &mut Ui, project: &Project, commit: &Commit, actions: &mut Ac
             format!("{short_id} {}", commit.summary),
         )),
     );
-    item(
-        ui,
-        "New tag here…",
-        &act,
-        Action::OpenDialog(DialogKind::NewTag {
-            name: String::new(),
-            message: String::new(),
-            target: commit.id.to_string(),
-            target_label: format!("{short_id} {}", commit.summary),
-        }),
-    );
+    if let Some(repo) = &project.snapshot {
+        item(
+            ui,
+            "New tag here…",
+            &act,
+            Action::OpenDialog(DialogKind::new_tag(
+                commit.id.to_string(),
+                format!("{short_id} {}", commit.summary),
+                repo,
+                project.settings().push_new_tags,
+            )),
+        );
+    }
     item(
         ui,
         &format!("Check out this commit (detached){in_main}"),

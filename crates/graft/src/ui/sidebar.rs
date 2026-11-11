@@ -593,7 +593,7 @@ fn remote_branch_menu(
 }
 
 fn tag_menu(ui: &mut Ui, repo: &RepoSnapshot, tag: &str, can: &Can, actions: &mut Actions) {
-    if let Some(remote) = remote::default_remote(repo.remotes.iter().map(|r| r.name.as_str())) {
+    if let Some(remote) = remote::tag_remote(repo) {
         can_item(
             ui,
             &format!("Push to {remote}"),
@@ -602,6 +602,7 @@ fn tag_menu(ui: &mut Ui, repo: &RepoSnapshot, tag: &str, can: &Can, actions: &mu
             Action::Remote(RemoteOp::PushTag {
                 remote: remote.to_owned(),
                 tag: tag.to_owned(),
+                created: false,
             }),
         );
     }

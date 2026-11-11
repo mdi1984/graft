@@ -1159,6 +1159,7 @@ impl GraftApp {
                     let folders = !self.settings.review_folders;
                     self.change_settings(|s| s.review_folders = folders);
                 }
+                AppAction::PushNewTags(push) => self.change_settings(|s| s.push_new_tags = push),
                 AppAction::InProject { project, actions } if project < self.projects.len() => {
                     self.activate(Some(project));
                     for action in actions {
