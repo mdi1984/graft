@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::fonts::{FontChoice, Fonts};
 use crate::keys::Keymap;
+use crate::sidebar_order::SidebarOrder;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -37,6 +38,8 @@ pub struct Settings {
     pub zoom: u32,
     /// "Push to <remote>" in the New tag dialog, as last chosen.
     pub push_new_tags: bool,
+    /// The order of WORKTREES, BRANCHES, REMOTES and TAGS in the sidebar.
+    pub sidebar_order: SidebarOrder,
 }
 
 impl Default for Settings {
@@ -56,6 +59,7 @@ impl Default for Settings {
             code_font: FontChoice::default(),
             zoom: 100,
             push_new_tags: false,
+            sidebar_order: SidebarOrder::default(),
         }
     }
 }
@@ -171,6 +175,10 @@ mod tests {
         assert!(
             !old.push_new_tags,
             "the New tag dialog starts without pushing"
+        );
+        assert!(
+            old.sidebar_order.is_default(),
+            "the sidebar keeps its usual order"
         );
     }
 }

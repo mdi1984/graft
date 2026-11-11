@@ -35,6 +35,7 @@ pub mod widgets;
 pub mod window_frame;
 
 use crate::project::Action;
+use crate::sidebar_order::SidebarOrder;
 
 /// Something the user did that the app handles, not the shown project.
 #[derive(Clone, Debug)]
@@ -54,6 +55,8 @@ pub enum AppAction {
     /// The New tag dialog's "Push to <remote>" was ticked or cleared; the
     /// next one starts that way (an app setting).
     PushNewTags(bool),
+    /// The sidebar's sections were moved (an app setting).
+    SidebarOrder(SidebarOrder),
 }
 
 /// What the user did this frame.

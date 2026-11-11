@@ -12,6 +12,7 @@ mod native;
 mod project;
 mod running;
 mod settings;
+mod sidebar_order;
 mod single;
 #[cfg(test)]
 mod testing;

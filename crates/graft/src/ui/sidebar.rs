@@ -1,7 +1,10 @@
-//! Left sidebar: WORKSPACE and WORKTREES, the collapsible BRANCHES, REMOTES
-//! and TAGS, and STASHES at the bottom.
+//! Left sidebar: WORKSPACE at the top, the foldable WORKTREES, BRANCHES,
+//! REMOTES and TAGS in the order the user put them in, and STASHES at the
+//! bottom.
 
-use egui::{Id, Rect, Response, ScrollArea, Sense, Stroke, Ui, pos2, vec2};
+use egui::{
+    CursorIcon, DragAndDrop, Id, Rect, Response, ScrollArea, Sense, Stroke, Ui, pos2, vec2,
+};
 use graft_core::console::redact;
 use graft_core::paths::same_path;
 use graft_core::{Branch, RemoteBranch, RepoSnapshot, Upstream, Worktree, paths, remote};
@@ -16,9 +19,10 @@ use super::widgets::{
 use crate::project::{
     Action, CheckedOut, Confirm, DialogKind, Project, RemoteOp, Tab, WorkspaceView, merge_dialog,
 };
+use crate::sidebar_order::{Section, SidebarOrder};
 use crate::text::plural;
 use crate::theme::{self, color};
-use crate::ui::Actions;
+use crate::ui::{Actions, AppAction};
 
 const SECTION_GAP: f32 = 14.0;
 const PAD_X: f32 = 8.0;
@@ -36,7 +40,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
 
-            heading(ui, "WORKSPACE", None);
+            heading(ui, "WORKSPACE");
             let in_workspace = nav.tab == Tab::Workspace;
             let dirty = current.map_or(0, Worktree::dirty);
             let dirty_badge =
@@ -60,23 +64,62 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
             }
             ui.add_space(SECTION_GAP);
 
+            let order = project.settings().sidebar_order;
+            let mut placed = Vec::with_capacity(order.sections().len());
+            for section in order.sections() {
+                let top = ui.cursor().top();
+                let heading = list_section(ui, project, repo, section, actions);
+                placed.push(Placed {
+                    top,
+                    bottom: ui.cursor().top(),
+                });
+                heading.dnd_set_drag_payload(section);
+                heading.context_menu(|ui| order_menu(ui, order, section, actions));
+            }
+            drop_section(ui, order, &placed, actions);
+
+            if footer_row(ui, "STASHES", &repo.stash_count.to_string()).clicked() {
+                actions.push(Action::SetTab(Tab::Stashes));
+            }
+        });
+}
+
+/// One of the sections the user can move: its heading (to click, drag or
+/// right-click) and, when open, its rows.
+fn list_section(
+    ui: &mut Ui,
+    project: &Project,
+    repo: &RepoSnapshot,
+    section: Section,
+    actions: &mut Actions,
+) -> Response {
+    let nav = &project.nav;
+    let current = project.worktree();
+    match section {
+        Section::Worktrees => {
             let new_worktree = can::new_worktree(project);
-            if let Some(add) = heading(ui, "WORKTREES", Some(&new_worktree))
-                && add.clicked()
-            {
+            let count = repo.worktrees.len();
+            let heading = collapsible(ui, section, count, true, Some(&new_worktree));
+            if heading.plus_clicked {
                 actions.push(Action::NewWorktree(None));
             }
-            for wt in &repo.worktrees {
-                let selected = same_path(&wt.path, &nav.worktree);
-                let response = worktree_row(ui, wt, selected);
-                if response.clicked() && !wt.prunable {
-                    actions.push(Action::OpenWorktree(wt.path.clone()));
+            if heading.open {
+                for wt in &repo.worktrees {
+                    let selected = same_path(&wt.path, &nav.worktree);
+                    let response = worktree_row(ui, wt, selected);
+                    if response.clicked() && !wt.prunable {
+                        actions.push(Action::OpenWorktree(wt.path.clone()));
+                    }
+                    response
+                        .context_menu(|ui| worktree_menu(ui, wt, &can::act(project, ""), actions));
                 }
-                response.context_menu(|ui| worktree_menu(ui, wt, &can::act(project, ""), actions));
+                ui.add_space(SECTION_GAP);
             }
-            ui.add_space(SECTION_GAP);
-
-            if collapsible(ui, "BRANCHES", repo.branches.len(), true) {
+            heading.response
+        }
+        Section::Branches => {
+            let heading = collapsible(ui, section, repo.branches.len(), true, None);
+            if heading.open {
                 let head = current.and_then(|wt| wt.branch.as_deref());
                 let branches: Vec<&Branch> = repo.branches.iter().collect();
                 let is_head = |b: &Branch| head == Some(b.name.as_str());
@@ -102,13 +145,19 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
                 }
                 ui.add_space(SECTION_GAP);
             }
-
-            if collapsible(ui, "REMOTES", repo.remotes.len(), false) {
+            heading.response
+        }
+        Section::Remotes => {
+            let heading = collapsible(ui, section, repo.remotes.len(), false, None);
+            if heading.open {
                 remotes(ui, project, repo, actions);
                 ui.add_space(SECTION_GAP);
             }
-
-            if collapsible(ui, "TAGS", repo.tags.len(), false) {
+            heading.response
+        }
+        Section::Tags => {
+            let heading = collapsible(ui, section, repo.tags.len(), false, None);
+            if heading.open {
                 for tag in repo.tags.iter().rev() {
                     let response =
                         simple_row(ui, Icon::Tag, &tag.name, color::tag(), color::text(), 20.0);
@@ -124,11 +173,83 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
                 }
                 ui.add_space(SECTION_GAP);
             }
+            heading.response
+        }
+    }
+}
 
-            if footer_row(ui, "STASHES", &repo.stash_count.to_string()).clicked() {
-                actions.push(Action::SetTab(Tab::Stashes));
-            }
-        });
+/// Where a section was drawn, in screen points.
+struct Placed {
+    top: f32,
+    bottom: f32,
+}
+
+/// While a section heading is dragged, a line shows where it would land,
+/// and letting go there moves it. Letting go outside the sidebar does nothing.
+fn drop_section(ui: &Ui, order: SidebarOrder, placed: &[Placed], actions: &mut Actions) {
+    let Some(dragged) = DragAndDrop::payload::<Section>(ui.ctx()) else {
+        return;
+    };
+    ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+    let (Some(pointer), Some(last)) = (ui.ctx().pointer_latest_pos(), placed.last()) else {
+        return;
+    };
+    let area = ui.clip_rect();
+    if !area.contains(pointer) {
+        return;
+    }
+    // Above a section's middle drops before it, below drops after it.
+    let gap = placed
+        .iter()
+        .filter(|p| (p.top + p.bottom) / 2.0 < pointer.y)
+        .count();
+    let y = placed.get(gap).map_or(last.bottom, |p| p.top) - 1.0;
+    ui.painter().hline(
+        area.x_range().shrink(4.0),
+        y,
+        Stroke::new(2.0, color::accent()),
+    );
+    if ui.input(|i| i.pointer.any_released()) {
+        DragAndDrop::clear_payload(ui.ctx());
+        let moved = order.moved_to(*dragged, gap);
+        if moved != order {
+            actions.app(AppAction::SidebarOrder(moved));
+        }
+    }
+}
+
+/// A section heading's right-click menu: move it, or put all back.
+fn order_menu(ui: &mut Ui, order: SidebarOrder, section: Section, actions: &mut Actions) {
+    let mut item = |ui: &mut Ui, label: &str, can: bool, why_not: &str, moved: SidebarOrder| {
+        if ui
+            .add_enabled(can, egui::Button::new(label))
+            .on_disabled_hover_text(why_not)
+            .clicked()
+        {
+            actions.app(AppAction::SidebarOrder(moved));
+            ui.close();
+        }
+    };
+    let up = order.can_move_up(section);
+    item(
+        ui,
+        "Move up",
+        up,
+        "Already at the top",
+        order.moved_up(section),
+    );
+    let down = order.can_move_down(section);
+    item(
+        ui,
+        "Move down",
+        down,
+        "Already at the bottom",
+        order.moved_down(section),
+    );
+    ui.separator();
+    let reset = !order.is_default();
+    let why_not = "Already in the usual order";
+    item(ui, "Reset order", reset, why_not, SidebarOrder::default());
 }
 
 /// Where [`grouped`] is in the folder tree.
@@ -205,30 +326,37 @@ fn row(ui: &mut Ui, height: f32) -> (Rect, Response) {
     ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click())
 }
 
-/// A section heading, with a "+" button when `plus` says what it adds (or
-/// why it can't now); the button's response takes clicks only when it can.
-fn heading(ui: &mut Ui, title: &str, plus: Option<&Can>) -> Option<Response> {
+/// A section heading that does nothing (WORKSPACE).
+fn heading(ui: &mut Ui, title: &str) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
     section_heading(ui, ui.painter(), rect.left() + 6.0, rect.center().y, title);
-    let can = plus?;
-    let button =
-        Rect::from_center_size(pos2(rect.right() - 12.0, rect.center().y), vec2(22.0, 22.0));
-    let sense = if can.ok {
-        Sense::click()
-    } else {
-        Sense::hover()
-    };
-    let response = ui.interact(button, ui.scope_id().with(title), sense);
-    widgets::paint_icon_button_when(ui, button, &response, Icon::Plus, can.ok);
-    Some(response.on_hover_text(&can.hint))
 }
 
-/// A heading that folds its section; the open state survives restarts.
-fn collapsible(ui: &mut Ui, title: &str, count: usize, default_open: bool) -> bool {
+/// What [`collapsible`] drew and the user did.
+struct Heading {
+    /// The heading row: a click folds, a drag moves, a right-click has a menu.
+    response: Response,
+    /// The section shows its rows.
+    open: bool,
+    /// The "+" button was clicked while it could act.
+    plus_clicked: bool,
+}
+
+/// A heading that folds its section; the open state survives restarts. It
+/// has a "+" button when `plus` says what it adds (or why it can't now).
+fn collapsible(
+    ui: &mut Ui,
+    section: Section,
+    count: usize,
+    default_open: bool,
+    plus: Option<&Can>,
+) -> Heading {
+    let title = section.title();
     let id = Id::unique(("sidebar-section", title));
     let mut open = ui.data_mut(|d| *d.get_persisted_mut_or(id, default_open));
-    let (rect, response) = row(ui, 22.0);
-    if response.hovered() {
+    let size = vec2(ui.available_width(), 22.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
+    if response.hovered() || response.dragged() {
         ui.painter().rect_filled(rect, 4, color::hover_row_bg());
     }
     let y = rect.center().y;
@@ -240,20 +368,29 @@ fn collapsible(ui: &mut Ui, title: &str, count: usize, default_open: bool) -> bo
     let icon_rect = Rect::from_center_size(pos2(rect.left() + 10.0, y), vec2(10.0, 10.0));
     super::icons::paint(ui.painter(), icon_rect, chevron, color::text_faint());
     section_heading(ui, ui.painter(), rect.left() + 20.0, y, title);
+    let mut count_right = rect.right() - PAD_X;
+    let mut plus_clicked = false;
+    if let Some(can) = plus {
+        let button = Rect::from_center_size(pos2(rect.right() - 12.0, y), vec2(22.0, 22.0));
+        // It takes clicks even when it can't act, so they don't fold the section.
+        let add = ui.interact(button, id.with("plus"), Sense::click());
+        widgets::paint_icon_button_when(ui, button, &add, Icon::Plus, can.ok);
+        plus_clicked = add.on_hover_text(&can.hint).clicked() && can.ok;
+        count_right = button.left() - 2.0;
+    }
     let count = ui
         .painter()
         .layout_no_wrap(count.to_string(), theme::small(), color::text_faint());
-    paint_galley_left(
-        ui.painter(),
-        rect.right() - PAD_X - count.size().x,
-        y,
-        count,
-    );
+    paint_galley_left(ui.painter(), count_right - count.size().x, y, count);
     if response.clicked() {
         open = !open;
         ui.data_mut(|d| d.insert_persisted(id, open));
     }
-    open
+    Heading {
+        response,
+        open,
+        plus_clicked,
+    }
 }
 
 fn nav_row(ui: &mut Ui, icon: Icon, label: &str, selected: bool, badge: Option<Badge>) -> Response {
