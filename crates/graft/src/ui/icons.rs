@@ -30,6 +30,8 @@ pub enum Icon {
     ChevronLeft,
     Merge,
     Settings,
+    /// Two four-pointed stars: written by AI.
+    Sparkle,
 }
 
 pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
@@ -119,6 +121,21 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
                     (12.0 + 9.5 * c, 12.0 + 9.5 * s),
                 ]);
             }
+        }
+        Icon::Sparkle => {
+            // Points on the axes, the sides drawn in towards the middle.
+            let star = |cx: f32, cy: f32, r: f32| {
+                let pts: Vec<Pos2> = (0..=8)
+                    .map(|k| {
+                        let a = k as f32 * std::f32::consts::FRAC_PI_4;
+                        let d = if k % 2 == 0 { r } else { r * 0.28 };
+                        p(cx + d * a.cos(), cy + d * a.sin())
+                    })
+                    .collect();
+                painter.add(Shape::line(pts, stroke));
+            };
+            star(10.0, 14.0, 8.0);
+            star(18.5, 5.5, 3.5);
         }
         Icon::Close => {
             line(&[(6.0, 6.0), (18.0, 18.0)]);

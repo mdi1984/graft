@@ -40,6 +40,11 @@ pub struct Settings {
     pub push_new_tags: bool,
     /// The order of WORKTREES, BRANCHES, REMOTES and TAGS in the sidebar.
     pub sidebar_order: SidebarOrder,
+    /// The commit box offers to write the message with `ai_command`.
+    pub ai_messages: bool,
+    /// Gets instructions and the staged diff on stdin, answers with a
+    /// commit message on stdout.
+    pub ai_command: String,
 }
 
 impl Default for Settings {
@@ -60,6 +65,8 @@ impl Default for Settings {
             zoom: 100,
             push_new_tags: false,
             sidebar_order: SidebarOrder::default(),
+            ai_messages: false,
+            ai_command: crate::ai_message::DEFAULT_COMMAND.to_owned(),
         }
     }
 }
@@ -180,5 +187,7 @@ mod tests {
             old.sidebar_order.is_default(),
             "the sidebar keeps its usual order"
         );
+        assert!(!old.ai_messages, "AI commit messages start off");
+        assert_eq!(old.ai_command, crate::ai_message::DEFAULT_COMMAND);
     }
 }

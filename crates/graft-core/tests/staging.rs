@@ -457,6 +457,48 @@ fn amend_message_of_a_signed_commit_has_no_signature_lines() {
     );
 }
 
+/// Write with AI gets the staged patch and the branch's recent summaries
+/// (newest first, without merges), also with log.showSignature on; a
+/// repository without commits has none.
+#[test]
+fn staged_diff_and_recent_summaries_for_ai_messages() {
+    let tmp = tempfile::tempdir().unwrap();
+    let empty = common::init(&tmp.path().join("empty"));
+    assert!(
+        ops::recent_summaries(&common::git(&empty), 10)
+            .unwrap()
+            .is_empty()
+    );
+
+    let (_tmp, git) = repo();
+    let dir = git.cwd().to_path_buf();
+    sh(&dir, &["config", "log.showSignature", "true"]);
+    common::commit(&dir, "b.txt", "b\n", "feat(ui): add b");
+    sh(&dir, &["checkout", "-q", "-b", "side"]);
+    common::commit(&dir, "c.txt", "c\n", "fix: c");
+    sh(&dir, &["checkout", "-q", "main"]);
+    sh(
+        &dir,
+        &["merge", "-q", "--no-ff", "-m", "Merge side", "side"],
+    );
+    // Made in the same second, so git may list b and c either way round.
+    let mut recent = ops::recent_summaries(&git, 10).unwrap();
+    assert_eq!(recent.last().map(String::as_str), Some("init"));
+    recent.sort();
+    assert_eq!(recent, ["feat(ui): add b", "fix: c", "init"]);
+    assert_eq!(ops::recent_summaries(&git, 1).unwrap().len(), 1);
+
+    std::fs::write(dir.join("d.txt"), "d\n").unwrap();
+    std::fs::write(dir.join("e.txt"), "not staged\n").unwrap();
+    ops::stage_paths(&git, &["d.txt".into()]).unwrap();
+    let diff = ops::staged_diff(&git).unwrap();
+    assert!(
+        diff.contains("+++ b/d.txt") && diff.contains("+d"),
+        "{diff}"
+    );
+    assert!(!diff.contains("e.txt"), "{diff}");
+}
+
 /// A file added with intent (`git add -N`) has no content in the index: it
 /// is a new file. Discarding some of its lines keeps the rest, discarding
 /// all of it moves it to the Recycle Bin and out of the index, never

@@ -107,8 +107,8 @@ mod win {
     use std::time::Duration;
 
     use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_ALREADY_EXISTS, ERROR_PIPE_CONNECTED, GetLastError, HANDLE,
-        INVALID_HANDLE_VALUE, LocalFree,
+        CloseHandle, ERROR_ALREADY_EXISTS, ERROR_NO_DATA, ERROR_PIPE_CONNECTED, GetLastError,
+        HANDLE, INVALID_HANDLE_VALUE, LocalFree,
     };
     use windows_sys::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -329,10 +329,7 @@ mod win {
             first = false;
             // SAFETY: a fresh handle, owned and closed by `pipe` from here on.
             let pipe = unsafe { File::from_raw_handle(handle as _) };
-            // SAFETY: the handle is valid; no overlapped I/O.
-            let connected = unsafe { ConnectNamedPipe(handle, null_mut()) } != 0
-                || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED;
-            if connected {
+            if accept(handle) {
                 let on_message = Arc::clone(&on_message);
                 std::thread::spawn(move || {
                     let mut message = Vec::new();
@@ -341,6 +338,17 @@ mod win {
                     }
                 });
             }
+        }
+    }
+
+    /// Wait for a sender on the pipe instance `handle`. One that already
+    /// wrote its message and left counts too: Windows says "no data" then,
+    /// but the message can still be read.
+    fn accept(handle: HANDLE) -> bool {
+        // SAFETY: the handle is valid; no overlapped I/O.
+        unsafe {
+            ConnectNamedPipe(handle, null_mut()) != 0
+                || matches!(GetLastError(), ERROR_PIPE_CONNECTED | ERROR_NO_DATA)
         }
     }
 
@@ -367,6 +375,37 @@ mod win {
             assert_eq!(rx.recv_timeout(timeout).unwrap(), b"C:\\one\n");
             send(&name, b"").unwrap();
             assert_eq!(rx.recv_timeout(timeout).unwrap(), b"");
+        }
+
+        /// A sender that wrote and left before Graft took the connection
+        /// still gets its message through.
+        #[test]
+        fn a_sender_that_already_left_is_heard() {
+            let name = format!(r"\\.\pipe\graft-test-left-{}", std::process::id());
+            let wide_name = wide(&name);
+            // SAFETY: a valid name; the handle is owned by `pipe` below.
+            let handle = unsafe {
+                CreateNamedPipeW(
+                    wide_name.as_ptr(),
+                    PIPE_ACCESS_INBOUND,
+                    PIPE_TYPE_BYTE | PIPE_WAIT,
+                    1,
+                    0,
+                    64 * 1024,
+                    0,
+                    null(),
+                )
+            };
+            assert_ne!(handle, INVALID_HANDLE_VALUE);
+            // SAFETY: a fresh handle, closed by `pipe`.
+            let mut pipe = unsafe { File::from_raw_handle(handle as _) };
+            let mut sender = std::fs::OpenOptions::new().write(true).open(&name).unwrap();
+            sender.write_all(b"C:\\left\n").unwrap();
+            drop(sender);
+            assert!(accept(handle));
+            let mut message = Vec::new();
+            pipe.read_to_end(&mut message).unwrap();
+            assert_eq!(message, b"C:\\left\n");
         }
 
         #[test]

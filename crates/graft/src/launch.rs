@@ -173,6 +173,196 @@ fn run_ide(path: &Path, command: &str) -> bool {
     cmd.status().is_ok_and(|s| s.success())
 }
 
+/// Run a command from the settings (a program with optional arguments, as
+/// for the IDE) in `dir`, with `input` on its stdin; its stdout. Fails when
+/// it cannot start, exits with an error (saying what it printed), or takes
+/// longer than `timeout` (it is stopped then).
+pub fn run_with_input(
+    command: &str,
+    dir: &Path,
+    input: String,
+    timeout: std::time::Duration,
+) -> anyhow::Result<String> {
+    use std::io::{Read, Write};
+    use std::process::Stdio;
+
+    use anyhow::{Context, bail};
+
+    let words = split_command(command);
+    let Some((name, args)) = words.split_first() else {
+        bail!("No command is set");
+    };
+    let program = find_program(name).with_context(|| format!("{name} was not found"))?;
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if dir.is_dir() {
+        cmd.current_dir(dir);
+    }
+    // It starts paused and runs only once it is in the job, so nothing it
+    // starts can get out of the job.
+    Job::start_paused(&mut cmd);
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("Could not start {name}"))?;
+    // A .cmd launcher's program runs under cmd.exe: the job holds both.
+    let job = match Job::holding(&child) {
+        Ok(job) => job,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("Could not start {name}: {e}");
+        }
+    };
+    // Each pipe on its own thread, so a full one can't block the others.
+    let mut stdin = child.stdin.take().expect("piped");
+    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let read = |mut pipe: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            String::from_utf8_lossy(&bytes).into_owned()
+        })
+    };
+    let stdout = read(Box::new(child.stdout.take().expect("piped")));
+    let stderr = read(Box::new(child.stderr.take().expect("piped")));
+    let start = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if start.elapsed() > timeout {
+            // Closing the job stops everything the command started too.
+            drop(job);
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("{name} took longer than {} seconds", timeout.as_secs());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    // Whatever it left running goes too, so it can't hold the pipes open.
+    drop(job);
+    // A command that exits without reading all of stdin is fine.
+    let _ = writer.join();
+    let stdout = stdout.join().unwrap_or_default();
+    let stderr = stderr.join().unwrap_or_default();
+    if !status.success() {
+        let said = [stderr.trim(), stdout.trim()]
+            .into_iter()
+            .find(|s| !s.is_empty())
+            .unwrap_or("no output");
+        bail!("{name} failed ({status}): {said}");
+    }
+    Ok(stdout)
+}
+
+/// A Windows job object holding a process and every process it starts;
+/// they all stop when it is dropped. Nothing outside Windows.
+struct Job(#[cfg(windows)] windows_sys::Win32::Foundation::HANDLE);
+
+impl Job {
+    /// Make `cmd` start paused; `holding` lets it run.
+    fn start_paused(cmd: &mut Command) {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+
+            use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
+            cmd.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
+        }
+        #[cfg(not(windows))]
+        let _ = cmd;
+    }
+
+    /// Put the paused `child` in a new job, then let it run.
+    #[cfg(windows)]
+    fn holding(child: &std::process::Child) -> io::Result<Self> {
+        use std::os::windows::io::AsRawHandle;
+
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject,
+        };
+        // SAFETY: plain Win32 calls on a handle this function owns (closed
+        // by `Drop`) and on the child's handle, which `child` keeps open.
+        unsafe {
+            let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if handle.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let job = Job(handle);
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let set = SetInformationJobObject(
+                job.0,
+                JobObjectExtendedLimitInformation,
+                (&raw const info).cast(),
+                std::mem::size_of_val(&info) as u32,
+            );
+            if set == 0 || AssignProcessToJobObject(job.0, child.as_raw_handle()) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            resume(child.id())?;
+            Ok(job)
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn holding(_: &std::process::Child) -> io::Result<Self> {
+        Ok(Job())
+    }
+}
+
+/// Let the threads of the paused process `pid` run (it has one).
+#[cfg(windows)]
+fn resume(pid: u32) -> io::Result<()> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+    // SAFETY: plain Win32 calls; each handle opened here is closed here.
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        let mut entry: THREADENTRY32 = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+        let mut resumed = false;
+        let mut more = Thread32First(snapshot, &mut entry) != 0;
+        while more {
+            if entry.th32OwnerProcessID == pid {
+                let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                if !thread.is_null() {
+                    resumed |= ResumeThread(thread) != u32::MAX;
+                    CloseHandle(thread);
+                }
+            }
+            more = Thread32Next(snapshot, &mut entry) != 0;
+        }
+        CloseHandle(snapshot);
+        if resumed {
+            Ok(())
+        } else {
+            Err(io::Error::other("its thread could not be started"))
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Job {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from CreateJobObjectW and is closed once.
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
 fn not_a_folder() -> io::Error {
     io::Error::new(io::ErrorKind::NotFound, "not a folder")
 }
@@ -243,6 +433,66 @@ mod tests {
             [r"C:\Program Files\JetBrains\rider64.exe", "--wait"]
         );
         assert!(split_command("   ").is_empty());
+        // The AI command's tool list stays one argument.
+        assert_eq!(
+            split_command(crate::ai_message::DEFAULT_COMMAND),
+            [
+                "claude",
+                "-p",
+                "--model",
+                "haiku",
+                "--allowedTools",
+                "Read Grep Glob Bash(git diff:*) Bash(git log:*) Bash(git show:*)"
+            ]
+        );
+    }
+
+    /// A command that takes too long is stopped with everything it started:
+    /// a .cmd launcher's nested process would otherwise write the marker.
+    #[cfg(windows)]
+    #[test]
+    fn a_slow_command_is_stopped_with_its_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("marker");
+        let script = dir.path().join("slow.cmd");
+        std::fs::write(
+            &script,
+            "@cmd /c \"ping -n 4 127.0.0.1 >nul & echo done> \"%~dp0marker\"\"\r\n",
+        )
+        .unwrap();
+        let start = std::time::Instant::now();
+        let command = format!("\"{}\"", script.display());
+        let timeout = std::time::Duration::from_secs(1);
+        let err = run_with_input(&command, dir.path(), String::new(), timeout).unwrap_err();
+        assert!(err.to_string().contains("took longer"), "{err:#}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(3));
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        assert!(!marker.exists(), "a child kept running");
+    }
+
+    /// A child started at once by a command that then exits stops with it,
+    /// so it can't hold the output open or keep running.
+    #[cfg(windows)]
+    #[test]
+    fn a_child_left_behind_is_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("marker");
+        let script = dir.path().join("quick.cmd");
+        std::fs::write(
+            &script,
+            "@start /b cmd /c \"ping -n 3 127.0.0.1 >nul & echo done> \"%~dp0marker\"\"
+@echo hi
+",
+        )
+        .unwrap();
+        let start = std::time::Instant::now();
+        let command = format!("\"{}\"", script.display());
+        let timeout = std::time::Duration::from_secs(20);
+        let out = run_with_input(&command, dir.path(), String::new(), timeout).unwrap();
+        assert_eq!(out.trim(), "hi");
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        assert!(!marker.exists(), "a child kept running");
     }
 
     #[test]

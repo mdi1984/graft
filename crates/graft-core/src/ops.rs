@@ -251,6 +251,22 @@ pub fn last_commit_message(git: &Git) -> Result<Option<String>> {
     Ok(Some(text.trim_end().to_owned()))
 }
 
+/// The summaries of the last `count` commits on HEAD (merges left out),
+/// newest first; none before the first commit.
+pub fn recent_summaries(git: &Git, count: usize) -> Result<Vec<String>> {
+    if !has_head(git)? {
+        return Ok(Vec::new());
+    }
+    let max = format!("--max-count={count}");
+    let text = git.read(["log", max.as_str(), "--no-merges", "--format=%s", "HEAD"])?;
+    Ok(text.lines().map(str::to_owned).collect())
+}
+
+/// What is staged, as a patch: what the next commit records.
+pub fn staged_diff(git: &Git) -> Result<String> {
+    git.read(["diff", "--cached", "--no-ext-diff", "--no-color"])
+}
+
 /// Commit what is staged. Hooks run as usual. Returns git's one-line summary.
 pub fn commit(git: &Git, message: &str, amend: bool) -> Result<String> {
     // Not `strip`: lines starting with '#' (Markdown headings, "#42 Fix
