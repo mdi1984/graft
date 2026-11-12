@@ -605,6 +605,14 @@ pub fn paint_icon_button_when(ui: &Ui, rect: Rect, response: &Response, icon: Ic
     icons::paint(painter, icon_rect, icon, fg);
 }
 
+/// Escape was pressed in `field` this frame. egui drops the focus as soon
+/// as it sees Escape, so the field may just have lost it. The key is taken:
+/// nothing drawn later (a diff that closes on Escape) reacts to it too.
+pub fn escape_pressed_in(ui: &Ui, field: &Response) -> bool {
+    (field.has_focus() || field.lost_focus())
+        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+}
+
 /// A single-line text input with Graft's frame. Returns the text edit's response.
 pub fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Response {
     framed_field(ui, text, hint, width, false).0
@@ -794,6 +802,45 @@ pub fn color_swatches(ui: &mut Ui, current: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Escape in a focused field reaches the field, and nothing drawn after
+    /// it: a diff below would otherwise close at the same time.
+    #[test]
+    fn escape_in_a_field_is_taken_by_it() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::unique("field");
+        let frame = |events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 400.0))),
+                events,
+                ..Default::default()
+            };
+            let mut seen = (false, false);
+            let output = ctx.run_ui(input, |ui| {
+                let mut text = "login".to_owned();
+                let field = ui.add(egui::TextEdit::singleline(&mut text).id(id));
+                if !field.has_focus() {
+                    field.request_focus();
+                }
+                let escape = escape_pressed_in(ui, &field);
+                // What a diff drawn later would see.
+                let later = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                seen = (escape, later);
+            });
+            output.drop_without_applying_deltas();
+            seen
+        };
+        frame(Vec::new());
+        assert_eq!(frame(Vec::new()), (false, false));
+        let escape = egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        assert_eq!(frame(vec![escape]), (true, false));
+    }
 
     /// Fields are exactly as wide as asked, border included: a wider one
     /// made the sidebar (a panel that fits its content) grow every frame.

@@ -3,7 +3,7 @@
 //! and STASHES at the bottom.
 
 use egui::{
-    CursorIcon, DragAndDrop, Id, Key, Rect, Response, ScrollArea, Sense, Stroke, Ui, pos2, vec2,
+    CursorIcon, DragAndDrop, Id, Rect, Response, ScrollArea, Sense, Stroke, Ui, pos2, vec2,
 };
 use graft_core::console::redact;
 use graft_core::paths::same_path;
@@ -13,8 +13,8 @@ use super::branch_menu::{self, Open, can_item, checkout_color};
 use super::can::{self, Can};
 use super::icons::Icon;
 use super::widgets::{
-    self, Badge, ICON_SIZE, clearable_field, elided, elided_path, paint_badges_right,
-    paint_galley_left, paint_icon, paint_row_bg, section_heading,
+    self, Badge, ICON_SIZE, clearable_field, elided, elided_path, escape_pressed_in,
+    paint_badges_right, paint_galley_left, paint_icon, paint_row_bg, section_heading,
 };
 use crate::project::filter::{self, ListFilter};
 use crate::project::{
@@ -101,9 +101,7 @@ fn filter_row(ui: &mut Ui, project: &Project, actions: &mut Actions) {
     if field.changed() {
         actions.push(Action::SetSidebarFilter(text.clone()));
     }
-    // Escape takes the focus away, so the field may just have lost it.
-    let escape =
-        (field.has_focus() || field.lost_focus()) && ui.input(|i| i.key_pressed(Key::Escape));
+    let escape = escape_pressed_in(ui, &field);
     if (escape || clear) && !text.is_empty() {
         actions.push(Action::SetSidebarFilter(String::new()));
     }
@@ -201,7 +199,7 @@ fn list_section(
             let count = filter::count(shown, repo.remotes.len());
             let heading = collapsible(ui, section, &count, false, None);
             if heading.open {
-                no_match(ui, shown == 0 && filter.is_on());
+                no_match(ui, shown == 0 && filter.is_on() && !repo.remotes.is_empty());
                 remotes(ui, project, repo, &filter, actions);
                 ui.add_space(SECTION_GAP);
             }
