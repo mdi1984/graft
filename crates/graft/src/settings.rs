@@ -188,6 +188,6 @@ mod tests {
             "the sidebar keeps its usual order"
         );
         assert!(!old.ai_messages, "AI commit messages start off");
-        assert_eq!(old.ai_command, "claude -p --model haiku");
+        assert_eq!(old.ai_command, crate::ai_message::DEFAULT_COMMAND);
     }
 }

@@ -775,8 +775,9 @@ fn ai_section(ui: &mut Ui, form: &mut SettingsForm, view: &mut View) {
     });
     hint(
         ui,
-        "For example claude -p --model haiku. It must read the prompt from its input and \
-         print only the message.",
+        "It must read the prompt from its input and print only the message. The default \
+         also lets Claude read files and run read-only git commands, so it can look beyond \
+         a long diff; it cannot change anything.",
     );
 }
 

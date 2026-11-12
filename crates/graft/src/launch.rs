@@ -313,6 +313,18 @@ mod tests {
             [r"C:\Program Files\JetBrains\rider64.exe", "--wait"]
         );
         assert!(split_command("   ").is_empty());
+        // The AI command's tool list stays one argument.
+        assert_eq!(
+            split_command(crate::ai_message::DEFAULT_COMMAND),
+            [
+                "claude",
+                "-p",
+                "--model",
+                "haiku",
+                "--allowedTools",
+                "Read Grep Glob Bash(git diff:*) Bash(git log:*) Bash(git show:*)"
+            ]
+        );
     }
 
     #[test]

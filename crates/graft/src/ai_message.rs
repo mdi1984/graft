@@ -1,8 +1,12 @@
-//! Commit messages written by an AI command from the settings (by default
-//! `claude -p --model haiku`): it gets instructions, the branch's recent
-//! commit summaries (so it follows the repository's style, such as
-//! Conventional Commits) and the staged diff on stdin, and answers with the
-//! message on stdout.
+//! Commit messages written by an AI command from the settings: it gets
+//! instructions, the branch's recent commit summaries (so it follows the
+//! repository's style, such as Conventional Commits) and the staged diff on
+//! stdin, and answers with the message on stdout.
+//!
+//! The command runs in the worktree. Any command that reads a prompt works;
+//! an agent such as Claude Code may also look around itself: run git or
+//! read files when the diff was cut or it needs more context. The default
+//! command lets Claude do only that, nothing that changes the repository.
 //!
 //! It runs programs and waits for them: call it from background jobs only.
 
@@ -11,8 +15,10 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 
-/// The command Settings starts with.
-pub const DEFAULT_COMMAND: &str = "claude -p --model haiku";
+/// The command Settings starts with: Claude Code's Haiku, allowed only to
+/// read files and run read-only git commands.
+pub const DEFAULT_COMMAND: &str = "claude -p --model haiku --allowedTools \
+     \"Read Grep Glob Bash(git diff:*) Bash(git log:*) Bash(git show:*)\"";
 
 /// How long the command may take before Graft stops it.
 const TIMEOUT: Duration = Duration::from_secs(120);
@@ -27,7 +33,10 @@ const INSTRUCTIONS: &str = "Write a git commit message for the staged changes be
 First line: a summary in the imperative mood, at most 72 characters.\n\
 Then, only if it helps, a blank line and a short body that says what changed and why, \
 wrapped at 72 characters.\n\
-Reply with the commit message only: no quotes, no code fences, no explanations.\n";
+Reply with the commit message only: no quotes, no code fences, no explanations.\n\
+You run in the repository's working folder. If you can, and the diff below is cut or \
+you need more context, read files or run git diff --cached yourself. Do not change \
+anything.\n";
 
 /// A commit message, split as the commit box shows it.
 #[derive(Debug, PartialEq, Eq)]
@@ -65,7 +74,7 @@ fn prompt(diff: &str, recent: &[String]) -> String {
         end -= 1;
     }
     let cut = if end < diff.len() {
-        "\n[The diff is longer; the rest is left out.]\n"
+        "\n[The diff is longer; the rest is left out. git diff --cached shows all of it.]\n"
     } else {
         ""
     };
@@ -115,8 +124,8 @@ mod tests {
         let diff = "ä".repeat(MAX_DIFF);
         let prompt = prompt(&diff, &[]);
         assert!(prompt.starts_with(INSTRUCTIONS));
-        assert!(prompt.ends_with("the rest is left out.]\n"));
-        assert!(prompt.len() < INSTRUCTIONS.len() + MAX_DIFF + 100);
+        assert!(prompt.ends_with("git diff --cached shows all of it.]\n"));
+        assert!(prompt.len() < INSTRUCTIONS.len() + MAX_DIFF + 200);
         assert!(!super::prompt("+x\n", &[]).contains("left out"));
     }
 
