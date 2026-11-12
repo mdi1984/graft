@@ -62,11 +62,10 @@ impl SlashView {
     /// the branch name or the worktree's folder name (not its whole path)
     /// contains it.
     pub fn shows(&self, branch: Option<&str>, worktree: Option<&Path>) -> bool {
-        let needle = self.filter.trim().to_lowercase();
-        let has = |text: &str| text.to_lowercase().contains(&needle);
-        needle.is_empty()
-            || branch.is_some_and(has)
-            || worktree.is_some_and(|path| has(&folder_name(path)))
+        let filter = super::filter::ListFilter::new(&self.filter);
+        !filter.is_on()
+            || branch.is_some_and(|b| filter.matches(b))
+            || worktree.is_some_and(|path| filter.matches(&folder_name(path)))
     }
 
     /// The candidates the filter shows, with their index.

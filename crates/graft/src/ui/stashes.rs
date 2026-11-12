@@ -94,15 +94,23 @@ fn list(
     actions: &mut Actions,
 ) {
     let now = time::now();
-    section_heading_row(ui, &format!("STASHES  {}", stashes.len()));
-    hint(ui, "Shared by all worktrees of this repository.");
+    let filter = project.filter();
+    let shown: Vec<&Stash> = stashes.iter().filter(|s| filter.stash(s)).collect();
+    let count = crate::project::filter::count(shown.len(), stashes.len());
+    section_heading_row(ui, &format!("STASHES  {count}"));
+    if filter.is_on() {
+        let typed = project.memory().sidebar_filter.trim();
+        hint(ui, &format!("Filtered by '{typed}' in the sidebar."));
+    } else {
+        hint(ui, "Shared by all worktrees of this repository.");
+    }
     ui.add_space(6.0);
     ScrollArea::vertical()
         .id_salt("stash-list-scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
-            for stash in stashes {
+            for stash in shown {
                 let selected = project.selected_stash == Some(stash.id);
                 let meta = format!(
                     "{} · {}",

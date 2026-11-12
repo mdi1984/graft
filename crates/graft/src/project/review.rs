@@ -610,7 +610,7 @@ mod tests {
                 (PathBuf::from("empty"), ReviewState::default()),
             ]
             .into(),
-            slashed: Vec::new(),
+            ..Default::default()
         }
         .pruned();
         assert_eq!(memory.reviews.len(), 1);

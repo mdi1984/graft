@@ -412,6 +412,7 @@ fn file_tree(
                     &format!("{viewed}/{}", inside.len()),
                     18.0 + depth as f32 * NEST,
                     marked,
+                    false,
                 );
                 if !open {
                     folded = Some(depth);

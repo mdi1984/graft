@@ -1,9 +1,9 @@
-//! Left sidebar: WORKSPACE at the top, the foldable WORKTREES, BRANCHES,
-//! REMOTES and TAGS in the order the user put them in, and STASHES at the
-//! bottom.
+//! Left sidebar: a filter for its lists, WORKSPACE, the foldable
+//! WORKTREES, BRANCHES, REMOTES and TAGS in the order the user put them in,
+//! and STASHES at the bottom.
 
 use egui::{
-    CursorIcon, DragAndDrop, Id, Rect, Response, ScrollArea, Sense, Stroke, Ui, pos2, vec2,
+    CursorIcon, DragAndDrop, Id, Key, Rect, Response, ScrollArea, Sense, Stroke, Ui, pos2, vec2,
 };
 use graft_core::console::redact;
 use graft_core::paths::same_path;
@@ -13,9 +13,10 @@ use super::branch_menu::{self, Open, can_item, checkout_color};
 use super::can::{self, Can};
 use super::icons::Icon;
 use super::widgets::{
-    self, Badge, ICON_SIZE, elided, elided_path, paint_badges_right, paint_galley_left, paint_icon,
-    paint_row_bg, section_heading,
+    self, Badge, ICON_SIZE, clearable_field, elided, elided_path, paint_badges_right,
+    paint_galley_left, paint_icon, paint_row_bg, section_heading,
 };
+use crate::project::filter::{self, ListFilter};
 use crate::project::{
     Action, CheckedOut, Confirm, DialogKind, Project, RemoteOp, Tab, WorkspaceView, merge_dialog,
 };
@@ -35,6 +36,7 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
     };
     let nav = &project.nav;
     let current = project.worktree();
+    filter_row(ui, project, actions);
     ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -81,10 +83,42 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
             }
             drop_section(ui, order, &placed, actions);
 
-            if footer_row(ui, "STASHES", &repo.stash_count.to_string()).clicked() {
+            if footer_row(ui, "STASHES", &stash_count(project, repo)).clicked() {
                 actions.push(Action::SetTab(Tab::Stashes));
             }
         });
+}
+
+/// The filter field above the lists, with a "×" inside that clears it.
+/// Escape in the field clears it too. What is typed is saved per repository.
+fn filter_row(ui: &mut Ui, project: &Project, actions: &mut Actions) {
+    let mut text = project.memory().sidebar_filter.clone();
+    let width = ui.available_width();
+    let (field, clear) = clearable_field(ui, &mut text, "Filter", width);
+    let field = field.on_hover_text(
+        "Shows only the worktrees, branches, remotes, tags and stashes that contain this",
+    );
+    if field.changed() {
+        actions.push(Action::SetSidebarFilter(text.clone()));
+    }
+    // Escape takes the focus away, so the field may just have lost it.
+    let escape =
+        (field.has_focus() || field.lost_focus()) && ui.input(|i| i.key_pressed(Key::Escape));
+    if (escape || clear) && !text.is_empty() {
+        actions.push(Action::SetSidebarFilter(String::new()));
+    }
+    ui.add_space(8.0);
+}
+
+/// The STASHES count: how many match the filter, once the list is loaded.
+fn stash_count(project: &Project, repo: &RepoSnapshot) -> String {
+    let filter = project.filter();
+    match &project.stashes {
+        Some(Ok(list)) if filter.is_on() => {
+            filter::count(list.iter().filter(|s| filter.stash(s)).count(), list.len())
+        }
+        _ => repo.stash_count.to_string(),
+    }
 }
 
 /// One of the sections the user can move: its heading (to click, drag or
@@ -98,16 +132,21 @@ fn list_section(
 ) -> Response {
     let nav = &project.nav;
     let current = project.worktree();
+    let filter = project.filter();
     match section {
         Section::Worktrees => {
             let new_worktree = can::new_worktree(project);
-            let count = repo.worktrees.len();
-            let heading = collapsible(ui, section, count, true, Some(&new_worktree));
+            let shown: Vec<&Worktree> = (repo.worktrees.iter())
+                .filter(|wt| filter.worktree(wt))
+                .collect();
+            let count = filter::count(shown.len(), repo.worktrees.len());
+            let heading = collapsible(ui, section, &count, true, Some(&new_worktree));
             if heading.plus_clicked {
                 actions.push(Action::NewWorktree(None));
             }
             if heading.open {
-                for wt in &repo.worktrees {
+                no_match(ui, shown.is_empty() && filter.is_on());
+                for wt in shown {
                     let selected = same_path(&wt.path, &nav.worktree);
                     let response = worktree_row(ui, wt, selected);
                     if response.clicked() && !wt.prunable {
@@ -121,10 +160,13 @@ fn list_section(
             heading.response
         }
         Section::Branches => {
-            let heading = collapsible(ui, section, repo.branches.len(), true, None);
+            let branches: Vec<&Branch> = (repo.branches.iter())
+                .filter(|b| filter.branch(b))
+                .collect();
+            let count = filter::count(branches.len(), repo.branches.len());
+            let heading = collapsible(ui, section, &count, true, None);
             if heading.open {
                 let head = current.and_then(|wt| wt.branch.as_deref());
-                let branches: Vec<&Branch> = repo.branches.iter().collect();
                 let is_head = |b: &Branch| head == Some(b.name.as_str());
                 grouped(
                     ui,
@@ -132,7 +174,7 @@ fn list_section(
                     &branches,
                     &|b| b.name.as_str(),
                     &is_head,
-                    Level::top(PAD_X - 4.0),
+                    Level::top(PAD_X - 4.0, filter.is_on()),
                     &mut |ui, branch, label, indent| {
                         let response = branch_row(ui, repo, branch, label, indent, head);
                         if response.double_clicked() {
@@ -145,23 +187,32 @@ fn list_section(
                 );
                 if repo.branches.is_empty() {
                     faint_row(ui, "No branches yet");
+                } else {
+                    no_match(ui, branches.is_empty() && filter.is_on());
                 }
                 ui.add_space(SECTION_GAP);
             }
             heading.response
         }
         Section::Remotes => {
-            let heading = collapsible(ui, section, repo.remotes.len(), false, None);
+            let shown = (repo.remotes.iter())
+                .filter(|r| filter.remote(r, &repo.remote_branches))
+                .count();
+            let count = filter::count(shown, repo.remotes.len());
+            let heading = collapsible(ui, section, &count, false, None);
             if heading.open {
-                remotes(ui, project, repo, actions);
+                no_match(ui, shown == 0 && filter.is_on());
+                remotes(ui, project, repo, &filter, actions);
                 ui.add_space(SECTION_GAP);
             }
             heading.response
         }
         Section::Tags => {
-            let heading = collapsible(ui, section, repo.tags.len(), false, None);
+            let tags: Vec<_> = repo.tags.iter().rev().filter(|t| filter.tag(t)).collect();
+            let count = filter::count(tags.len(), repo.tags.len());
+            let heading = collapsible(ui, section, &count, false, None);
             if heading.open {
-                for tag in repo.tags.iter().rev() {
+                for tag in &tags {
                     let response =
                         simple_row(ui, Icon::Tag, &tag.name, color::tag(), color::text(), 20.0);
                     if response.clicked() {
@@ -173,6 +224,8 @@ fn list_section(
                 }
                 if repo.tags.is_empty() {
                     faint_row(ui, "No tags");
+                } else {
+                    no_match(ui, tags.is_empty() && filter.is_on());
                 }
                 ui.add_space(SECTION_GAP);
             }
@@ -266,11 +319,18 @@ struct Level {
     skip: usize,
     /// Left edge of this level's rows.
     indent: f32,
+    /// Folders show open whatever was saved: the filter is on, so they
+    /// hold only matches.
+    open_all: bool,
 }
 
 impl Level {
-    fn top(indent: f32) -> Self {
-        Self { skip: 0, indent }
+    fn top(indent: f32, open_all: bool) -> Self {
+        Self {
+            skip: 0,
+            indent,
+            open_all,
+        }
     }
 }
 
@@ -318,10 +378,12 @@ fn grouped<'a, T>(
             &count,
             level.indent,
             has_mark,
+            level.open_all,
         ) {
             let inner = Level {
                 skip: prefix.len(),
                 indent: level.indent + NEST,
+                ..level
             };
             grouped(ui, id, run, name, marked, inner, leaf);
         }
@@ -354,7 +416,7 @@ struct Heading {
 fn collapsible(
     ui: &mut Ui,
     section: Section,
-    count: usize,
+    count: &str,
     default_open: bool,
     plus: Option<&Can>,
 ) -> Heading {
@@ -387,7 +449,7 @@ fn collapsible(
     }
     let count = ui
         .painter()
-        .layout_no_wrap(count.to_string(), theme::small(), color::text_faint());
+        .layout_no_wrap(count.to_owned(), theme::small(), color::text_faint());
     paint_galley_left(ui.painter(), count_right - count.size().x, y, count);
     if response.clicked() {
         open = !open;
@@ -854,12 +916,21 @@ fn open(open: Option<Open>, actions: &mut Actions) {
     }
 }
 
-fn remotes(ui: &mut Ui, project: &Project, repo: &RepoSnapshot, actions: &mut Actions) {
+fn remotes(
+    ui: &mut Ui,
+    project: &Project,
+    repo: &RepoSnapshot,
+    filter: &ListFilter,
+    actions: &mut Actions,
+) {
     let can_add = can::add_remote(project);
     // Only shown when it can't: why.
     let can_change = can::act(project, "");
     let add = Action::OpenDialog(DialogKind::add_remote(repo.remotes.is_empty()));
     for remote in &repo.remotes {
+        if !filter.remote(remote, &repo.remote_branches) {
+            continue;
+        }
         simple_row(
             ui,
             Icon::Cloud,
@@ -904,7 +975,7 @@ fn remotes(ui: &mut Ui, project: &Project, repo: &RepoSnapshot, actions: &mut Ac
         let branches: Vec<&RemoteBranch> = repo
             .remote_branches
             .iter()
-            .filter(|b| b.remote == remote.name)
+            .filter(|b| b.remote == remote.name && filter.remote_branch(b))
             .collect();
         grouped(
             ui,
@@ -912,7 +983,7 @@ fn remotes(ui: &mut Ui, project: &Project, repo: &RepoSnapshot, actions: &mut Ac
             &branches,
             &|b| b.branch_name(),
             &|_| false,
-            Level::top(22.0),
+            Level::top(22.0, filter.is_on()),
             &mut |ui, branch, label, indent| {
                 remote_branch_row(ui, project, repo, branch, label, indent, actions)
             },
@@ -995,6 +1066,13 @@ fn simple_row(
     );
     paint_galley_left(ui.painter(), x, y, name);
     response
+}
+
+/// Says so when the filter hides every row of an open section.
+fn no_match(ui: &mut Ui, nothing_shown: bool) {
+    if nothing_shown {
+        faint_row(ui, "Nothing matches the filter");
+    }
 }
 
 fn faint_row(ui: &mut Ui, text: &str) {

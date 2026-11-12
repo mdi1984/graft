@@ -10,6 +10,7 @@ mod changes;
 pub mod comments;
 mod conflicts;
 mod file_history;
+pub mod filter;
 mod launch;
 mod ops;
 mod preview;
@@ -291,6 +292,9 @@ pub enum Action {
     },
     OpenInIde(PathBuf),
 
+    /// Narrow the sidebar's lists and the stashes to this text.
+    SetSidebarFilter(String),
+
     // Slash
     /// Fetch, scan and show the Slash dialog.
     OpenSlash,
@@ -401,6 +405,8 @@ pub struct RepoMemory {
     pub reviews: HashMap<PathBuf, ReviewState>,
     /// Deleted branches, newest first.
     pub slashed: Vec<SlashedBranch>,
+    /// The sidebar filter, as typed.
+    pub sidebar_filter: String,
 }
 
 impl RepoMemory {
@@ -613,6 +619,20 @@ impl Project {
         &self.memory
     }
 
+    /// The sidebar filter, as the lists apply it.
+    pub fn filter(&self) -> filter::ListFilter {
+        filter::ListFilter::new(&self.memory.sidebar_filter)
+    }
+
+    fn set_sidebar_filter(&mut self, text: String) {
+        self.memory.sidebar_filter = text;
+        // The STASHES count follows the filter, so it needs the list.
+        if self.filter().is_on() && self.stashes.is_none() {
+            self.load_stashes();
+        }
+        self.sync_stash_selection();
+    }
+
     pub fn settings(&self) -> &Settings {
         &self.settings
     }
@@ -751,7 +771,7 @@ impl Project {
         }
         self.sync_file_selection();
         self.sync_watcher();
-        if self.stashes.is_some() || self.nav.tab == Tab::Stashes {
+        if self.stashes.is_some() || self.nav.tab == Tab::Stashes || self.filter().is_on() {
             self.load_stashes();
         }
         if self.nav.tab == Tab::Review {
@@ -1120,6 +1140,7 @@ impl Project {
             Action::CloseSlash => self.close_slash(),
             Action::ToggleSlashItem(i) => self.toggle_slash_item(i),
             Action::SetSlashFilter(filter) => self.set_slash_filter(filter),
+            Action::SetSidebarFilter(filter) => self.set_sidebar_filter(filter),
             Action::CheckShownSlash(on) => self.check_shown_slash(on),
             Action::RunSlash(seen) => self.run_slash(seen),
             Action::RestoreSlashed(i) => self.restore_slashed(i),
@@ -1193,6 +1214,64 @@ fn build_labels(snap: &RepoSnapshot, selected: &Path) -> HashMap<Oid, Vec<RefLab
 mod tests {
     use super::*;
     use crate::testing::{git, open, wait};
+
+    /// The STASHES count in the sidebar follows the filter, so the stash
+    /// list loads once a filter is typed, and right away when a filter was
+    /// saved before a restart.
+    #[test]
+    fn a_sidebar_filter_loads_the_stashes_for_their_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        git(&root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        git(&root, &["add", "a.txt"]);
+        git(&root, &["commit", "-q", "-m", "first"]);
+        std::fs::write(root.join("a.txt"), "b\n").unwrap();
+        git(&root, &["stash", "push", "-q", "-m", "login form"]);
+        std::fs::write(root.join("a.txt"), "c\n").unwrap();
+        git(&root, &["stash", "push", "-q", "-m", "tidy readme"]);
+
+        let mut project = open(&root);
+        assert!(project.stashes.is_none(), "no filter: loaded on demand");
+        project.apply(Action::SetSidebarFilter("login".to_owned()));
+        wait(
+            &mut project,
+            "the stashes never loaded",
+            |p| matches!(&p.stashes, Some(Ok(list)) if list.len() == 2),
+        );
+        // The newest stash is hidden, so the one the filter shows is picked.
+        let list = project.stashes.as_ref().unwrap().as_ref().unwrap();
+        let (tidy, login) = (list[0].id, list[1].id);
+        assert_eq!(project.selected_stash, Some(login));
+        // Typing more so that it hides too leaves nothing selected.
+        project.apply(Action::SetSidebarFilter("login formx".to_owned()));
+        assert_eq!(project.selected_stash, None);
+        project.apply(Action::SetSidebarFilter(String::new()));
+        assert_eq!(project.selected_stash, Some(tidy), "the first again");
+        // A selection the filter still shows stays.
+        project.apply(Action::SelectStash(login));
+        project.apply(Action::SetSidebarFilter("form".to_owned()));
+        assert_eq!(project.selected_stash, Some(login));
+
+        let memory = RepoMemory {
+            sidebar_filter: "login".to_owned(),
+            ..RepoMemory::default()
+        };
+        let pool = JobPool::new(2, std::sync::Arc::new(|| {}));
+        let mut restarted = Project::new(
+            root.clone(),
+            root.clone(),
+            Settings::default(),
+            memory,
+            Console::default(),
+            pool,
+        );
+        wait(
+            &mut restarted,
+            "the saved filter loaded no stashes",
+            |p| matches!(&p.stashes, Some(Ok(list)) if list.len() == 2),
+        );
+    }
 
     #[test]
     fn a_dirty_worktree_picked_during_the_first_load_gets_its_row() {
