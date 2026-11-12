@@ -745,6 +745,7 @@ impl Project {
             move |git| ops::commit(&git, &message, amend).map(|_| ()),
             move |p, worktree, result| match result {
                 Ok(()) => {
+                    p.commits_made += 1;
                     if same_path(&p.nav.worktree, &worktree) {
                         p.commit_form = p.commit_form.cleared();
                     }
@@ -773,9 +774,11 @@ impl Project {
             self.commit_form.summary.clone(),
             self.commit_form.body.clone(),
         );
+        let commits_made = self.commits_made;
         self.writing_message = Some(worktree.clone());
-        self.jobs.spawn(
-            move || {
+        // It can take minutes: on a thread of its own, not the pool's.
+        self.jobs.spawn_long(
+            move |_| {
                 let diff = ops::staged_diff(&git)?;
                 let recent = ops::recent_summaries(&git, crate::ai_message::STYLE_EXAMPLES)?;
                 crate::ai_message::write(&command, git.cwd(), &diff, &recent)
@@ -794,6 +797,10 @@ impl Project {
                     p.notices.push(
                         "The commit message was for another worktree, so it was not used."
                             .to_owned(),
+                    );
+                } else if p.commits_made != commits_made {
+                    p.notices.push(
+                        "You committed meanwhile, so the written message was not used.".to_owned(),
                     );
                 } else if (form.summary.clone(), form.body.clone()) != typed {
                     p.notices.push(
@@ -881,18 +888,22 @@ mod tests {
 
     /// Write with AI fills the commit box with what the command printed,
     /// only with something staged, and never over what the user typed
-    /// meanwhile. `git --version` stands in for the AI command.
+    /// meanwhile. `git rev-parse --show-toplevel` stands in for the AI
+    /// command, so the answer shows the folder it ran in.
     #[test]
     fn write_with_ai_fills_the_commit_box_from_the_command() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("app");
         std::fs::create_dir(&root).unwrap();
         git(&root, &["init", "-q", "-b", "main"]);
+        // Graft's own commit runs without the test identity.
+        git(&root, &["config", "user.name", "Test"]);
+        git(&root, &["config", "user.email", "test@example.com"]);
         std::fs::write(root.join("a.txt"), "a\n").unwrap();
         let mut project = open(&root);
         let settings = crate::settings::Settings {
             ai_messages: true,
-            ai_command: "git --version".to_owned(),
+            ai_command: "git rev-parse --show-toplevel".to_owned(),
             ..Default::default()
         };
         project.set_settings(&settings);
@@ -916,11 +927,40 @@ mod tests {
         wait(&mut project, "no message came", |p| {
             p.writing_message.is_none()
         });
+        // It ran in the worktree's folder.
+        let top = std::fs::canonicalize(&project.commit_form.summary).unwrap();
+        assert_eq!(top, std::fs::canonicalize(&root).unwrap());
+
+        // A commit made while it ran: its message is not put in. The slow
+        // command makes sure the commit ends first.
+        let slow = crate::settings::Settings {
+            ai_command: "ping -n 3 127.0.0.1".to_owned(),
+            ..settings.clone()
+        };
+        project.set_settings(&slow);
+        project.commit_form = CommitForm::default();
+        project.apply(Action::WriteCommitMessage);
+        project.commit_form.summary = "By hand".to_owned();
+        project.apply(Action::Commit);
+        wait(&mut project, "no message came", |p| {
+            p.writing_message.is_none() && !p.is_operating()
+        });
+        assert_eq!(project.commit_form.summary, "");
         assert!(
-            project.commit_form.summary.starts_with("git version"),
+            project
+                .notices
+                .iter()
+                .any(|n| n.contains("committed meanwhile")),
             "{:?}",
-            project.commit_form.summary
+            project.notices
         );
+        project.set_settings(&settings);
+        std::fs::write(root.join("a.txt"), "a2\n").unwrap();
+        git(&root, &["add", "a.txt"]);
+        project.refresh();
+        wait(&mut project, "a.txt never showed staged", |p| {
+            p.can_write_message().is_ok()
+        });
 
         // Typed while it ran: the typed message stays.
         project.commit_form = CommitForm::default();
@@ -1015,6 +1055,7 @@ mod tests {
             "{notice}"
         );
         assert!(notice.contains("failed"), "{notice}");
+        assert!(notice.contains("not a git command"), "{notice}");
         assert_eq!(project.commit_form.summary, "");
     }
 

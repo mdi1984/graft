@@ -201,7 +201,6 @@ pub fn run_with_input(
     if dir.is_dir() {
         cmd.current_dir(dir);
     }
-    graft_core::paths::no_window(&mut cmd);
     // It starts paused and runs only once it is in the job, so nothing it
     // starts can get out of the job.
     Job::start_paused(&mut cmd);

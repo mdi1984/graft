@@ -510,6 +510,9 @@ pub struct Project {
     pub commit_form: CommitForm,
     /// The worktree whose commit message the AI command is writing.
     pub writing_message: Option<PathBuf>,
+    /// Commits made from the commit box, so a message written meanwhile
+    /// is not put in for changes that are already committed.
+    commits_made: u64,
     /// A git command that changes things, while it runs.
     op: Option<Running>,
     /// A destructive action waiting for the user's OK, and what was
@@ -591,6 +594,7 @@ impl Project {
             auto_fetching: false,
             commit_form: CommitForm::default(),
             writing_message: None,
+            commits_made: 0,
             op: None,
             confirm: None,
             queued_confirms: VecDeque::new(),

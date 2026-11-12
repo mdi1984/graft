@@ -777,7 +777,7 @@ fn ai_section(ui: &mut Ui, form: &mut SettingsForm, view: &mut View) {
         ui,
         "It must read the prompt from its input and print only the message. The default \
          also lets Claude read files and run read-only git commands, so it can look beyond \
-         a long diff; it cannot change anything.",
+         a long diff.",
     );
 }
 

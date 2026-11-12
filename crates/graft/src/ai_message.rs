@@ -93,9 +93,9 @@ fn parse(answer: &str) -> Result<Message> {
         .collect();
     let text = lines.join("\n");
     // Quotes around the whole answer go, also around several lines.
-    let text = text.trim().trim_matches(['"', '`']).trim();
+    let text = unquote(&text);
     let (summary, body) = text.split_once('\n').unwrap_or((text, ""));
-    let summary = summary.trim().trim_matches(['"', '`']).trim();
+    let summary = unquote(summary);
     if summary.is_empty() {
         bail!("The command answered with no message");
     }
@@ -103,6 +103,16 @@ fn parse(answer: &str) -> Result<Message> {
         summary: summary.to_owned(),
         body: body.trim().to_owned(),
     })
+}
+
+/// `text` trimmed, without a pair of double quotes around all of it; quotes
+/// and backticks inside (`Revert "Add login"`) stay.
+fn unquote(text: &str) -> &str {
+    let text = text.trim();
+    match text.strip_prefix('"').and_then(|t| t.strip_suffix('"')) {
+        Some(inner) if !inner.contains('"') => inner.trim(),
+        _ => text,
+    }
 }
 
 #[cfg(test)]
@@ -120,6 +130,11 @@ mod tests {
         let quoted = parse("\"Fix login\n\nHandle expired sessions.\"\n").unwrap();
         assert_eq!(quoted.summary, "Fix login");
         assert_eq!(quoted.body, "Handle expired sessions.");
+        let inner = parse("Rename `a` to `b`\n\nUpdate `ops.rs`").unwrap();
+        assert_eq!(inner.summary, "Rename `a` to `b`");
+        assert_eq!(inner.body, "Update `ops.rs`");
+        let revert = parse("Revert \"Add login\"").unwrap();
+        assert_eq!(revert.summary, "Revert \"Add login\"");
         assert!(parse("  \n```\n```").is_err());
     }
 
