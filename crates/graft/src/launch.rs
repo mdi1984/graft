@@ -223,6 +223,10 @@ pub fn run_with_input(
             break status;
         }
         if start.elapsed() > timeout {
+            // The whole tree: a .cmd launcher's program runs under cmd.exe.
+            let mut taskkill = Command::new("taskkill");
+            taskkill.args(["/T", "/F", "/PID", &child.id().to_string()]);
+            let _ = graft_core::paths::no_window(&mut taskkill).status();
             let _ = child.kill();
             let _ = child.wait();
             bail!("{name} took longer than {} seconds", timeout.as_secs());
@@ -325,6 +329,29 @@ mod tests {
                 "Read Grep Glob Bash(git diff:*) Bash(git log:*) Bash(git show:*)"
             ]
         );
+    }
+
+    /// A command that takes too long is stopped with everything it started:
+    /// a .cmd launcher's nested process would otherwise write the marker.
+    #[cfg(windows)]
+    #[test]
+    fn a_slow_command_is_stopped_with_its_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("marker");
+        let script = dir.path().join("slow.cmd");
+        std::fs::write(
+            &script,
+            "@cmd /c \"ping -n 4 127.0.0.1 >nul & echo done> \"%~dp0marker\"\"\r\n",
+        )
+        .unwrap();
+        let start = std::time::Instant::now();
+        let command = format!("\"{}\"", script.display());
+        let timeout = std::time::Duration::from_secs(1);
+        let err = run_with_input(&command, dir.path(), String::new(), timeout).unwrap_err();
+        assert!(err.to_string().contains("took longer"), "{err:#}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(3));
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        assert!(!marker.exists(), "a child kept running");
     }
 
     #[test]

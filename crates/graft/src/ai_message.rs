@@ -92,7 +92,8 @@ fn parse(answer: &str) -> Result<Message> {
         .filter(|line| !line.trim_start().starts_with("```"))
         .collect();
     let text = lines.join("\n");
-    let text = text.trim();
+    // Quotes around the whole answer go, also around several lines.
+    let text = text.trim().trim_matches(['"', '`']).trim();
     let (summary, body) = text.split_once('\n').unwrap_or((text, ""));
     let summary = summary.trim().trim_matches(['"', '`']).trim();
     if summary.is_empty() {
@@ -116,12 +117,16 @@ mod tests {
         let fenced = parse("```\n\"Add login form\"\n```\n").unwrap();
         assert_eq!(fenced.summary, "Add login form");
         assert_eq!(fenced.body, "");
+        let quoted = parse("\"Fix login\n\nHandle expired sessions.\"\n").unwrap();
+        assert_eq!(quoted.summary, "Fix login");
+        assert_eq!(quoted.body, "Handle expired sessions.");
         assert!(parse("  \n```\n```").is_err());
     }
 
     #[test]
     fn a_long_diff_is_cut_on_a_character_boundary() {
-        let diff = "ä".repeat(MAX_DIFF);
+        // "ä" takes two bytes: after one "a", the cut falls inside one.
+        let diff = format!("a{}", "ä".repeat(MAX_DIFF));
         let prompt = prompt(&diff, &[]);
         assert!(prompt.starts_with(INSTRUCTIONS));
         assert!(prompt.ends_with("git diff --cached shows all of it.]\n"));

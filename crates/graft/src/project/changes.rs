@@ -885,7 +885,8 @@ mod tests {
     #[test]
     fn write_with_ai_fills_the_commit_box_from_the_command() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().to_path_buf();
+        let root = tmp.path().join("app");
+        std::fs::create_dir(&root).unwrap();
         git(&root, &["init", "-q", "-b", "main"]);
         std::fs::write(root.join("a.txt"), "a\n").unwrap();
         let mut project = open(&root);
@@ -930,6 +931,91 @@ mod tests {
         });
         assert_eq!(project.commit_form.summary, "Mine");
         assert!(project.notices.iter().any(|n| n.contains("kept yours")));
+
+        // Another worktree picked while it ran: its box stays as it was.
+        let other = tmp.path().join("other");
+        git(&root, &["commit", "-q", "-m", "first"]);
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "other",
+                other.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(root.join("b.txt"), "b\n").unwrap();
+        git(&root, &["add", "b.txt"]);
+        project.refresh();
+        wait(&mut project, "b.txt never showed staged", |p| {
+            p.snapshot.as_ref().is_some_and(|s| s.worktrees.len() == 2)
+                && p.can_write_message().is_ok()
+        });
+        project.commit_form = CommitForm::default();
+        project.notices.clear();
+        project.apply(Action::WriteCommitMessage);
+        let other = project
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .worktrees
+            .iter()
+            .find(|wt| !wt.is_main)
+            .unwrap()
+            .path
+            .clone();
+        project.apply(Action::OpenWorktree(other));
+        wait(&mut project, "no message came", |p| {
+            p.writing_message.is_none()
+        });
+        assert_eq!(project.commit_form.summary, "");
+        assert!(
+            project
+                .notices
+                .iter()
+                .any(|n| n.contains("another worktree"))
+        );
+    }
+
+    /// A failing command becomes a notice that says why; with the feature
+    /// off, nothing runs.
+    #[test]
+    fn write_with_ai_says_why_it_failed_or_cannot_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        git(&root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        git(&root, &["add", "a.txt"]);
+        let mut project = open(&root);
+        wait(&mut project, "a.txt never showed staged", |p| {
+            p.worktree()
+                .and_then(|wt| wt.status.as_ref())
+                .is_some_and(|s| s.staged().count() == 1)
+        });
+
+        project.apply(Action::WriteCommitMessage);
+        assert!(project.writing_message.is_none(), "off by default");
+        assert!(project.notices.pop().unwrap().contains("Turn it on"));
+
+        let settings = crate::settings::Settings {
+            ai_messages: true,
+            ai_command: "git no-such-command".to_owned(),
+            ..Default::default()
+        };
+        project.set_settings(&settings);
+        project.apply(Action::WriteCommitMessage);
+        wait(&mut project, "the command never ended", |p| {
+            p.writing_message.is_none()
+        });
+        let notice = project.notices.join("\n");
+        assert!(
+            notice.contains("Could not write a commit message"),
+            "{notice}"
+        );
+        assert!(notice.contains("failed"), "{notice}");
+        assert_eq!(project.commit_form.summary, "");
     }
 
     /// Discarding a new file asks to move it to the Recycle Bin, or, where
