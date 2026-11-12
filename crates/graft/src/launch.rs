@@ -173,6 +173,76 @@ fn run_ide(path: &Path, command: &str) -> bool {
     cmd.status().is_ok_and(|s| s.success())
 }
 
+/// Run a command from the settings (a program with optional arguments, as
+/// for the IDE) in `dir`, with `input` on its stdin; its stdout. Fails when
+/// it cannot start, exits with an error (saying what it printed), or takes
+/// longer than `timeout` (it is stopped then).
+pub fn run_with_input(
+    command: &str,
+    dir: &Path,
+    input: String,
+    timeout: std::time::Duration,
+) -> anyhow::Result<String> {
+    use std::io::{Read, Write};
+    use std::process::Stdio;
+
+    use anyhow::{Context, bail};
+
+    let words = split_command(command);
+    let Some((name, args)) = words.split_first() else {
+        bail!("No command is set");
+    };
+    let program = find_program(name).with_context(|| format!("{name} was not found"))?;
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if dir.is_dir() {
+        cmd.current_dir(dir);
+    }
+    graft_core::paths::no_window(&mut cmd);
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("Could not start {name}"))?;
+    // Each pipe on its own thread, so a full one can't block the others.
+    let mut stdin = child.stdin.take().expect("piped");
+    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let read = |mut pipe: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            String::from_utf8_lossy(&bytes).into_owned()
+        })
+    };
+    let stdout = read(Box::new(child.stdout.take().expect("piped")));
+    let stderr = read(Box::new(child.stderr.take().expect("piped")));
+    let start = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if start.elapsed() > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("{name} took longer than {} seconds", timeout.as_secs());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    // A command that exits without reading all of stdin is fine.
+    let _ = writer.join();
+    let stdout = stdout.join().unwrap_or_default();
+    let stderr = stderr.join().unwrap_or_default();
+    if !status.success() {
+        let said = [stderr.trim(), stdout.trim()]
+            .into_iter()
+            .find(|s| !s.is_empty())
+            .unwrap_or("no output");
+        bail!("{name} failed ({status}): {said}");
+    }
+    Ok(stdout)
+}
+
 fn not_a_folder() -> io::Error {
     io::Error::new(io::ErrorKind::NotFound, "not a folder")
 }

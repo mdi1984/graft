@@ -8,7 +8,8 @@ use super::can::{self, Can};
 use super::file_row;
 use super::icons::Icon;
 use super::widgets::{
-    ButtonKind, button, empty_state, hint, paint_icon_button, section_with_link, text_field,
+    ButtonKind, button, empty_state, hint, paint_icon_button, section_with_link, spinner,
+    text_field,
 };
 use super::{conflicts, diff_view};
 use crate::keys::Command;
@@ -292,22 +293,82 @@ fn file_row(
     });
 }
 
+/// Write with AI: a square as tall as the summary field.
+const WRITE_SIZE: f32 = 32.0;
+
+/// Write with AI, a sparkle button; a spinner while the command runs.
+fn write_button(ui: &mut Ui, can: &Can, writing: bool, actions: &mut Actions) {
+    let sense = if can.ok {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(WRITE_SIZE, WRITE_SIZE), sense);
+    let hovered = can.ok && response.hovered();
+    let fill = if hovered {
+        color::control_hover_bg()
+    } else {
+        color::control_bg()
+    };
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        RADIUS,
+        fill,
+        Stroke::new(1.0, color::control_border()),
+        egui::StrokeKind::Inside,
+    );
+    if writing {
+        spinner(ui, rect.center(), 6.0, color::text_weak());
+        response.on_hover_text("Writing the commit message…");
+        return;
+    }
+    let fg = if !can.ok {
+        color::text_faint()
+    } else if hovered {
+        color::text()
+    } else {
+        color::text_mid()
+    };
+    let icon = Rect::from_center_size(rect.center(), vec2(16.0, 16.0));
+    super::icons::paint(painter, icon, Icon::Sparkle, fg);
+    if response.on_hover_text(&can.hint).clicked() && can.ok {
+        actions.push(Action::WriteCommitMessage);
+    }
+}
+
 fn commit_box(ui: &mut Ui, project: &mut Project, status: &WorktreeStatus, actions: &mut Actions) {
     let staged = status.staged().count();
     let act = can::moves_head(project, &project.nav.worktree, "");
     let keys = project.settings().keys.clone();
+    // Write with AI, when it is turned on in Settings.
+    let write = project.settings().ai_messages.then(|| {
+        (
+            can::write_message(project),
+            project.writing_message.is_some(),
+        )
+    });
     let form = &mut project.commit_form;
     let width = ui.available_width();
 
     ui.spacing_mut().item_spacing.y = 6.0;
     ui.horizontal(|ui| {
         let counter_width = 40.0;
+        let gap = ui.spacing().item_spacing.x;
+        let write_width = if write.is_some() {
+            WRITE_SIZE + gap
+        } else {
+            0.0
+        };
         text_field(
             ui,
             &mut form.summary,
             "Commit summary",
-            width - counter_width - 6.0,
+            width - counter_width - 6.0 - write_width,
         );
+        if let Some((can, writing)) = &write {
+            write_button(ui, can, *writing, actions);
+        }
         let len = form.summary.chars().count();
         let fg = if len > 72 {
             color::dirty_fg()

@@ -153,6 +153,9 @@ pub enum Action {
     },
     Commit,
     ToggleAmend,
+    /// Fill the commit box with a message the AI command writes for what
+    /// is staged.
+    WriteCommitMessage,
     Remote(RemoteOp),
     CancelOperation,
     /// Ask before doing something destructive.
@@ -505,6 +508,8 @@ pub struct Project {
     last_fetch: Instant,
     auto_fetching: bool,
     pub commit_form: CommitForm,
+    /// The worktree whose commit message the AI command is writing.
+    pub writing_message: Option<PathBuf>,
     /// A git command that changes things, while it runs.
     op: Option<Running>,
     /// A destructive action waiting for the user's OK, and what was
@@ -585,6 +590,7 @@ impl Project {
             last_fetch: Instant::now(),
             auto_fetching: false,
             commit_form: CommitForm::default(),
+            writing_message: None,
             op: None,
             confirm: None,
             queued_confirms: VecDeque::new(),
@@ -1062,6 +1068,7 @@ impl Project {
             } => self.ask_discard(&worktree, &source, path),
             Action::Commit => self.commit(),
             Action::ToggleAmend => self.toggle_amend(),
+            Action::WriteCommitMessage => self.write_commit_message(),
             Action::Remote(op) => self.remote(op),
             Action::CancelOperation => self.cancel_op(),
             Action::Ask(confirm) => self.ask(*confirm),

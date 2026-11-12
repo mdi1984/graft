@@ -70,6 +70,8 @@ impl Page {
             Page::General => {
                 draft.ide_command = d.ide_command;
                 draft.check_updates = d.check_updates;
+                draft.ai_messages = d.ai_messages;
+                draft.ai_command = d.ai_command;
             }
             Page::Diffs => {
                 draft.wrap_lines = d.wrap_lines;
@@ -198,7 +200,7 @@ struct Section {
     show: fn(&mut Ui, &mut SettingsForm, &mut View),
 }
 
-const SECTIONS: [Section; 13] = [
+const SECTIONS: [Section; 14] = [
     Section {
         page: Page::Appearance,
         title: "Theme",
@@ -228,6 +230,12 @@ const SECTIONS: [Section; 13] = [
         title: "Editor",
         words: "ide open code cursor rider command",
         show: editor_section,
+    },
+    Section {
+        page: Page::General,
+        title: "Commit messages",
+        words: "ai claude llm generate write commit message summary",
+        show: ai_section,
     },
     Section {
         page: Page::General,
@@ -745,6 +753,30 @@ fn editor_section(ui: &mut Ui, form: &mut SettingsForm, view: &mut View) {
         ui,
         "For example code, cursor, idea64 or rider64. If it does not start, Graft opens the \
          default program.",
+    );
+}
+
+fn ai_section(ui: &mut Ui, form: &mut SettingsForm, view: &mut View) {
+    ui.checkbox(&mut form.draft.ai_messages, "Write commit messages with AI");
+    hint(
+        ui,
+        "Adds a sparkle button next to the commit summary. Graft runs the command below \
+         with instructions and the staged changes on its input, and puts its answer into \
+         the summary and description.",
+    );
+    ui.add_enabled_ui(form.draft.ai_messages, |ui| {
+        field_label(ui, "Command");
+        text_field(
+            ui,
+            &mut form.draft.ai_command,
+            crate::ai_message::DEFAULT_COMMAND,
+            view.width,
+        );
+    });
+    hint(
+        ui,
+        "For example claude -p --model haiku. It must read the prompt from its input and \
+         print only the message.",
     );
 }
 

@@ -758,6 +758,74 @@ impl Project {
         );
     }
 
+    /// Ask the AI command for a message for what is staged in the selected
+    /// worktree. The answer fills the commit box only if that worktree is
+    /// still selected and nothing was typed meanwhile.
+    pub(super) fn write_commit_message(&mut self) {
+        if let Err(why) = self.can_write_message() {
+            self.notices.push(why);
+            return;
+        }
+        let command = self.settings.ai_command.clone();
+        let git = self.wt_git();
+        let worktree = self.nav.worktree.clone();
+        let typed = (
+            self.commit_form.summary.clone(),
+            self.commit_form.body.clone(),
+        );
+        self.writing_message = Some(worktree.clone());
+        self.jobs.spawn(
+            move || {
+                let diff = ops::staged_diff(&git)?;
+                let recent = ops::recent_summaries(&git, crate::ai_message::STYLE_EXAMPLES)?;
+                crate::ai_message::write(&command, git.cwd(), &diff, &recent)
+            },
+            move |p, result| {
+                p.writing_message = None;
+                let message = match result {
+                    Ok(message) => message,
+                    Err(e) => {
+                        p.report(e.context("Could not write a commit message"));
+                        return;
+                    }
+                };
+                let form = &mut p.commit_form;
+                if !same_path(&p.nav.worktree, &worktree) {
+                    p.notices.push(
+                        "The commit message was for another worktree, so it was not used."
+                            .to_owned(),
+                    );
+                } else if (form.summary.clone(), form.body.clone()) != typed {
+                    p.notices.push(
+                        "You changed the commit message meanwhile, so Graft kept yours.".to_owned(),
+                    );
+                } else {
+                    form.summary = message.summary;
+                    form.body = message.body;
+                }
+            },
+        );
+    }
+
+    /// Whether Write with AI can start now, and if not, why.
+    pub fn can_write_message(&self) -> Result<(), String> {
+        let staged = self
+            .worktree()
+            .and_then(|wt| wt.status.as_ref())
+            .map_or(0, |s| s.staged().count());
+        if !self.settings.ai_messages {
+            Err("Turn it on in Settings › General first".to_owned())
+        } else if self.writing_message.is_some() {
+            Err("Already writing one".to_owned())
+        } else if self.settings.ai_command.trim().is_empty() {
+            Err("Set the command in Settings › General first".to_owned())
+        } else if staged == 0 {
+            Err("Stage the changes to describe first".to_owned())
+        } else {
+            Ok(())
+        }
+    }
+
     pub(super) fn toggle_amend(&mut self) {
         let form = &mut self.commit_form;
         form.amend = !form.amend;
@@ -810,6 +878,59 @@ impl Project {
 mod tests {
     use super::*;
     use crate::testing::{git, open, wait};
+
+    /// Write with AI fills the commit box with what the command printed,
+    /// only with something staged, and never over what the user typed
+    /// meanwhile. `git --version` stands in for the AI command.
+    #[test]
+    fn write_with_ai_fills_the_commit_box_from_the_command() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        git(&root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        let mut project = open(&root);
+        let settings = crate::settings::Settings {
+            ai_messages: true,
+            ai_command: "git --version".to_owned(),
+            ..Default::default()
+        };
+        project.set_settings(&settings);
+
+        // Nothing staged: it says so and starts nothing.
+        project.apply(Action::WriteCommitMessage);
+        assert!(project.writing_message.is_none());
+        assert_eq!(
+            project.notices.pop().as_deref(),
+            Some("Stage the changes to describe first")
+        );
+
+        git(&root, &["add", "a.txt"]);
+        project.refresh();
+        wait(&mut project, "a.txt never showed staged", |p| {
+            p.can_write_message().is_ok()
+        });
+        project.apply(Action::WriteCommitMessage);
+        assert!(project.writing_message.is_some());
+        assert!(project.can_write_message().is_err(), "one at a time");
+        wait(&mut project, "no message came", |p| {
+            p.writing_message.is_none()
+        });
+        assert!(
+            project.commit_form.summary.starts_with("git version"),
+            "{:?}",
+            project.commit_form.summary
+        );
+
+        // Typed while it ran: the typed message stays.
+        project.commit_form = CommitForm::default();
+        project.apply(Action::WriteCommitMessage);
+        project.commit_form.summary = "Mine".to_owned();
+        wait(&mut project, "no message came", |p| {
+            p.writing_message.is_none()
+        });
+        assert_eq!(project.commit_form.summary, "Mine");
+        assert!(project.notices.iter().any(|n| n.contains("kept yours")));
+    }
 
     /// Discarding a new file asks to move it to the Recycle Bin, or, where
     /// Windows has none, says it is deleted for good.

@@ -73,6 +73,17 @@ pub fn moves_head(project: &Project, path: &Path, hint: impl Into<String>) -> Ca
     act(project, hint).unless(project.head_blocked(path))
 }
 
+/// Write with AI in the commit box, see [`Project::can_write_message`].
+pub fn write_message(project: &Project) -> Can {
+    match project.can_write_message() {
+        Ok(()) => yes(format!(
+            "Write the commit message with AI: runs {} on the staged changes",
+            project.settings().ai_command.trim()
+        )),
+        Err(why) => no(why),
+    }
+}
+
 /// A checkout, which always happens in the main folder, see
 /// [`Project::checkout_blocked`].
 pub fn checkout(project: &Project) -> Can {
