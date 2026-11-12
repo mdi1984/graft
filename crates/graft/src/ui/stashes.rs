@@ -59,7 +59,16 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
         .selected_stash
         .and_then(|id| stashes.iter().find(|s| s.id == id))
     else {
-        empty_state(ui, "No stash selected", "Pick a stash on the left.");
+        let filter = project.filter();
+        if stashes.iter().any(|s| filter.stash(s)) {
+            empty_state(ui, "No stash selected", "Pick a stash on the left.");
+        } else {
+            empty_state(
+                ui,
+                "Nothing matches the filter",
+                "Clear the filter in the sidebar to see every stash.",
+            );
+        }
         return;
     };
     // As tall as the header and every file, up to half the height.

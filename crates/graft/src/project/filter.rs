@@ -121,6 +121,30 @@ mod tests {
         assert!(ListFilter::new("orig").remote(&remote("origin"), &branches));
     }
 
+    /// A worktree shows by its branch (or "detached at …") or by its
+    /// folder's name, not by the folders above it.
+    #[test]
+    fn worktrees_match_by_branch_or_folder_name() {
+        let wt = |path: &str, branch: Option<&str>| Worktree {
+            path: path.into(),
+            branch: branch.map(str::to_owned),
+            head: Some(graft_core::null_oid()),
+            is_main: false,
+            locked: false,
+            prunable: false,
+            status: None,
+            in_progress: None,
+            recycle_bin: false,
+        };
+        let agent = wt(r"C:\repos\agent-7", Some("feature/login"));
+        assert!(ListFilter::new("LOGIN").worktree(&agent));
+        assert!(ListFilter::new("agent").worktree(&agent));
+        assert!(!ListFilter::new("repos").worktree(&agent));
+        let detached = ListFilter::new("detached");
+        assert!(detached.worktree(&wt(r"C:\repos\x", None)));
+        assert!(!detached.worktree(&wt(r"C:\repos\x", Some("main"))));
+    }
+
     #[test]
     fn counts_show_shown_of_all_only_when_some_are_hidden() {
         assert_eq!(count(4, 4), "4");

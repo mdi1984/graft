@@ -790,3 +790,31 @@ pub fn color_swatches(ui: &mut Ui, current: usize) -> Option<usize> {
     });
     picked
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fields are exactly as wide as asked, border included: a wider one
+    /// made the sidebar (a panel that fits its content) grow every frame.
+    #[test]
+    fn text_fields_are_exactly_as_wide_as_asked() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx, egui::ThemePreference::Dark);
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 400.0))),
+            ..Default::default()
+        };
+        let mut widths = Vec::new();
+        let output = ctx.run_ui(input, |ui| {
+            let mut empty = String::new();
+            let mut typed = "login".to_owned();
+            let field = ui.scope(|ui| text_field(ui, &mut empty, "Filter", 200.0));
+            widths.push(field.response.rect.width());
+            let field = ui.scope(|ui| clearable_field(ui, &mut typed, "Filter", 200.0));
+            widths.push(field.response.rect.width());
+        });
+        output.drop_without_applying_deltas();
+        assert_eq!(widths, [200.0, 200.0]);
+    }
+}
