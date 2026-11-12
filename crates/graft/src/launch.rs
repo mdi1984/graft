@@ -202,11 +202,21 @@ pub fn run_with_input(
         cmd.current_dir(dir);
     }
     graft_core::paths::no_window(&mut cmd);
+    // It starts paused and runs only once it is in the job, so nothing it
+    // starts can get out of the job.
+    Job::start_paused(&mut cmd);
     let mut child = cmd
         .spawn()
         .with_context(|| format!("Could not start {name}"))?;
     // A .cmd launcher's program runs under cmd.exe: the job holds both.
-    let job = Job::holding(&child);
+    let job = match Job::holding(&child) {
+        Ok(job) => job,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("Could not start {name}: {e}");
+        }
+    };
     // Each pipe on its own thread, so a full one can't block the others.
     let mut stdin = child.stdin.take().expect("piped");
     let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
@@ -250,13 +260,26 @@ pub fn run_with_input(
 }
 
 /// A Windows job object holding a process and every process it starts;
-/// they all stop when it is dropped. `None` where none could be made, and
-/// nothing outside Windows.
+/// they all stop when it is dropped. Nothing outside Windows.
 struct Job(#[cfg(windows)] windows_sys::Win32::Foundation::HANDLE);
 
 impl Job {
+    /// Make `cmd` start paused; `holding` lets it run.
+    fn start_paused(cmd: &mut Command) {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+
+            use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
+            cmd.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
+        }
+        #[cfg(not(windows))]
+        let _ = cmd;
+    }
+
+    /// Put the paused `child` in a new job, then let it run.
     #[cfg(windows)]
-    fn holding(child: &std::process::Child) -> Option<Self> {
+    fn holding(child: &std::process::Child) -> io::Result<Self> {
         use std::os::windows::io::AsRawHandle;
 
         use windows_sys::Win32::System::JobObjects::{
@@ -269,7 +292,7 @@ impl Job {
         unsafe {
             let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
             if handle.is_null() {
-                return None;
+                return Err(io::Error::last_os_error());
             }
             let job = Job(handle);
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
@@ -280,14 +303,54 @@ impl Job {
                 (&raw const info).cast(),
                 std::mem::size_of_val(&info) as u32,
             );
-            let assigned = set != 0 && AssignProcessToJobObject(job.0, child.as_raw_handle()) != 0;
-            assigned.then_some(job)
+            if set == 0 || AssignProcessToJobObject(job.0, child.as_raw_handle()) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            resume(child.id())?;
+            Ok(job)
         }
     }
 
     #[cfg(not(windows))]
-    fn holding(_: &std::process::Child) -> Option<Self> {
-        None
+    fn holding(_: &std::process::Child) -> io::Result<Self> {
+        Ok(Job())
+    }
+}
+
+/// Let the threads of the paused process `pid` run (it has one).
+#[cfg(windows)]
+fn resume(pid: u32) -> io::Result<()> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+    // SAFETY: plain Win32 calls; each handle opened here is closed here.
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        let mut entry: THREADENTRY32 = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+        let mut resumed = false;
+        let mut more = Thread32First(snapshot, &mut entry) != 0;
+        while more {
+            if entry.th32OwnerProcessID == pid {
+                let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                if !thread.is_null() {
+                    resumed |= ResumeThread(thread) != u32::MAX;
+                    CloseHandle(thread);
+                }
+            }
+            more = Thread32Next(snapshot, &mut entry) != 0;
+        }
+        CloseHandle(snapshot);
+        if resumed {
+            Ok(())
+        } else {
+            Err(io::Error::other("its thread could not be started"))
+        }
     }
 }
 
@@ -405,6 +468,31 @@ mod tests {
         assert!(err.to_string().contains("took longer"), "{err:#}");
         assert!(start.elapsed() < std::time::Duration::from_secs(3));
         std::thread::sleep(std::time::Duration::from_secs(5));
+        assert!(!marker.exists(), "a child kept running");
+    }
+
+    /// A child started at once by a command that then exits stops with it,
+    /// so it can't hold the output open or keep running.
+    #[cfg(windows)]
+    #[test]
+    fn a_child_left_behind_is_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("marker");
+        let script = dir.path().join("quick.cmd");
+        std::fs::write(
+            &script,
+            "@start /b cmd /c \"ping -n 3 127.0.0.1 >nul & echo done> \"%~dp0marker\"\"
+@echo hi
+",
+        )
+        .unwrap();
+        let start = std::time::Instant::now();
+        let command = format!("\"{}\"", script.display());
+        let timeout = std::time::Duration::from_secs(20);
+        let out = run_with_input(&command, dir.path(), String::new(), timeout).unwrap();
+        assert_eq!(out.trim(), "hi");
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        std::thread::sleep(std::time::Duration::from_secs(4));
         assert!(!marker.exists(), "a child kept running");
     }
 
