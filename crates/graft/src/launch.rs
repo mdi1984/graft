@@ -205,6 +205,8 @@ pub fn run_with_input(
     let mut child = cmd
         .spawn()
         .with_context(|| format!("Could not start {name}"))?;
+    // A .cmd launcher's program runs under cmd.exe: the job holds both.
+    let job = Job::holding(&child);
     // Each pipe on its own thread, so a full one can't block the others.
     let mut stdin = child.stdin.take().expect("piped");
     let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
@@ -223,16 +225,16 @@ pub fn run_with_input(
             break status;
         }
         if start.elapsed() > timeout {
-            // The whole tree: a .cmd launcher's program runs under cmd.exe.
-            let mut taskkill = Command::new("taskkill");
-            taskkill.args(["/T", "/F", "/PID", &child.id().to_string()]);
-            let _ = graft_core::paths::no_window(&mut taskkill).status();
+            // Closing the job stops everything the command started too.
+            drop(job);
             let _ = child.kill();
             let _ = child.wait();
             bail!("{name} took longer than {} seconds", timeout.as_secs());
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
+    // Whatever it left running goes too, so it can't hold the pipes open.
+    drop(job);
     // A command that exits without reading all of stdin is fine.
     let _ = writer.join();
     let stdout = stdout.join().unwrap_or_default();
@@ -245,6 +247,58 @@ pub fn run_with_input(
         bail!("{name} failed ({status}): {said}");
     }
     Ok(stdout)
+}
+
+/// A Windows job object holding a process and every process it starts;
+/// they all stop when it is dropped. `None` where none could be made, and
+/// nothing outside Windows.
+struct Job(#[cfg(windows)] windows_sys::Win32::Foundation::HANDLE);
+
+impl Job {
+    #[cfg(windows)]
+    fn holding(child: &std::process::Child) -> Option<Self> {
+        use std::os::windows::io::AsRawHandle;
+
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject,
+        };
+        // SAFETY: plain Win32 calls on a handle this function owns (closed
+        // by `Drop`) and on the child's handle, which `child` keeps open.
+        unsafe {
+            let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if handle.is_null() {
+                return None;
+            }
+            let job = Job(handle);
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let set = SetInformationJobObject(
+                job.0,
+                JobObjectExtendedLimitInformation,
+                (&raw const info).cast(),
+                std::mem::size_of_val(&info) as u32,
+            );
+            let assigned = set != 0 && AssignProcessToJobObject(job.0, child.as_raw_handle()) != 0;
+            assigned.then_some(job)
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn holding(_: &std::process::Child) -> Option<Self> {
+        None
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Job {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from CreateJobObjectW and is closed once.
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
 }
 
 fn not_a_folder() -> io::Error {
