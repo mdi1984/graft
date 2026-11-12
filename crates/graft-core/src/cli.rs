@@ -589,7 +589,12 @@ fn read_pipe(mut pipe: impl Read + Send + 'static) -> crossbeam_channel::Receive
     let (tx, rx) = crossbeam_channel::unbounded();
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
-        while let Ok(n) = pipe.read(&mut buf) {
+        loop {
+            let n = match pipe.read(&mut buf) {
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            };
             if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
                 break;
             }
@@ -674,7 +679,8 @@ mod tests {
     fn a_process_git_leaves_behind_does_not_hold_up_graft() {
         let dir = tempfile::tempdir().unwrap();
         let git = Git::new(dir.path(), Console::default());
-        let alias = "alias.linger=!sleep 20 & echo hi";
+        // The sleep runs in / so the temporary folder can be removed.
+        let alias = "alias.linger=!cd / && (sleep 20 &) ; echo hi";
         let start = Instant::now();
         let out = git.run_raw(["-c", alias, "linger"]).unwrap();
         assert_eq!(out.stdout_str().trim(), "hi");

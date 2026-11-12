@@ -932,11 +932,12 @@ mod tests {
         assert_eq!(top, std::fs::canonicalize(&root).unwrap());
 
         // A commit made while it ran: its message is not put in. The command
-        // answers only once the test creates "go", after the commit ended.
+        // says "started" once Graft has read the staged changes and answers
+        // only once the test creates "go", after the commit ended.
         let script = tmp.path().join("slow.cmd");
         std::fs::write(
             &script,
-            "@echo off\r\n:wait\r\nif exist \"%~dp0go\" goto done\r\n\
+            "@echo off\r\necho.> \"%~dp0started\"\r\n:wait\r\nif exist \"%~dp0go\" goto done\r\n\
              ping -n 2 127.0.0.1 >nul\r\ngoto wait\r\n:done\r\necho Late message\r\n",
         )
         .unwrap();
@@ -947,6 +948,10 @@ mod tests {
         project.set_settings(&slow);
         project.commit_form = CommitForm::default();
         project.apply(Action::WriteCommitMessage);
+        let started = tmp.path().join("started");
+        wait(&mut project, "the command never started", |_| {
+            started.exists()
+        });
         project.commit_form.summary = "By hand".to_owned();
         project.apply(Action::Commit);
         wait(&mut project, "the commit never ended", |p| {
