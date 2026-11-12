@@ -187,11 +187,14 @@ impl Git {
                 let _ = stdin.write_all(&input);
             });
         }
-        let out = child.wait_with_output()?;
+        let stdout = read_pipe(child.stdout.take().expect("stdout was piped"));
+        let stderr = read_pipe(child.stderr.take().expect("stderr was piped"));
+        let status = child.wait()?;
+        let rest = Instant::now() + PIPE_GRACE;
         let output = Output {
-            status: out.status.code().unwrap_or(-1),
-            stdout: out.stdout,
-            stderr: out.stderr,
+            status: status.code().unwrap_or(-1),
+            stdout: drain(&stdout, rest),
+            stderr: drain(&stderr, rest),
         };
         let mut entry = Entry::finished(
             &self.cwd,
@@ -348,40 +351,28 @@ impl Git {
         let started = Instant::now();
         let mut child = self.spawn(&args, false)?;
 
-        let stdout = child.stdout.take().expect("stdout was piped");
-        let stdout_reader = std::thread::spawn(move || read_all(stdout));
-        let (line_tx, line_rx) = crossbeam_channel::unbounded::<String>();
-        let mut stderr = child.stderr.take().expect("stderr was piped");
-        let stderr_reader = std::thread::spawn(move || {
-            // Progress lines end in '\r' (rewritten in place) or '\n'.
-            let mut all = Vec::new();
-            let mut line = Vec::new();
-            let mut buf = [0u8; 4096];
-            while let Ok(n) = stderr.read(&mut buf) {
-                if n == 0 {
-                    break;
-                }
-                for &b in &buf[..n] {
-                    all.push(b);
-                    if b == b'\r' || b == b'\n' {
-                        if !line.is_empty() {
-                            let _ = line_tx.send(String::from_utf8_lossy(&line).into_owned());
-                            line.clear();
-                        }
-                    } else {
-                        line.push(b);
+        let stdout = read_pipe(child.stdout.take().expect("stdout was piped"));
+        let chunks = read_pipe(child.stderr.take().expect("stderr was piped"));
+        // Progress lines end in '\r' (rewritten in place) or '\n'.
+        let mut stderr = Vec::new();
+        let mut line = Vec::new();
+        let mut take = |chunk: Vec<u8>, on_progress: &mut dyn FnMut(&str)| {
+            for &b in &chunk {
+                if b == b'\r' || b == b'\n' {
+                    if !line.is_empty() {
+                        on_progress(&String::from_utf8_lossy(&line));
+                        line.clear();
                     }
+                } else {
+                    line.push(b);
                 }
             }
-            if !line.is_empty() {
-                let _ = line_tx.send(String::from_utf8_lossy(&line).into_owned());
-            }
-            all
-        });
+            stderr.extend(chunk);
+        };
 
         let status = loop {
-            match line_rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(line) => on_progress(&line),
+            match chunks.recv_timeout(Duration::from_millis(50)) {
+                Ok(chunk) => take(chunk, &mut on_progress),
                 Err(RecvTimeoutError::Timeout) => {}
                 // stderr closed: git is done or about to be.
                 Err(RecvTimeoutError::Disconnected) => break child.wait()?,
@@ -393,13 +384,14 @@ impl Git {
                 break status;
             }
         };
-        let stderr = stderr_reader.join().expect("stderr reader");
-        for line in line_rx.try_iter() {
-            on_progress(&line);
+        let rest = Instant::now() + PIPE_GRACE;
+        take(drain(&chunks, rest), &mut on_progress);
+        if !line.is_empty() {
+            on_progress(&String::from_utf8_lossy(&line));
         }
         let output = Output {
             status: status.code().unwrap_or(-1),
-            stdout: stdout_reader.join().expect("stdout reader"),
+            stdout: drain(&stdout, rest),
             stderr: keep_final_progress(&stderr),
         };
         let mut entry = Entry::finished(
@@ -586,10 +578,33 @@ fn extra_config(start: usize) -> Vec<(String, String)> {
     env
 }
 
-fn read_all(mut r: impl Read) -> Vec<u8> {
-    let mut v = Vec::new();
-    let _ = r.read_to_end(&mut v);
-    v
+/// How long to wait, once git has exited, for the end of its output. All it
+/// wrote is in the pipe by then; only a process it started that still runs
+/// (a helper, a daemon) keeps the pipe open, maybe for good.
+const PIPE_GRACE: Duration = Duration::from_secs(3);
+
+/// A pipe read on its own thread, chunk by chunk, so a full pipe can't
+/// block git and a pipe that never ends can't block Graft.
+fn read_pipe(mut pipe: impl Read + Send + 'static) -> crossbeam_channel::Receiver<Vec<u8>> {
+    let (tx, rx) = crossbeam_channel::unbounded();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        while let Ok(n) = pipe.read(&mut buf) {
+            if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+/// What came from `pipe`, until it ends or, at the latest, `deadline`.
+fn drain(pipe: &crossbeam_channel::Receiver<Vec<u8>>, deadline: Instant) -> Vec<u8> {
+    let mut all = Vec::new();
+    while let Ok(chunk) = pipe.recv_deadline(deadline) {
+        all.extend(chunk);
+    }
+    all
 }
 
 /// Collapse "\r"-rewritten progress lines so the console shows only the final state.
@@ -650,6 +665,27 @@ mod tests {
     fn config_value(mut cmd: Command, key: &str) -> String {
         let out = cmd.args(["config", "--get", key]).output().unwrap();
         String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// A process git started that keeps running (here a background sleep
+    /// holding git's output open) doesn't make Graft wait for it: plain and
+    /// progress commands both return once git has exited.
+    #[test]
+    fn a_process_git_leaves_behind_does_not_hold_up_graft() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::new(dir.path(), Console::default());
+        let alias = "alias.linger=!sleep 20 & echo hi";
+        let start = Instant::now();
+        let out = git.run_raw(["-c", alias, "linger"]).unwrap();
+        assert_eq!(out.stdout_str().trim(), "hi");
+        let cancel = CancelToken::default();
+        git.run_progress(&["-c", alias, "linger"], &cancel, |_| {})
+            .unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "{:?}",
+            start.elapsed()
+        );
     }
 
     /// git in a folder that is gone (a worktree deleted by hand) says so,

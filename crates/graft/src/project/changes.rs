@@ -931,10 +931,17 @@ mod tests {
         let top = std::fs::canonicalize(&project.commit_form.summary).unwrap();
         assert_eq!(top, std::fs::canonicalize(&root).unwrap());
 
-        // A commit made while it ran: its message is not put in. The slow
-        // command makes sure the commit ends first.
+        // A commit made while it ran: its message is not put in. The command
+        // answers only once the test creates "go", after the commit ended.
+        let script = tmp.path().join("slow.cmd");
+        std::fs::write(
+            &script,
+            "@echo off\r\n:wait\r\nif exist \"%~dp0go\" goto done\r\n\
+             ping -n 2 127.0.0.1 >nul\r\ngoto wait\r\n:done\r\necho Late message\r\n",
+        )
+        .unwrap();
         let slow = crate::settings::Settings {
-            ai_command: "ping -n 3 127.0.0.1".to_owned(),
+            ai_command: format!("\"{}\"", script.display()),
             ..settings.clone()
         };
         project.set_settings(&slow);
@@ -942,8 +949,14 @@ mod tests {
         project.apply(Action::WriteCommitMessage);
         project.commit_form.summary = "By hand".to_owned();
         project.apply(Action::Commit);
+        wait(&mut project, "the commit never ended", |p| {
+            !p.is_operating()
+        });
+        assert!(project.notices.is_empty(), "{:?}", project.notices);
+        assert!(project.writing_message.is_some());
+        std::fs::write(tmp.path().join("go"), "").unwrap();
         wait(&mut project, "no message came", |p| {
-            p.writing_message.is_none() && !p.is_operating()
+            p.writing_message.is_none()
         });
         assert_eq!(project.commit_form.summary, "");
         assert!(
