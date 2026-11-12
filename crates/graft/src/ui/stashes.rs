@@ -59,7 +59,16 @@ pub fn show(ui: &mut Ui, project: &Project, actions: &mut Actions) {
         .selected_stash
         .and_then(|id| stashes.iter().find(|s| s.id == id))
     else {
-        empty_state(ui, "No stash selected", "Pick a stash on the left.");
+        let filter = project.filter();
+        if stashes.iter().any(|s| filter.stash(s)) {
+            empty_state(ui, "No stash selected", "Pick a stash on the left.");
+        } else {
+            empty_state(
+                ui,
+                "Nothing matches the filter",
+                "Clear the filter in the sidebar to see every stash.",
+            );
+        }
         return;
     };
     // As tall as the header and every file, up to half the height.
@@ -94,15 +103,23 @@ fn list(
     actions: &mut Actions,
 ) {
     let now = time::now();
-    section_heading_row(ui, &format!("STASHES  {}", stashes.len()));
-    hint(ui, "Shared by all worktrees of this repository.");
+    let filter = project.filter();
+    let shown: Vec<&Stash> = stashes.iter().filter(|s| filter.stash(s)).collect();
+    let count = crate::project::filter::count(shown.len(), stashes.len());
+    section_heading_row(ui, &format!("STASHES  {count}"));
+    if filter.is_on() {
+        let typed = project.memory().sidebar_filter.trim();
+        hint(ui, &format!("Filtered by '{typed}' in the sidebar."));
+    } else {
+        hint(ui, "Shared by all worktrees of this repository.");
+    }
     ui.add_space(6.0);
     ScrollArea::vertical()
         .id_salt("stash-list-scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
-            for stash in stashes {
+            for stash in shown {
                 let selected = project.selected_stash == Some(stash.id);
                 let meta = format!(
                     "{} · {}",

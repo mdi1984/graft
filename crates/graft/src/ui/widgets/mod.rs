@@ -203,8 +203,10 @@ pub fn section_heading_row(ui: &mut Ui, title: &str) {
 
 /// A folder that folds what is inside it: open until folded, and it stays
 /// the way it was left (under `id`). `count` shows at the right; `marked`
-/// highlights it while folded (it hides the current branch or open file).
+/// highlights it while folded (it hides the current branch or open file);
+/// `always_open` shows it open and ignores clicks (while a filter is on).
 /// True while open.
+#[allow(clippy::too_many_arguments)]
 pub fn folder_row(
     ui: &mut Ui,
     id: egui::Id,
@@ -213,8 +215,10 @@ pub fn folder_row(
     count: &str,
     indent: f32,
     marked: bool,
+    always_open: bool,
 ) -> bool {
-    let mut open = ui.data_mut(|d| *d.get_persisted_mut_or(id, true));
+    let saved = ui.data_mut(|d| *d.get_persisted_mut_or(id, true));
+    let mut open = saved || always_open;
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
     let painter = ui.painter();
     paint_row_bg(painter, rect, &response, marked && !open);
@@ -237,7 +241,7 @@ pub fn folder_row(
     let x = rect.left() + indent + 32.0;
     let label = elided(ui, name, font, color::text_mid(), count_x - 6.0 - x);
     paint_galley_left(ui.painter(), x, y, label);
-    if response.clicked() {
+    if response.clicked() && !always_open {
         open = !open;
         ui.data_mut(|d| d.insert_persisted(id, open));
     }
@@ -601,8 +605,38 @@ pub fn paint_icon_button_when(ui: &Ui, rect: Rect, response: &Response, icon: Ic
     icons::paint(painter, icon_rect, icon, fg);
 }
 
+/// Escape was pressed in `field` this frame. egui drops the focus as soon
+/// as it sees Escape, so the field may just have lost it. The key is taken:
+/// nothing drawn later (a diff that closes on Escape) reacts to it too.
+pub fn escape_pressed_in(ui: &Ui, field: &Response) -> bool {
+    (field.has_focus() || field.lost_focus())
+        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+}
+
 /// A single-line text input with Graft's frame. Returns the text edit's response.
 pub fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Response {
+    framed_field(ui, text, hint, width, false).0
+}
+
+/// Like [`text_field`], with a "×" inside its right end while it has
+/// text. Returns the text edit's response and whether "×" was clicked.
+pub fn clearable_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> (Response, bool) {
+    framed_field(ui, text, hint, width, true)
+}
+
+/// Room for the "×" of a [`clearable_field`].
+const CLEAR_SIZE: f32 = 22.0;
+
+/// A field exactly `width` wide, border included.
+fn framed_field(
+    ui: &mut Ui,
+    text: &mut String,
+    hint: &str,
+    width: f32,
+    clearable: bool,
+) -> (Response, bool) {
+    const PAD_X: i8 = 8;
+    const BORDER: f32 = 1.0;
     let id = ui.next_auto_id();
     let focused = ui.memory(|m| m.has_focus(id));
     let border = if focused {
@@ -610,13 +644,27 @@ pub fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Res
     } else {
         color::control_border()
     };
-    egui::Frame::new()
+    // The "×" sits in the right margin, so text never runs under it.
+    let right = if clearable {
+        PAD_X / 2 + CLEAR_SIZE as i8
+    } else {
+        PAD_X
+    };
+    let margin = egui::Margin {
+        left: PAD_X,
+        right,
+        top: 0,
+        bottom: 0,
+    };
+    let frame = egui::Frame::new()
         .fill(color::app_bg())
-        .stroke(Stroke::new(1.0, border))
+        .stroke(Stroke::new(BORDER, border))
         .corner_radius(RADIUS)
-        .inner_margin(egui::Margin::symmetric(8, 0))
+        .inner_margin(margin)
         .show(ui, |ui| {
-            ui.set_width(width - 16.0);
+            // The border counts too: a field wider than `width` would make
+            // a panel that fits its content grow every frame.
+            ui.set_width(width - margin.sum().x - 2.0 * BORDER);
             ui.add(
                 egui::TextEdit::singleline(text)
                     .id(id)
@@ -627,8 +675,20 @@ pub fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Res
                     .hint_text(egui::RichText::new(hint).color(color::text_faint()))
                     .desired_width(f32::INFINITY),
             )
-        })
-        .inner
+        });
+    let mut cleared = false;
+    if clearable && !text.is_empty() {
+        let outer = frame.response.rect;
+        let center = pos2(
+            outer.right() - BORDER - 2.0 - CLEAR_SIZE / 2.0,
+            outer.center().y,
+        );
+        let rect = Rect::from_center_size(center, vec2(CLEAR_SIZE, CLEAR_SIZE));
+        let clear = ui.interact(rect, id.with("clear"), Sense::click());
+        paint_icon_button(ui, rect, &clear, Icon::Close);
+        cleared = clear.on_hover_text("Clear").clicked();
+    }
+    (frame.inner, cleared)
 }
 
 const CHIP_PAD_X: f32 = 5.0;
@@ -737,4 +797,71 @@ pub fn color_swatches(ui: &mut Ui, current: usize) -> Option<usize> {
         }
     });
     picked
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Escape in a focused field reaches the field, and nothing drawn after
+    /// it: a diff below would otherwise close at the same time.
+    #[test]
+    fn escape_in_a_field_is_taken_by_it() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::unique("field");
+        let frame = |events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 400.0))),
+                events,
+                ..Default::default()
+            };
+            let mut seen = (false, false);
+            let output = ctx.run_ui(input, |ui| {
+                let mut text = "login".to_owned();
+                let field = ui.add(egui::TextEdit::singleline(&mut text).id(id));
+                if !field.has_focus() {
+                    field.request_focus();
+                }
+                let escape = escape_pressed_in(ui, &field);
+                // What a diff drawn later would see.
+                let later = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                seen = (escape, later);
+            });
+            output.drop_without_applying_deltas();
+            seen
+        };
+        frame(Vec::new());
+        assert_eq!(frame(Vec::new()), (false, false));
+        let escape = egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        assert_eq!(frame(vec![escape]), (true, false));
+    }
+
+    /// Fields are exactly as wide as asked, border included: a wider one
+    /// made the sidebar (a panel that fits its content) grow every frame.
+    #[test]
+    fn text_fields_are_exactly_as_wide_as_asked() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx, egui::ThemePreference::Dark);
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 400.0))),
+            ..Default::default()
+        };
+        let mut widths = Vec::new();
+        let output = ctx.run_ui(input, |ui| {
+            let mut empty = String::new();
+            let mut typed = "login".to_owned();
+            let field = ui.scope(|ui| text_field(ui, &mut empty, "Filter", 200.0));
+            widths.push(field.response.rect.width());
+            let field = ui.scope(|ui| clearable_field(ui, &mut typed, "Filter", 200.0));
+            widths.push(field.response.rect.width());
+        });
+        output.drop_without_applying_deltas();
+        assert_eq!(widths, [200.0, 200.0]);
+    }
 }

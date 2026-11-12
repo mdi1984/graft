@@ -19,20 +19,28 @@ impl Project {
     }
 
     fn on_stashes(&mut self, result: Result<Vec<Stash>, String>) {
-        if let Ok(list) = &result {
-            let still_there = self
-                .selected_stash
-                .is_some_and(|id| list.iter().any(|s| s.id == id));
-            if !still_there {
-                self.selected_stash = None;
-                self.stash_files = None;
-                self.stash_diff = None;
-                if let Some(first) = list.first() {
-                    self.select_stash(first.id);
-                }
-            }
-        }
         self.stashes = Some(result);
+        self.sync_stash_selection();
+    }
+
+    /// Keep the selected stash only while it is listed and the sidebar
+    /// filter shows it; otherwise select the first one shown, if any.
+    pub(super) fn sync_stash_selection(&mut self) {
+        let Some(Ok(list)) = &self.stashes else {
+            return;
+        };
+        let filter = self.filter();
+        let shown = |id: Oid| list.iter().any(|s| s.id == id && filter.stash(s));
+        if self.selected_stash.is_some_and(shown) {
+            return;
+        }
+        let first = list.iter().find(|s| filter.stash(s)).map(|s| s.id);
+        self.selected_stash = None;
+        self.stash_files = None;
+        self.stash_diff = None;
+        if let Some(first) = first {
+            self.select_stash(first);
+        }
     }
 
     pub(super) fn select_stash(&mut self, id: Oid) {

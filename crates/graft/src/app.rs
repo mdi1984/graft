@@ -56,6 +56,8 @@ struct Persisted {
     reviews: HashMap<PathBuf, HashMap<PathBuf, ReviewState>>,
     /// "Recently slashed" per repository root.
     slashed: HashMap<PathBuf, Vec<SlashedBranch>>,
+    /// The sidebar filter per repository root, when one is typed.
+    sidebar_filters: HashMap<PathBuf, String>,
     settings: Settings,
 }
 
@@ -70,6 +72,13 @@ impl Persisted {
             let key = memories.keys().find(|k| same_path(k, &root)).cloned();
             memories.entry(key.unwrap_or(root)).or_default().slashed = slashed;
         }
+        for (root, filter) in std::mem::take(&mut self.sidebar_filters) {
+            let key = memories.keys().find(|k| same_path(k, &root)).cloned();
+            memories
+                .entry(key.unwrap_or(root))
+                .or_default()
+                .sidebar_filter = filter;
+        }
         memories
     }
 
@@ -80,7 +89,10 @@ impl Persisted {
                 self.reviews.insert(root.clone(), memory.reviews);
             }
             if !memory.slashed.is_empty() {
-                self.slashed.insert(root, memory.slashed);
+                self.slashed.insert(root.clone(), memory.slashed);
+            }
+            if !memory.sidebar_filter.is_empty() {
+                self.sidebar_filters.insert(root, memory.sidebar_filter);
             }
         }
     }
@@ -1415,5 +1427,28 @@ mod tests {
             "Wait for \"Pushing\" to finish (or cancel it) in the graft tab before updating.\n\
              Wait for \"Creating x\" to finish on the start page before updating."
         );
+    }
+
+    /// The sidebar filter is saved per repository and comes back after a
+    /// restart; a cleared one is not saved.
+    #[test]
+    fn the_sidebar_filter_survives_a_restart() {
+        let mut saved = Persisted::default();
+        let memory = |filter: &str| RepoMemory {
+            sidebar_filter: filter.to_owned(),
+            ..RepoMemory::default()
+        };
+        saved.set_memories([
+            (PathBuf::from("repo-a"), memory("feature/")),
+            (PathBuf::from("repo-b"), memory("")),
+        ]);
+        let text = serde_json::to_string(&saved).unwrap();
+        let mut loaded: Persisted = serde_json::from_str(&text).unwrap();
+        let mut memories = loaded.memories();
+        assert_eq!(
+            take_memory(&mut memories, Path::new("repo-a")).sidebar_filter,
+            "feature/"
+        );
+        assert!(!memories.contains_key(Path::new("repo-b")));
     }
 }
