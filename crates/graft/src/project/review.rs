@@ -306,20 +306,45 @@ impl Project {
     /// Mark or unmark a file as viewed; marking the open file moves on to the
     /// next file not viewed yet.
     pub(super) fn toggle_viewed(&mut self, path: String) {
-        let Some(file) = self.review.as_ref().and_then(|v| v.file(&path)).cloned() else {
+        let Some(file) = self.review.as_ref().and_then(|v| v.file(&path)) else {
             return;
         };
-        let key = file.viewed_key();
-        let state = self.review_state_mut();
-        let now_viewed = !state.viewed.remove(&key);
-        if now_viewed {
-            state.viewed.insert(key);
-        }
+        let viewed = !self.is_viewed(file);
+        self.set_viewed(vec![path], viewed);
+    }
+
+    /// Mark (or unmark) the files at `paths` as viewed, e.g. all files of a
+    /// folder. Like [`Self::toggle_viewed`], marking the open file moves on
+    /// to the next file not viewed yet.
+    pub(super) fn set_viewed(&mut self, paths: Vec<String>, viewed: bool) {
         let Some(view) = &self.review else { return };
-        if !now_viewed || view.selected.as_deref() != Some(path.as_str()) {
-            return;
+        let keys: Vec<String> = paths
+            .iter()
+            .filter_map(|p| view.file(p))
+            .map(ReviewFile::viewed_key)
+            .collect();
+        let open = view.selected.clone();
+        let state = self.review_state_mut();
+        for key in keys {
+            if viewed {
+                state.viewed.insert(key);
+            } else {
+                state.viewed.remove(&key);
+            }
         }
-        let Some(review) = view.review() else { return };
+        if let Some(open) = open
+            && viewed
+            && paths.contains(&open)
+        {
+            self.open_next_unviewed(&open);
+        }
+    }
+
+    /// Open the first file after `path` (wrapping around) not viewed yet.
+    fn open_next_unviewed(&mut self, path: &str) {
+        let Some(review) = self.review.as_ref().and_then(ReviewView::review) else {
+            return;
+        };
         let files = &review.files;
         let at = files
             .iter()
@@ -586,6 +611,42 @@ mod tests {
         project.apply(Action::ShowHistory);
         assert!(project.file_history.is_none());
         assert!(project.diff(DiffOwner::FileHistory).is_none());
+    }
+
+    /// Marking a folder marks all of its files and moves on from the open
+    /// one; unmarking it unmarks them all. Files outside it stay as they were.
+    #[test]
+    fn a_folder_is_marked_and_unmarked_at_once() {
+        let (_dir, root) = feature_repo();
+        std::fs::create_dir(root.join("dir")).unwrap();
+        commit_file(&root, "dir/b.txt");
+        commit_file(&root, "dir/c.txt");
+        let mut project = open(&root);
+        project.apply(Action::SetTab(Tab::Review));
+        wait(&mut project, "the review never loaded", |p| {
+            p.review.as_ref().is_some_and(|r| r.review().is_some())
+        });
+        project.apply(Action::SelectReviewFile("dir/b.txt".to_owned()));
+        let viewed = |p: &Project| -> Vec<String> {
+            let review = p.review.as_ref().unwrap().review().unwrap();
+            let files = review.files.iter().filter(|f| p.is_viewed(f));
+            files.map(|f| f.change.path.clone()).collect()
+        };
+        let folder = vec!["dir/b.txt".to_owned(), "dir/c.txt".to_owned()];
+        project.apply(Action::SetViewed {
+            paths: folder.clone(),
+            viewed: true,
+        });
+        assert_eq!(viewed(&project), folder);
+        let open = project.review.as_ref().unwrap().selected.as_deref();
+        assert_eq!(open, Some("a.txt"), "moves on to the file not viewed yet");
+
+        project.apply(Action::ToggleViewed("a.txt".to_owned()));
+        project.apply(Action::SetViewed {
+            paths: folder,
+            viewed: false,
+        });
+        assert_eq!(viewed(&project), ["a.txt"]);
     }
 
     /// A review with only line comments is worth remembering (they were

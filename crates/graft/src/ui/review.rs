@@ -403,7 +403,15 @@ fn file_tree(
             } => {
                 let inside = &review.files[files.clone()];
                 let viewed = inside.iter().filter(|f| project.is_viewed(f)).count();
+                let all = viewed == inside.len();
                 let marked = selected.is_some_and(|s| paths[files].contains(&s));
+                // The box sits where the files' boxes are. It is added after
+                // the row, so it gets the click and the folder does not fold.
+                let top = ui.cursor().top();
+                let check = Rect::from_center_size(
+                    pos2(ui.max_rect().left() + 12.0, top + 12.0),
+                    vec2(14.0, 14.0),
+                );
                 let open = folder_row(
                     ui,
                     Id::unique(("review-folder", &project.root, path)),
@@ -414,6 +422,33 @@ fn file_tree(
                     marked,
                     false,
                 );
+                let check_response = ui
+                    .interact(
+                        check.expand(4.0),
+                        ui.scope_id().with(("viewed-folder", path)),
+                        Sense::click(),
+                    )
+                    .on_hover_text(if all {
+                        format!("Unmark the {} files in {path}", inside.len())
+                    } else {
+                        format!("Mark the {} files in {path} as viewed", inside.len())
+                    });
+                paint_check(ui.painter(), check, all, check_response.hovered());
+                if all {
+                    dim_viewed(
+                        ui,
+                        Rect::from_min_size(
+                            pos2(ui.max_rect().left(), top),
+                            vec2(ui.max_rect().width(), 24.0),
+                        ),
+                    );
+                }
+                if check_response.clicked() {
+                    actions.push(Action::SetViewed {
+                        paths: inside.iter().map(|f| f.change.path.clone()).collect(),
+                        viewed: !all,
+                    });
+                }
                 if !open {
                     folded = Some(depth);
                 }
@@ -464,12 +499,7 @@ fn review_file_row(
     );
     paint_check(ui.painter(), check, viewed, check_response.hovered());
     if viewed {
-        // Dim viewed files so what is left stands out.
-        ui.painter().rect_filled(
-            Rect::from_min_max(pos2(rect.left() + 24.0, rect.top()), rect.max),
-            4,
-            color::app_bg().gamma_multiply(0.55),
-        );
+        dim_viewed(ui, rect);
     }
 
     if check_response.clicked() {
@@ -477,6 +507,15 @@ fn review_file_row(
     } else if response.clicked() {
         actions.push(Action::SelectReviewFile(path.clone()));
     }
+}
+
+/// Dim a viewed row (right of its Viewed box) so what is left stands out.
+fn dim_viewed(ui: &Ui, rect: Rect) {
+    ui.painter().rect_filled(
+        Rect::from_min_max(pos2(rect.left() + 24.0, rect.top()), rect.max),
+        4,
+        color::app_bg().gamma_multiply(0.55),
+    );
 }
 
 /// The open file's name and buttons; `split` is whether it shows side by
