@@ -3,7 +3,7 @@
 //! local notes and line comments. Marks, notes, comments and the chosen base
 //! are remembered per worktree.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -314,17 +314,66 @@ impl Project {
         let now_viewed = !state.viewed.remove(&key);
         if now_viewed {
             state.viewed.insert(key);
+            if self.review.as_ref().and_then(|v| v.selected.as_deref()) == Some(path.as_str()) {
+                self.open_next_unviewed(&path);
+            }
         }
-        let Some(view) = &self.review else { return };
-        if !now_viewed || view.selected.as_deref() != Some(path.as_str()) {
+    }
+
+    /// Mark (or unmark) the files at `paths` as viewed in the review of
+    /// `worktree`, e.g. all files of a folder: every entry at a path. Like
+    /// [`Self::toggle_viewed`], marking the open file moves on to the next
+    /// file not viewed yet.
+    pub(super) fn set_viewed(&mut self, worktree: &Path, paths: Vec<String>, viewed: bool) {
+        let Some(view) = self.review.as_ref().filter(|v| {
+            same_path(&v.worktree, worktree) && same_path(&self.nav.worktree, worktree)
+        }) else {
+            return;
+        };
+        let Some(review) = view.review() else { return };
+        let paths: HashSet<&str> = paths.iter().map(String::as_str).collect();
+        // Every entry at a path: one path can be listed twice (its deletion
+        // is staged while the file is still there, untracked).
+        let keys: Vec<String> = review
+            .files
+            .iter()
+            .filter(|f| paths.contains(f.change.path.as_str()))
+            .map(ReviewFile::viewed_key)
+            .collect();
+        if keys.is_empty() {
             return;
         }
-        let Some(review) = view.review() else { return };
+        // Moves on only when the open file was not viewed before: else it
+        // stays, with a comment being written on it.
+        let open = view
+            .selected
+            .clone()
+            .filter(|o| paths.contains(o.as_str()))
+            .filter(|o| view.file(o).is_some_and(|f| !self.is_viewed(f)));
+        let state = self.review_state_mut();
+        for key in keys {
+            if viewed {
+                state.viewed.insert(key);
+            } else {
+                state.viewed.remove(&key);
+            }
+        }
+        if let Some(open) = open
+            && viewed
+        {
+            self.open_next_unviewed(&open);
+        }
+    }
+
+    /// Open the first file after `path` (wrapping around) not viewed yet.
+    fn open_next_unviewed(&mut self, path: &str) {
+        let Some(review) = self.review.as_ref().and_then(ReviewView::review) else {
+            return;
+        };
         let files = &review.files;
-        let at = files
-            .iter()
-            .position(|f| f.change.path == path)
-            .unwrap_or(0);
+        let Some(at) = files.iter().position(|f| f.change.path == path) else {
+            return;
+        };
         let next = files[at + 1..]
             .iter()
             .chain(&files[..at])
@@ -586,6 +635,116 @@ mod tests {
         project.apply(Action::ShowHistory);
         assert!(project.file_history.is_none());
         assert!(project.diff(DiffOwner::FileHistory).is_none());
+    }
+
+    /// The paths of the files viewed in the loaded review.
+    fn viewed(p: &Project) -> Vec<String> {
+        let review = p.review.as_ref().unwrap().review().unwrap();
+        let files = review.files.iter().filter(|f| p.is_viewed(f));
+        files.map(|f| f.change.path.clone()).collect()
+    }
+
+    fn open_file(p: &Project) -> Option<&str> {
+        p.review.as_ref().unwrap().selected.as_deref()
+    }
+
+    fn review_loaded(p: &Project) -> bool {
+        p.review.as_ref().is_some_and(|r| r.review().is_some())
+    }
+
+    fn set_viewed(project: &mut Project, paths: &[&str], viewed: bool) {
+        project.apply(Action::SetViewed {
+            worktree: project.nav.worktree.clone(),
+            paths: paths.iter().map(|p| p.to_string()).collect(),
+            viewed,
+        });
+    }
+
+    /// Marking a folder marks all of its files and moves on from the open
+    /// one; marking one that does not hold the open file keeps it open;
+    /// unmarking a folder unmarks them all. Files outside stay as they were.
+    #[test]
+    fn a_folder_is_marked_and_unmarked_at_once() {
+        let (_dir, root) = feature_repo();
+        std::fs::create_dir(root.join("dir")).unwrap();
+        commit_file(&root, "dir/b.txt");
+        commit_file(&root, "dir/c.txt");
+        commit_file(&root, "z.txt");
+        let mut project = open(&root);
+        project.apply(Action::SetTab(Tab::Review));
+        wait(&mut project, "the review never loaded", review_loaded);
+        let folder = ["dir/b.txt", "dir/c.txt"];
+
+        // Not the open file's folder: the open file stays.
+        project.apply(Action::SelectReviewFile("z.txt".to_owned()));
+        set_viewed(&mut project, &folder, true);
+        assert_eq!(viewed(&project), folder);
+        assert_eq!(open_file(&project), Some("z.txt"));
+
+        // The open file's folder: moves on to the next file not viewed yet.
+        set_viewed(&mut project, &folder, false);
+        assert!(viewed(&project).is_empty());
+        project.apply(Action::SelectReviewFile("dir/c.txt".to_owned()));
+        set_viewed(&mut project, &folder, true);
+        assert_eq!(viewed(&project), folder);
+        assert_eq!(open_file(&project), Some("z.txt"));
+
+        // The open file was viewed already: it stays open.
+        project.apply(Action::SelectReviewFile("dir/b.txt".to_owned()));
+        project.apply(Action::ToggleViewed("dir/c.txt".to_owned()));
+        set_viewed(&mut project, &folder, true);
+        assert_eq!(viewed(&project), folder);
+        assert_eq!(open_file(&project), Some("dir/b.txt"));
+
+        // One file moves on as before, past the viewed ones.
+        project.apply(Action::SelectReviewFile("z.txt".to_owned()));
+        project.apply(Action::ToggleViewed("z.txt".to_owned()));
+        assert_eq!(open_file(&project), Some("a.txt"));
+        set_viewed(&mut project, &folder, false);
+        assert_eq!(viewed(&project), ["z.txt"]);
+    }
+
+    /// A path listed twice (its deletion staged, the file still there,
+    /// untracked) is marked in both entries, so its folder shows as viewed.
+    #[test]
+    fn a_path_listed_twice_is_marked_twice() {
+        let (_dir, root) = feature_repo();
+        git(&root, &["rm", "-q", "--cached", "a.txt"]);
+        let mut project = open(&root);
+        project.apply(Action::SetTab(Tab::Review));
+        wait(&mut project, "the review never loaded", review_loaded);
+        assert_eq!(
+            project
+                .review
+                .as_ref()
+                .unwrap()
+                .review()
+                .unwrap()
+                .files
+                .len(),
+            2
+        );
+        set_viewed(&mut project, &["a.txt"], true);
+        assert_eq!(viewed(&project), ["a.txt", "a.txt"]);
+        // One file's box marks only the entry it belongs to.
+        set_viewed(&mut project, &["a.txt"], false);
+        project.apply(Action::ToggleViewed("a.txt".to_owned()));
+        assert_eq!(viewed(&project), ["a.txt"]);
+    }
+
+    /// A mark made for another worktree's review does nothing here.
+    #[test]
+    fn marks_for_another_worktree_are_dropped() {
+        let (dir, root) = feature_repo();
+        let mut project = open(&root);
+        project.apply(Action::SetTab(Tab::Review));
+        wait(&mut project, "the review never loaded", review_loaded);
+        project.apply(Action::SetViewed {
+            worktree: dir.path().join("elsewhere"),
+            paths: vec!["a.txt".to_owned()],
+            viewed: true,
+        });
+        assert!(viewed(&project).is_empty());
     }
 
     /// A review with only line comments is worth remembering (they were

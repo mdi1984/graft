@@ -205,7 +205,7 @@ pub fn section_heading_row(ui: &mut Ui, title: &str) {
 /// the way it was left (under `id`). `count` shows at the right; `marked`
 /// highlights it while folded (it hides the current branch or open file);
 /// `always_open` shows it open and ignores clicks (while a filter is on).
-/// True while open.
+/// True while open, and the row's rect.
 #[allow(clippy::too_many_arguments)]
 pub fn folder_row(
     ui: &mut Ui,
@@ -216,7 +216,7 @@ pub fn folder_row(
     indent: f32,
     marked: bool,
     always_open: bool,
-) -> bool {
+) -> (bool, Rect) {
     let saved = ui.data_mut(|d| *d.get_persisted_mut_or(id, true));
     let mut open = saved || always_open;
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
@@ -245,7 +245,7 @@ pub fn folder_row(
         open = !open;
         ui.data_mut(|d| d.insert_persisted(id, open));
     }
-    open
+    (open, rect)
 }
 
 /// A list's section heading ("STAGED  3") with an optional link at the

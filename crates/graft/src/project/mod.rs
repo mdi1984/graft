@@ -268,6 +268,13 @@ pub enum Action {
     // Review
     SelectReviewFile(String),
     ToggleViewed(String),
+    /// Mark or unmark many files as viewed at once: a folder's files in
+    /// the review of `worktree`.
+    SetViewed {
+        worktree: PathBuf,
+        paths: Vec<String>,
+        viewed: bool,
+    },
     SetReviewBase(String),
     ToggleReviewSplit,
     /// Pick a line of the review diff; `extend` grows the pick to it.
@@ -1136,6 +1143,11 @@ impl Project {
 
             Action::SelectReviewFile(path) => self.open_review_file(path, false),
             Action::ToggleViewed(path) => self.toggle_viewed(path),
+            Action::SetViewed {
+                worktree,
+                paths,
+                viewed,
+            } => self.set_viewed(&worktree, paths, viewed),
             Action::SetReviewBase(base) => self.set_review_base(base),
             Action::ToggleReviewSplit => self.toggle_review_split(),
             Action::PickLine { at, side, extend } => self.pick_line(at, side, extend),
