@@ -45,3 +45,58 @@ pub fn ask(
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Press `keys` in turn, one frame each, with a discard question open;
+    /// the dialog's answer after the last.
+    fn answer_after(enter: bool, keys: &[egui::Key]) -> Option<bool> {
+        let ctx = egui::Context::default();
+        let frame = |key: Option<egui::Key>| {
+            let events = key
+                .map(|key| {
+                    vec![egui::Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    }]
+                })
+                .unwrap_or_default();
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let mut answer = None;
+            let output = ctx.run_ui(input, |ui| {
+                answer = ask(ui.ctx(), "Discard changes?", "a.txt", "Discard", enter);
+            });
+            output.drop_without_applying_deltas();
+            answer
+        };
+        frame(None);
+        frame(None);
+        let mut answer = None;
+        for key in keys {
+            answer = frame(Some(*key));
+        }
+        answer
+    }
+
+    /// Enter confirms a question that allows it, and only that one. With
+    /// Cancel focused (Tab), Enter clicks Cancel and nothing is discarded.
+    #[test]
+    fn enter_confirms_only_where_allowed_and_never_over_cancel() {
+        use egui::Key::{Enter, Tab};
+        assert_eq!(answer_after(true, &[Enter]), Some(true));
+        assert_eq!(answer_after(false, &[Enter]), None);
+        assert_eq!(answer_after(true, &[Tab, Tab, Enter]), Some(false));
+    }
+}

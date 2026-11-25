@@ -369,6 +369,17 @@ impl Action {
         )
     }
 
+    /// Moving `paths` of `list` to the other list: unstaged files are
+    /// staged, staged ones unstaged. Conflicts move by being resolved
+    /// instead.
+    pub fn toggle_files(list: FileList, paths: Vec<String>) -> Option<Action> {
+        match list {
+            FileList::Unstaged => Some(Action::StageFiles(paths)),
+            FileList::Staged => Some(Action::UnstageFiles(paths)),
+            FileList::Conflicts => None,
+        }
+    }
+
     /// Ask before discarding whole files of the unstaged list (File
     /// status) in `worktree`, see [`Project::ask_discard`].
     pub fn discard_files(worktree: &Path, files: Vec<FileKey>) -> Action {
@@ -440,13 +451,7 @@ fn discard_question(recycle_bin: bool, files: &[FileKey]) -> Confirm {
             if files.len() > NAMED_FILES {
                 names.push(&more);
             }
-            let mut lines = vec![
-                names.join(
-                    "
-",
-                ),
-                String::new(),
-            ];
+            let mut lines = vec![names.join("\n"), String::new()];
             if !tracked.is_empty() {
                 lines.push(format!(
                     "All unstaged changes to {} will be lost. Staged changes stay.",
@@ -468,10 +473,7 @@ fn discard_question(recycle_bin: bool, files: &[FileKey]) -> Confirm {
             };
             (
                 format!("Discard changes to {} files?", files.len()),
-                lines.join(
-                    "
-",
-                ),
+                lines.join("\n"),
                 label,
             )
         }
@@ -571,12 +573,15 @@ impl Project {
     /// of `list`. Picks stay in one list, and not in Conflicts: there, or
     /// in another list than the picked files, it selects `key` alone.
     pub(super) fn pick_file(&mut self, list: FileList, key: FileKey, range: bool) {
+        if list == FileList::Conflicts {
+            return self.select_file(key);
+        }
         let rows = self.list_keys(list);
         let (mut keys, anchor) = self.selected_in(list, &rows);
         let Some(at) = rows.iter().position(|k| *k == key) else {
             return;
         };
-        if list == FileList::Conflicts || keys.is_empty() {
+        if keys.is_empty() {
             return self.select_file(key);
         }
         let mut anchor = anchor.unwrap_or_else(|| key.clone());
@@ -589,9 +594,14 @@ impl Project {
                 return;
             }
             keys.remove(i);
-            // The shown file goes; show the last one picked instead.
-            shown = keys.last().cloned().expect("more than one");
-            anchor = shown.clone();
+            // The next Shift+click starts here, picked or not.
+            anchor = key.clone();
+            // The shown file stays, unless it was the one taken out.
+            let current = self.diff_view.as_ref().map(|v| &v.key);
+            shown = match current.filter(|k| keys.contains(k)) {
+                Some(current) => current.clone(),
+                None => keys.last().cloned().expect("more than one"),
+            };
         } else {
             keys.push(key.clone());
             keys.sort_by_key(|k| rows.iter().position(|r| r == k));
@@ -616,6 +626,26 @@ impl Project {
             Some(p) if p.list == list && p.keys.contains(key) => p.keys.clone(),
             _ => vec![key.clone()],
         }
+    }
+
+    /// What Stage (in Unstaged) or Unstage (in Staged) does for `key` of
+    /// `list`, from its menu or the keyboard: all picked files if `key` is
+    /// one of them. Conflicts move by being resolved instead.
+    pub fn toggle_files(&self, list: FileList, key: &FileKey) -> Option<Action> {
+        let paths = self
+            .file_targets(list, key)
+            .into_iter()
+            .map(|k| k.path)
+            .collect();
+        Action::toggle_files(list, paths)
+    }
+
+    /// What Discard does for `key` of `list`, from its menu or the
+    /// keyboard: ask about all picked files if `key` is one of them. Only
+    /// unstaged changes are discarded.
+    pub fn discard_files(&self, list: FileList, key: &FileKey) -> Option<Action> {
+        (list == FileList::Unstaged)
+            .then(|| Action::discard_files(&self.nav.worktree, self.file_targets(list, key)))
     }
 
     /// After a status refresh: picked files that left their list are
@@ -814,6 +844,7 @@ impl Project {
     pub(super) fn sync_file_selection(&mut self) {
         let Some(status) = self.worktree().and_then(|wt| wt.status.clone()) else {
             self.diff_view = None;
+            self.file_picks = None;
             return;
         };
         let keys: Vec<FileKey> = status
@@ -821,17 +852,26 @@ impl Project {
             .map(|(list, e)| FileKey::of(e, list == FileList::Staged))
             .collect();
         let current = self.diff_view.as_ref().map(|v| v.key.clone());
+        // The shown file left its list (staged with its button, say):
+        // show another picked file and keep the picks.
+        let picked = self
+            .file_picks
+            .as_ref()
+            .and_then(|p| p.keys.iter().find(|k| keys.contains(k)))
+            .cloned();
         let next = match &current {
             Some(key) if keys.contains(key) => Some(key.clone()),
-            Some(key) => keys
-                .iter()
-                .find(|k| k.path == key.path)
-                .or_else(|| keys.first())
-                .cloned(),
+            Some(key) => picked.clone().or_else(|| {
+                keys.iter()
+                    .find(|k| k.path == key.path)
+                    .or_else(|| keys.first())
+                    .cloned()
+            }),
             None => keys.first().cloned(),
         };
         match next {
             Some(key) if Some(&key) == current.as_ref() => self.load_view(DiffOwner::Status),
+            Some(key) if Some(&key) == picked.as_ref() => self.open_diff(DiffOwner::Status, key),
             Some(key) => self.select_file(key),
             None => self.diff_view = None,
         }
@@ -1476,6 +1516,92 @@ mod tests {
         assert_eq!(a.trim_end(), "2", "a.txt was not picked");
     }
 
+    /// Picked files keep their places: Ctrl+click on a picked file that is
+    /// not shown keeps the shown one, and the next Shift+click starts at
+    /// the Ctrl+clicked file. Staging the shown file with its button
+    /// leaves the other picks picked, one of them shown. Stage and
+    /// Discard from the keyboard or a menu act on every picked file.
+    #[test]
+    fn picks_keep_the_shown_file_the_anchor_and_survive_a_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        for name in ["a", "b", "c", "d"] {
+            std::fs::write(root.join(format!("{name}.txt")), "1\n").unwrap();
+        }
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "first"]);
+        for name in ["a", "b", "c", "d"] {
+            std::fs::write(root.join(format!("{name}.txt")), "2\n").unwrap();
+        }
+        let mut project = open(root);
+        let pick = |p: &mut Project, path: &str, range| {
+            p.apply(Action::PickFile {
+                list: FileList::Unstaged,
+                key: unstaged(path),
+                range,
+            })
+        };
+        let picked = |p: &Project| {
+            p.file_picks
+                .as_ref()
+                .map(|picks| paths_of(&picks.keys))
+                .unwrap_or_default()
+        };
+        let shown = |p: &Project| p.diff_view.as_ref().unwrap().key.path.clone();
+
+        // a to d picked, a shown.
+        project.apply(Action::SelectFile(unstaged("d.txt")));
+        pick(&mut project, "a.txt", true);
+        assert_eq!(picked(&project), ["a.txt", "b.txt", "c.txt", "d.txt"]);
+        assert_eq!(shown(&project), "a.txt");
+        pick(&mut project, "b.txt", false);
+        assert_eq!(picked(&project), ["a.txt", "c.txt", "d.txt"]);
+        assert_eq!(shown(&project), "a.txt", "the shown file stays");
+        pick(&mut project, "c.txt", true);
+        assert_eq!(picked(&project), ["b.txt", "c.txt"], "from b");
+
+        // Stage, Unstage and Discard act on the picks.
+        let b = unstaged("b.txt");
+        let Some(Action::StageFiles(paths)) = project.toggle_files(FileList::Unstaged, &b) else {
+            panic!("stages");
+        };
+        assert_eq!(paths, ["b.txt", "c.txt"]);
+        let Some(Action::AskDiscard { files, .. }) = project.discard_files(FileList::Unstaged, &b)
+        else {
+            panic!("asks before discarding");
+        };
+        assert_eq!(paths_of(&files), ["b.txt", "c.txt"]);
+        let staged = FileKey {
+            source: Source::Staged,
+            ..b.clone()
+        };
+        assert!(project.discard_files(FileList::Staged, &staged).is_none());
+        let d = unstaged("d.txt");
+        let Some(Action::StageFiles(paths)) = project.toggle_files(FileList::Unstaged, &d) else {
+            panic!("stages");
+        };
+        assert_eq!(paths, ["d.txt"], "d is not picked");
+
+        // Stage the shown file alone: the other picks stay, one shown.
+        pick(&mut project, "d.txt", false);
+        assert_eq!(picked(&project), ["b.txt", "c.txt", "d.txt"]);
+        assert_eq!(shown(&project), "d.txt");
+        git(root, &["add", "d.txt"]);
+        let snap = graft_core::snapshot::load(&project.git).unwrap();
+        project.take_snapshot(snap);
+        assert_eq!(picked(&project), ["b.txt", "c.txt"]);
+        assert!(["b.txt", "c.txt"].contains(&shown(&project).as_str()));
+
+        // Conflicts never pick more than one file.
+        project.apply(Action::PickFile {
+            list: FileList::Conflicts,
+            key: unstaged("a.txt"),
+            range: false,
+        });
+        assert!(project.file_picks.is_none());
+    }
+
     /// Discard… asks with the snapshot's answer for the worktree: a local
     /// folder has a Recycle Bin.
     #[test]
@@ -1534,7 +1660,18 @@ mod tests {
         let hunks = |p: &Project| p.diff_view.as_ref()?.diff.as_ref().map(|d| d.hunks.len());
         wait(&mut project, "the diff never came", |p| hunks(p) == Some(2));
         let stale = project.diff_view.as_ref().unwrap();
+        // Enter answers the question before discarding a hunk, not before
+        // staging one (which asks nothing anyway).
+        let question = |action| Confirm {
+            title: String::new(),
+            body: String::new(),
+            confirm_label: String::new(),
+            action,
+        };
+        let stage = stale.change_lines(LineOp::Stage, Some(1)).unwrap();
+        assert!(!question(stage).enter_confirms());
         let stale = stale.change_lines(LineOp::Discard, Some(1)).unwrap();
+        assert!(question(stale.clone()).enter_confirms());
 
         // The file changes while the dialog is open: the hunk asked about
         // is now a different one.
