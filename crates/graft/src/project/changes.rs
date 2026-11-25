@@ -62,13 +62,24 @@ impl FileKey {
 
 /// Files of one File status list selected together with Ctrl or Shift,
 /// in list order. The shown file is one of them. Stage, Unstage and
-/// Discard (from the keyboard or a row's menu) act on all of them.
+/// Discard (from the keyboard or a row's menu) act on all of them. Kept
+/// with one file too while Shift+click starts at another one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FilePicks {
     pub list: FileList,
     pub keys: Vec<FileKey>,
-    /// Where Shift+click starts its range: the last file Ctrl+clicked.
+    /// Where Shift+click starts its range: the last file Ctrl+clicked,
+    /// picked or not.
     anchor: FileKey,
+}
+
+impl FilePicks {
+    /// Picks worth keeping: more than one file, or one file and a Shift+click
+    /// start elsewhere. Otherwise the shown file says it all.
+    fn kept(list: FileList, keys: Vec<FileKey>, anchor: FileKey) -> Option<Self> {
+        let one = keys.len() == 1 && keys[0] == anchor;
+        (!keys.is_empty() && !one).then_some(Self { list, keys, anchor })
+    }
 }
 
 /// Worked out with the diff, off the UI thread: the changed words and the
@@ -609,7 +620,7 @@ impl Project {
         }
         self.open_diff(DiffOwner::Status, shown);
         self.sync_conflict();
-        self.file_picks = (keys.len() > 1).then_some(FilePicks { list, keys, anchor });
+        self.file_picks = FilePicks::kept(list, keys, anchor);
     }
 
     /// Whether `key` of `list` shows as selected besides the shown file.
@@ -663,16 +674,12 @@ impl Project {
             .cloned()
             .collect();
         let anchor = Some(&picks.anchor)
-            .filter(|a| keys.contains(a))
+            .filter(|a| rows.contains(a))
             .or(shown)
             .cloned();
         self.file_picks = match anchor {
-            Some(anchor) if keys.len() > 1 && shown.is_some_and(|s| keys.contains(s)) => {
-                Some(FilePicks {
-                    list: picks.list,
-                    keys,
-                    anchor,
-                })
+            Some(anchor) if shown.is_some_and(|s| keys.contains(s)) => {
+                FilePicks::kept(picks.list, keys, anchor)
             }
             _ => None,
         };
@@ -854,11 +861,10 @@ impl Project {
         let current = self.diff_view.as_ref().map(|v| v.key.clone());
         // The shown file left its list (staged with its button, say):
         // show another picked file and keep the picks.
-        let picked = self
-            .file_picks
-            .as_ref()
-            .and_then(|p| p.keys.iter().find(|k| keys.contains(k)))
-            .cloned();
+        let picked = self.file_picks.as_ref().and_then(|p| {
+            let rows = self.list_keys(p.list);
+            p.keys.iter().find(|k| rows.contains(k)).cloned()
+        });
         let next = match &current {
             Some(key) if keys.contains(key) => Some(key.clone()),
             Some(key) => picked.clone().or_else(|| {
@@ -1473,7 +1479,10 @@ mod tests {
         git(root, &["add", "b.txt"]);
         let snap = graft_core::snapshot::load(&project.git).unwrap();
         project.take_snapshot(snap);
-        assert!(project.file_picks.is_none(), "{:?}", project.file_picks);
+        assert_eq!(picked(&project), ["c.txt"]);
+        assert_eq!(shown(&project), "c.txt");
+        let c = unstaged("c.txt");
+        assert_eq!(project.file_targets(FileList::Unstaged, &c), [c]);
 
         // A plain click selects one file again.
         project.apply(Action::SelectFile(unstaged("c.txt")));
@@ -1592,6 +1601,28 @@ mod tests {
         project.take_snapshot(snap);
         assert_eq!(picked(&project), ["b.txt", "c.txt"]);
         assert!(["b.txt", "c.txt"].contains(&shown(&project).as_str()));
+
+        // Unstage acts on the staged file, the only one picked there.
+        let d = FileKey {
+            source: Source::Staged,
+            ..unstaged("d.txt")
+        };
+        let Some(Action::UnstageFiles(paths)) = project.toggle_files(FileList::Staged, &d) else {
+            panic!("unstages");
+        };
+        assert_eq!(paths, ["d.txt"]);
+
+        // Of two picks, Ctrl+click takes one out; the next Shift+click
+        // still starts there, after a refresh too.
+        project.apply(Action::SelectFile(unstaged("a.txt")));
+        pick(&mut project, "b.txt", false);
+        pick(&mut project, "a.txt", false);
+        assert_eq!(shown(&project), "b.txt");
+        assert!(!project.is_picked(FileList::Unstaged, &unstaged("a.txt")));
+        let snap = graft_core::snapshot::load(&project.git).unwrap();
+        project.take_snapshot(snap);
+        pick(&mut project, "c.txt", true);
+        assert_eq!(picked(&project), ["a.txt", "b.txt", "c.txt"], "from a");
 
         // Conflicts never pick more than one file.
         project.apply(Action::PickFile {

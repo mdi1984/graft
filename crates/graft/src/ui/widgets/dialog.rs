@@ -71,9 +71,10 @@ impl Shown<Answer> {
     /// The footer's answer with the keys and outside clicks merged in.
     pub fn answer(&self) -> Answer {
         Answer {
-            // Enter on a focused Cancel button clicks it: Cancel wins.
+            // Enter on a focused Cancel button clicks it, and Escape may
+            // come in the same frame: cancelling wins.
             submit: self.inner.submit
-                || (self.enter && self.inner.enter_submits && !self.inner.cancel),
+                || (self.enter && self.inner.enter_submits && !self.inner.cancel && !self.cancel),
             cancel: self.inner.cancel || self.cancel,
             enter_submits: self.inner.enter_submits,
             enabled: self.inner.enabled,
