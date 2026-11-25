@@ -60,8 +60,11 @@ pub struct Answer {
     /// Its Cancel button, or (after [`Shown::answer`]) Escape or a click
     /// outside the dialog.
     pub cancel: bool,
-    /// Enter may submit: the main button is enabled and not destructive.
+    /// Enter may submit: the main button is enabled and not destructive
+    /// (see [`Shown::enter_confirms`]).
     enter_submits: bool,
+    /// The main button is enabled.
+    enabled: bool,
 }
 
 impl Shown<Answer> {
@@ -71,7 +74,16 @@ impl Shown<Answer> {
             submit: self.inner.submit || (self.enter && self.inner.enter_submits),
             cancel: self.inner.cancel || self.cancel,
             enter_submits: self.inner.enter_submits,
+            enabled: self.inner.enabled,
         }
+    }
+
+    /// Let Enter answer a [`ButtonKind::Danger`] action too, if enabled:
+    /// for a question the user just asked for (see
+    /// [`crate::project::Confirm::enter_confirms`]).
+    pub fn enter_confirms(mut self) -> Self {
+        self.inner.enter_submits = self.inner.enabled;
+        self
     }
 }
 
@@ -94,7 +106,8 @@ pub fn footer(
 }
 
 /// The main action and Cancel, right to left, for the right side of a
-/// [`footer_row`]. Enter never answers a [`ButtonKind::Danger`] action.
+/// [`footer_row`]. Enter never answers a [`ButtonKind::Danger`] action,
+/// unless the dialog asks for it with [`Shown::enter_confirms`].
 pub fn main_buttons(
     ui: &mut Ui,
     primary: &str,
@@ -108,6 +121,7 @@ pub fn main_buttons(
         submit: button(ui, primary, kind, enabled).clicked(),
         cancel: button(ui, "Cancel", ButtonKind::Secondary, !busy).clicked(),
         enter_submits: enabled && kind != ButtonKind::Danger,
+        enabled,
     };
     if busy {
         inline_spinner(ui);

@@ -16,6 +16,7 @@ use graft_core::{EntryKind, FileList, Git, StatusEntry};
 use super::comments::{Pick, Side};
 use super::ops::{At, quietly};
 use super::{Action, Confirm, Project, RemoteOp, readable};
+use crate::text::plural;
 
 /// Which file a diff shows, and from where: a File status list, a commit
 /// or stash, or the review's base.
@@ -57,6 +58,17 @@ impl FileKey {
     pub fn is_staged(&self) -> bool {
         self.source == Source::Staged
     }
+}
+
+/// Files of one File status list selected together with Ctrl or Shift,
+/// in list order. The shown file is one of them. Stage, Unstage and
+/// Discard (from the keyboard or a row's menu) act on all of them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FilePicks {
+    pub list: FileList,
+    pub keys: Vec<FileKey>,
+    /// Where Shift+click starts its range: the last file Ctrl+clicked.
+    anchor: FileKey,
 }
 
 /// Worked out with the diff, off the UI thread: the changed words and the
@@ -344,55 +356,133 @@ impl CommitForm {
 }
 
 impl Action {
-    /// Ask before discarding a whole file (File status, the diff's
-    /// Discard…) in `worktree`, see [`Project::ask_discard`].
+    /// Ask before discarding a whole file (the diff's Discard…) in
+    /// `worktree`, see [`Project::ask_discard`].
     pub fn discard_file(worktree: &Path, source: &Source, path: String) -> Action {
+        Action::discard_files(
+            worktree,
+            vec![FileKey {
+                source: source.clone(),
+                path,
+                orig_path: None,
+            }],
+        )
+    }
+
+    /// Ask before discarding whole files of the unstaged list (File
+    /// status) in `worktree`, see [`Project::ask_discard`].
+    pub fn discard_files(worktree: &Path, files: Vec<FileKey>) -> Action {
         Action::AskDiscard {
             worktree: worktree.to_path_buf(),
-            source: source.clone(),
-            path,
+            files,
         }
     }
 }
 
-/// The question before discarding a whole file; a new one goes to the
+impl Confirm {
+    /// Enter answers yes. Only for discarding: the user asked for that
+    /// question a moment ago with a click or a key. Other questions can
+    /// come up while they type (a job's follow-up), so a stray Enter must
+    /// not answer them.
+    pub fn enter_confirms(&self) -> bool {
+        match &self.action {
+            Action::Discard { .. } => true,
+            Action::ChangeLines(change) => change.op == LineOp::Discard,
+            _ => false,
+        }
+    }
+}
+
+/// At most this many file names in the question before discarding many.
+const NAMED_FILES: usize = 6;
+
+/// The question before discarding whole files; a new one goes to the
 /// Recycle Bin if the worktree has one, else it is deleted for good.
-fn discard_question(recycle_bin: bool, source: &Source, path: String) -> Confirm {
-    let untracked = *source == Source::Untracked;
-    let (title, body, confirm_label) = if !untracked {
-        (
-            "Discard changes?",
-            format!("All unstaged changes to {path} will be lost. Staged changes stay."),
-            "Discard",
-        )
-    } else if recycle_bin {
-        (
-            "Discard changes?",
-            format!("{path} is not tracked by git. It will be moved to the Recycle Bin."),
-            "Discard",
-        )
-    } else {
-        (
-            "Delete the file for good?",
+fn discard_question(recycle_bin: bool, files: &[FileKey]) -> Confirm {
+    let (untracked, tracked): (Vec<&FileKey>, Vec<&FileKey>) = files
+        .iter()
+        .partition(|key| key.source == Source::Untracked);
+    let paths = |keys: &[&FileKey]| keys.iter().map(|k| k.path.clone()).collect::<Vec<_>>();
+    let no_bin = "Windows has no Recycle Bin inside WSL or on a network share or drive.";
+    let (title, body, confirm_label) = match files {
+        [one] if one.source != Source::Untracked => (
+            "Discard changes?".to_owned(),
             format!(
-                "{path} is not tracked by git. It will be deleted permanently: Windows \
-                     has no Recycle Bin inside WSL or on a network share or drive."
+                "All unstaged changes to {} will be lost. Staged changes stay.",
+                one.path
+            ),
+            "Discard",
+        ),
+        [one] if recycle_bin => (
+            "Discard changes?".to_owned(),
+            format!(
+                "{} is not tracked by git. It will be moved to the Recycle Bin.",
+                one.path
+            ),
+            "Discard",
+        ),
+        [one] => (
+            "Delete the file for good?".to_owned(),
+            format!(
+                "{} is not tracked by git. It will be deleted permanently: {no_bin}",
+                one.path
             ),
             "Delete permanently",
-        )
-    };
-    let (tracked, untracked_paths) = if untracked {
-        (Vec::new(), vec![path])
-    } else {
-        (vec![path], Vec::new())
+        ),
+        _ => {
+            let mut names: Vec<&str> = files
+                .iter()
+                .take(NAMED_FILES)
+                .map(|k| k.path.as_str())
+                .collect();
+            let more = files.len().saturating_sub(NAMED_FILES);
+            let more = format!("… and {more} more");
+            if files.len() > NAMED_FILES {
+                names.push(&more);
+            }
+            let mut lines = vec![
+                names.join(
+                    "
+",
+                ),
+                String::new(),
+            ];
+            if !tracked.is_empty() {
+                lines.push(format!(
+                    "All unstaged changes to {} will be lost. Staged changes stay.",
+                    plural(tracked.len(), "tracked file", "tracked files")
+                ));
+            }
+            if !untracked.is_empty() {
+                let new = plural(untracked.len(), "new file", "new files");
+                lines.push(if recycle_bin {
+                    format!("{new} not tracked by git will be moved to the Recycle Bin.")
+                } else {
+                    format!("{new} not tracked by git will be deleted permanently: {no_bin}")
+                });
+            }
+            let label = match (recycle_bin || untracked.is_empty(), tracked.is_empty()) {
+                (true, _) => "Discard",
+                (false, true) => "Delete permanently",
+                (false, false) => "Discard and delete",
+            };
+            (
+                format!("Discard changes to {} files?", files.len()),
+                lines.join(
+                    "
+",
+                ),
+                label,
+            )
+        }
     };
     Confirm {
-        title: title.to_owned(),
+        title,
         body,
         confirm_label: confirm_label.to_owned(),
         action: Action::Discard {
-            tracked,
-            untracked: untracked_paths,
+            tracked: paths(&tracked),
+            untracked: paths(&untracked),
         },
     }
 }
@@ -402,13 +492,16 @@ impl Project {
     /// [`Project::discard`] runs it. Whether a new file goes to the Recycle
     /// Bin is the snapshot's answer (see [`graft_core::Worktree::recycle_bin`]):
     /// finding out takes the disk, which the UI thread never touches.
-    pub(super) fn ask_discard(&mut self, worktree: &Path, source: &Source, path: String) {
+    pub(super) fn ask_discard(&mut self, worktree: &Path, files: &[FileKey]) {
+        if files.is_empty() {
+            return;
+        }
         let recycle_bin = self
             .snapshot
             .as_ref()
             .and_then(|s| s.worktree_at(worktree))
             .is_some_and(|wt| wt.recycle_bin);
-        self.ask(discard_question(recycle_bin, source, path));
+        self.ask(discard_question(recycle_bin, files));
     }
 
     /// The diff `owner` shows, if any.
@@ -445,8 +538,114 @@ impl Project {
     }
 
     pub(super) fn select_file(&mut self, key: FileKey) {
+        self.file_picks = None;
         self.open_diff(DiffOwner::Status, key);
         self.sync_conflict();
+    }
+
+    /// The rows of `list` in File status, top to bottom.
+    fn list_keys(&self, list: FileList) -> Vec<FileKey> {
+        let Some(status) = self.worktree().and_then(|wt| wt.status.as_ref()) else {
+            return Vec::new();
+        };
+        status
+            .in_list(list)
+            .map(|e| FileKey::of(e, list == FileList::Staged))
+            .collect()
+    }
+
+    /// The files of `list` selected now: the picked ones, or the shown
+    /// file if it is in `list`.
+    fn selected_in(&self, list: FileList, rows: &[FileKey]) -> (Vec<FileKey>, Option<FileKey>) {
+        if let Some(picks) = self.file_picks.as_ref().filter(|p| p.list == list) {
+            return (picks.keys.clone(), Some(picks.anchor.clone()));
+        }
+        let shown = self.diff_view.as_ref().map(|v| &v.key);
+        match shown.filter(|key| rows.contains(key)) {
+            Some(key) => (vec![key.clone()], Some(key.clone())),
+            None => (Vec::new(), None),
+        }
+    }
+
+    /// Ctrl+click (`range` false) or Shift+click (`range` true) on `key`
+    /// of `list`. Picks stay in one list, and not in Conflicts: there, or
+    /// in another list than the picked files, it selects `key` alone.
+    pub(super) fn pick_file(&mut self, list: FileList, key: FileKey, range: bool) {
+        let rows = self.list_keys(list);
+        let (mut keys, anchor) = self.selected_in(list, &rows);
+        let Some(at) = rows.iter().position(|k| *k == key) else {
+            return;
+        };
+        if list == FileList::Conflicts || keys.is_empty() {
+            return self.select_file(key);
+        }
+        let mut anchor = anchor.unwrap_or_else(|| key.clone());
+        let mut shown = key.clone();
+        if range {
+            let from = rows.iter().position(|k| *k == anchor).unwrap_or(at);
+            keys = rows[from.min(at)..=from.max(at)].to_vec();
+        } else if let Some(i) = keys.iter().position(|k| *k == key) {
+            if keys.len() == 1 {
+                return;
+            }
+            keys.remove(i);
+            // The shown file goes; show the last one picked instead.
+            shown = keys.last().cloned().expect("more than one");
+            anchor = shown.clone();
+        } else {
+            keys.push(key.clone());
+            keys.sort_by_key(|k| rows.iter().position(|r| r == k));
+            anchor = key.clone();
+        }
+        self.open_diff(DiffOwner::Status, shown);
+        self.sync_conflict();
+        self.file_picks = (keys.len() > 1).then_some(FilePicks { list, keys, anchor });
+    }
+
+    /// Whether `key` of `list` shows as selected besides the shown file.
+    pub fn is_picked(&self, list: FileList, key: &FileKey) -> bool {
+        self.file_picks
+            .as_ref()
+            .is_some_and(|p| p.list == list && p.keys.contains(key))
+    }
+
+    /// The files a command on `key` of `list` acts on: every picked file
+    /// if `key` is one of them, else `key` alone.
+    pub fn file_targets(&self, list: FileList, key: &FileKey) -> Vec<FileKey> {
+        match &self.file_picks {
+            Some(p) if p.list == list && p.keys.contains(key) => p.keys.clone(),
+            _ => vec![key.clone()],
+        }
+    }
+
+    /// After a status refresh: picked files that left their list are
+    /// unpicked; one left over is just the shown file.
+    fn sync_file_picks(&mut self) {
+        let Some(picks) = &self.file_picks else {
+            return;
+        };
+        let rows = self.list_keys(picks.list);
+        let shown = self.diff_view.as_ref().map(|v| &v.key);
+        let keys: Vec<FileKey> = picks
+            .keys
+            .iter()
+            .filter(|k| rows.contains(k))
+            .cloned()
+            .collect();
+        let anchor = Some(&picks.anchor)
+            .filter(|a| keys.contains(a))
+            .or(shown)
+            .cloned();
+        self.file_picks = match anchor {
+            Some(anchor) if keys.len() > 1 && shown.is_some_and(|s| keys.contains(s)) => {
+                Some(FilePicks {
+                    list: picks.list,
+                    keys,
+                    anchor,
+                })
+            }
+            _ => None,
+        };
     }
 
     /// Show `key` in `owner`'s diff, unless it shows it already. The diff
@@ -636,6 +835,7 @@ impl Project {
             Some(key) => self.select_file(key),
             None => self.diff_view = None,
         }
+        self.sync_file_picks();
         self.sync_conflict();
     }
 
@@ -1081,7 +1281,12 @@ mod tests {
     /// Windows has none, says it is deleted for good.
     #[test]
     fn discarding_a_new_file_says_where_it_goes() {
-        let ask = |recycle_bin| discard_question(recycle_bin, &Source::Untracked, "new.txt".into());
+        let file = FileKey {
+            source: Source::Untracked,
+            path: "new.txt".into(),
+            orig_path: None,
+        };
+        let ask = |recycle_bin| discard_question(recycle_bin, std::slice::from_ref(&file));
         let local = ask(true);
         assert!(local.body.contains("Recycle Bin"), "{}", local.body);
         assert!(!local.body.contains("permanently"), "{}", local.body);
@@ -1092,6 +1297,183 @@ mod tests {
             remote.body
         );
         assert_eq!(remote.confirm_label, "Delete permanently");
+    }
+
+    fn unstaged(path: &str) -> FileKey {
+        FileKey {
+            source: Source::Unstaged,
+            path: path.to_owned(),
+            orig_path: None,
+        }
+    }
+
+    fn untracked(path: &str) -> FileKey {
+        FileKey {
+            source: Source::Untracked,
+            ..unstaged(path)
+        }
+    }
+
+    fn paths_of(keys: &[FileKey]) -> Vec<String> {
+        keys.iter().map(|k| k.path.clone()).collect()
+    }
+
+    /// Discarding many files asks once: it names them (the first few),
+    /// says what happens to tracked and to new files, and discards each
+    /// the right way.
+    #[test]
+    fn discarding_many_files_asks_once() {
+        let mut files: Vec<FileKey> = (1..=7).map(|n| unstaged(&format!("f{n}.txt"))).collect();
+        files.push(untracked("new.txt"));
+        let local = discard_question(true, &files);
+        assert_eq!(local.title, "Discard changes to 8 files?");
+        assert!(local.body.contains("f1.txt\nf2.txt"), "{}", local.body);
+        assert!(!local.body.contains("f7.txt"), "{}", local.body);
+        assert!(local.body.contains("… and 2 more"), "{}", local.body);
+        assert!(local.body.contains("7 tracked files"), "{}", local.body);
+        assert!(local.body.contains("1 new file "), "{}", local.body);
+        assert!(local.body.contains("Recycle Bin"), "{}", local.body);
+        assert_eq!(local.confirm_label, "Discard");
+        let Action::Discard {
+            tracked,
+            untracked: new,
+        } = &local.action
+        else {
+            panic!("{:?}", local.action);
+        };
+        assert_eq!(tracked.len(), 7);
+        assert_eq!(new, &["new.txt".to_owned()]);
+
+        let remote = discard_question(false, &files);
+        assert!(
+            remote.body.contains("deleted permanently"),
+            "{}",
+            remote.body
+        );
+        assert_eq!(remote.confirm_label, "Discard and delete");
+        let new_only = discard_question(false, &[untracked("a"), untracked("b")]);
+        assert_eq!(new_only.confirm_label, "Delete permanently");
+        assert!(
+            !new_only.body.contains("tracked files"),
+            "{}",
+            new_only.body
+        );
+    }
+
+    /// Enter answers the question before discarding, and no other: other
+    /// questions can come up while the user types.
+    #[test]
+    fn enter_confirms_only_discarding() {
+        assert!(discard_question(true, &[unstaged("a.txt")]).enter_confirms());
+        assert!(discard_question(false, &[untracked("a"), unstaged("b")]).enter_confirms());
+        let other = Confirm {
+            title: "Force push?".to_owned(),
+            body: String::new(),
+            confirm_label: "Force push".to_owned(),
+            action: Action::Refresh,
+        };
+        assert!(!other.enter_confirms());
+    }
+
+    /// Ctrl+click and Shift+click select more files of one list; Stage
+    /// and Discard on one of them act on all; a file of another list, or
+    /// a plain click, selects one file again.
+    #[test]
+    fn ctrl_and_shift_click_select_files_of_one_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        for name in ["a", "b", "c", "d", "s"] {
+            std::fs::write(root.join(format!("{name}.txt")), "1\n").unwrap();
+        }
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "first"]);
+        for name in ["a", "b", "c", "d", "s"] {
+            std::fs::write(root.join(format!("{name}.txt")), "2\n").unwrap();
+        }
+        git(root, &["add", "s.txt"]);
+        let mut project = open(root);
+        let pick = |p: &mut Project, path: &str, range| {
+            p.apply(Action::PickFile {
+                list: FileList::Unstaged,
+                key: unstaged(path),
+                range,
+            })
+        };
+        let picked = |p: &Project| {
+            p.file_picks
+                .as_ref()
+                .map(|picks| paths_of(&picks.keys))
+                .unwrap_or_default()
+        };
+        let shown = |p: &Project| p.diff_view.as_ref().unwrap().key.path.clone();
+        let targets = |p: &Project, path: &str| {
+            paths_of(&p.file_targets(FileList::Unstaged, &unstaged(path)))
+        };
+
+        project.apply(Action::SelectFile(unstaged("a.txt")));
+        pick(&mut project, "c.txt", false);
+        assert_eq!(picked(&project), ["a.txt", "c.txt"]);
+        assert_eq!(shown(&project), "c.txt");
+        assert!(project.is_picked(FileList::Unstaged, &unstaged("a.txt")));
+        assert!(!project.is_picked(FileList::Unstaged, &unstaged("b.txt")));
+        assert!(!project.is_picked(FileList::Staged, &unstaged("a.txt")));
+        assert_eq!(targets(&project, "a.txt"), ["a.txt", "c.txt"]);
+        assert_eq!(targets(&project, "d.txt"), ["d.txt"]);
+        // Shift+click: from the last Ctrl+clicked file.
+        pick(&mut project, "a.txt", true);
+        assert_eq!(picked(&project), ["a.txt", "b.txt", "c.txt"]);
+        assert_eq!(shown(&project), "a.txt");
+        // Ctrl+click takes the shown file out and shows another.
+        pick(&mut project, "a.txt", false);
+        assert_eq!(picked(&project), ["b.txt", "c.txt"]);
+        assert!(["b.txt", "c.txt"].contains(&shown(&project).as_str()));
+
+        // Staging one file unpicks it: one is left, just the shown file.
+        git(root, &["add", "b.txt"]);
+        let snap = graft_core::snapshot::load(&project.git).unwrap();
+        project.take_snapshot(snap);
+        assert!(project.file_picks.is_none(), "{:?}", project.file_picks);
+
+        // A plain click selects one file again.
+        project.apply(Action::SelectFile(unstaged("c.txt")));
+        pick(&mut project, "d.txt", false);
+        assert_eq!(picked(&project), ["c.txt", "d.txt"]);
+        project.apply(Action::SelectFile(unstaged("a.txt")));
+        assert!(project.file_picks.is_none());
+
+        // A file of another list selects that one alone.
+        pick(&mut project, "d.txt", false);
+        assert_eq!(picked(&project), ["a.txt", "d.txt"]);
+        project.apply(Action::PickFile {
+            list: FileList::Staged,
+            key: FileKey {
+                source: Source::Staged,
+                ..unstaged("s.txt")
+            },
+            range: false,
+        });
+        assert!(project.file_picks.is_none());
+        assert_eq!(shown(&project), "s.txt");
+
+        // Discard on picked files discards them all, once confirmed.
+        project.apply(Action::SelectFile(unstaged("c.txt")));
+        pick(&mut project, "d.txt", false);
+        let files = project.file_targets(FileList::Unstaged, &unstaged("d.txt"));
+        let worktree = project.nav.worktree.clone();
+        project.apply(Action::discard_files(&worktree, files));
+        let title = &project.confirm().unwrap().title;
+        assert_eq!(title, "Discard changes to 2 files?");
+        project.apply(Action::ConfirmYes);
+        wait(&mut project, "discarding never ended", |p| {
+            !p.is_operating()
+        });
+        for name in ["c", "d"] {
+            let text = std::fs::read_to_string(root.join(format!("{name}.txt"))).unwrap();
+            assert_eq!(text.trim_end(), "1", "{name}.txt discarded");
+        }
+        let a = std::fs::read_to_string(root.join("a.txt")).unwrap();
+        assert_eq!(a.trim_end(), "2", "a.txt was not picked");
     }
 
     /// Discard… asks with the snapshot's answer for the worktree: a local
