@@ -70,12 +70,12 @@ pub struct Answer {
 impl Shown<Answer> {
     /// The footer's answer with the keys and outside clicks merged in.
     pub fn answer(&self) -> Answer {
+        // Enter on a focused Cancel button clicks it, and Escape or an
+        // outside click may come in the same frame: cancelling wins.
+        let cancel = self.inner.cancel || self.cancel;
         Answer {
-            // Enter on a focused Cancel button clicks it, and Escape may
-            // come in the same frame: cancelling wins.
-            submit: self.inner.submit
-                || (self.enter && self.inner.enter_submits && !self.inner.cancel && !self.cancel),
-            cancel: self.inner.cancel || self.cancel,
+            submit: !cancel && (self.inner.submit || (self.enter && self.inner.enter_submits)),
+            cancel,
             enter_submits: self.inner.enter_submits,
             enabled: self.inner.enabled,
         }

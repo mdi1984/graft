@@ -602,6 +602,8 @@ impl Project {
             keys = rows[from.min(at)..=from.max(at)].to_vec();
         } else if let Some(i) = keys.iter().position(|k| *k == key) {
             if keys.len() == 1 {
+                // The only pick stays; Shift+click starts here now.
+                self.file_picks = FilePicks::kept(list, keys, key);
                 return;
             }
             keys.remove(i);
@@ -660,7 +662,8 @@ impl Project {
     }
 
     /// After a status refresh: picked files that left their list are
-    /// unpicked; one left over is just the shown file.
+    /// unpicked. One left over stays picked only while the Shift+click
+    /// start is another file still in the list.
     fn sync_file_picks(&mut self) {
         let Some(picks) = &self.file_picks else {
             return;
@@ -1475,7 +1478,8 @@ mod tests {
         assert_eq!(picked(&project), ["b.txt", "c.txt"]);
         assert!(["b.txt", "c.txt"].contains(&shown(&project).as_str()));
 
-        // Staging one file unpicks it: one is left, just the shown file.
+        // Staging one file unpicks it. One is left, still picked: the
+        // Shift+click start (a) is another file of the list.
         git(root, &["add", "b.txt"]);
         let snap = graft_core::snapshot::load(&project.git).unwrap();
         project.take_snapshot(snap);
@@ -1504,6 +1508,24 @@ mod tests {
         });
         assert!(project.file_picks.is_none());
         assert_eq!(shown(&project), "s.txt");
+        // Unstage acts on every picked staged file.
+        let s = FileKey {
+            source: Source::Staged,
+            ..unstaged("s.txt")
+        };
+        let b = FileKey {
+            source: Source::Staged,
+            ..unstaged("b.txt")
+        };
+        project.apply(Action::PickFile {
+            list: FileList::Staged,
+            key: b,
+            range: false,
+        });
+        let Some(Action::UnstageFiles(paths)) = project.toggle_files(FileList::Staged, &s) else {
+            panic!("unstages");
+        };
+        assert_eq!(paths, ["b.txt", "s.txt"]);
 
         // Discard on picked files discards them all, once confirmed.
         project.apply(Action::SelectFile(unstaged("c.txt")));
@@ -1623,6 +1645,13 @@ mod tests {
         project.take_snapshot(snap);
         pick(&mut project, "c.txt", true);
         assert_eq!(picked(&project), ["a.txt", "b.txt", "c.txt"], "from a");
+        // Ctrl+click on the only pick moves the start there.
+        project.apply(Action::SelectFile(unstaged("a.txt")));
+        pick(&mut project, "b.txt", false);
+        pick(&mut project, "a.txt", false);
+        pick(&mut project, "b.txt", false);
+        pick(&mut project, "c.txt", true);
+        assert_eq!(picked(&project), ["b.txt", "c.txt"], "from b");
 
         // Conflicts never pick more than one file.
         project.apply(Action::PickFile {
