@@ -151,3 +151,27 @@ pub fn footer_row<L, R>(
     })
     .inner
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Escape or an outside click in the same frame as a click (or Enter)
+    /// on the main button cancels: never both, and cancelling wins.
+    #[test]
+    fn cancelling_wins_over_the_main_button() {
+        let shown = Shown {
+            inner: Answer {
+                submit: true,
+                cancel: false,
+                enter_submits: true,
+                enabled: true,
+            },
+            cancel: true,
+            enter: true,
+        };
+        let answer = shown.answer();
+        assert!(answer.cancel);
+        assert!(!answer.submit);
+    }
+}

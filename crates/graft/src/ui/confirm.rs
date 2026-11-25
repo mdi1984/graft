@@ -99,5 +99,6 @@ mod tests {
         assert_eq!(answer_after(false, &[&[Enter]]), None);
         assert_eq!(answer_after(true, &[&[Tab], &[Tab], &[Enter]]), Some(false));
         assert_eq!(answer_after(true, &[&[Escape, Enter]]), Some(false));
+        assert_eq!(answer_after(true, &[&[Tab], &[Escape, Enter]]), Some(false));
     }
 }
