@@ -348,6 +348,14 @@ fn merge_button(
 /// How far each folder level indents the tree.
 const NEST: f32 = 14.0;
 
+/// Where a row's content starts, right of its Viewed box.
+const FILE_INSET: f32 = 22.0;
+
+/// The Viewed box of the row at `rect`.
+fn viewed_box(rect: Rect) -> Rect {
+    Rect::from_center_size(pos2(rect.left() + 12.0, rect.center().y), vec2(14.0, 14.0))
+}
+
 fn file_list(ui: &mut Ui, project: &Project, review: &Review, actions: &mut Actions) {
     let selected = project.review.as_ref().and_then(|v| v.selected.as_deref());
     let folders = project.settings().review_folders;
@@ -405,23 +413,20 @@ fn file_tree(
                 let viewed = inside.iter().filter(|f| project.is_viewed(f)).count();
                 let all = viewed == inside.len();
                 let marked = selected.is_some_and(|s| paths[files].contains(&s));
-                // The box sits where the files' boxes are. It is added after
-                // the row, so it gets the click and the folder does not fold.
-                let top = ui.cursor().top();
-                let check = Rect::from_center_size(
-                    pos2(ui.max_rect().left() + 12.0, top + 12.0),
-                    vec2(14.0, 14.0),
-                );
-                let open = folder_row(
+                let (open, rect) = folder_row(
                     ui,
                     Id::unique(("review-folder", &project.root, path)),
                     name,
                     theme::body(),
                     &format!("{viewed}/{}", inside.len()),
-                    18.0 + depth as f32 * NEST,
+                    FILE_INSET + depth as f32 * NEST,
                     marked,
                     false,
                 );
+                // The Viewed box, where the files have theirs. Added after
+                // the row, so it gets the click and the folder does not fold.
+                let check = viewed_box(rect);
+                let files = plural(inside.len(), "file", "files");
                 let check_response = ui
                     .interact(
                         check.expand(4.0),
@@ -429,22 +434,17 @@ fn file_tree(
                         Sense::click(),
                     )
                     .on_hover_text(if all {
-                        format!("Unmark the {} files in {path}", inside.len())
+                        format!("Unmark the {files} in {path}")
                     } else {
-                        format!("Mark the {} files in {path} as viewed", inside.len())
+                        format!("Mark the {files} in {path} as viewed")
                     });
                 paint_check(ui.painter(), check, all, check_response.hovered());
                 if all {
-                    dim_viewed(
-                        ui,
-                        Rect::from_min_size(
-                            pos2(ui.max_rect().left(), top),
-                            vec2(ui.max_rect().width(), 24.0),
-                        ),
-                    );
+                    dim_viewed(ui, rect);
                 }
                 if check_response.clicked() {
                     actions.push(Action::SetViewed {
+                        worktree: project.nav.worktree.clone(),
                         paths: inside.iter().map(|f| f.change.path.clone()).collect(),
                         viewed: !all,
                     });
@@ -480,7 +480,7 @@ fn review_file_row(
         None
     };
     let extras = Extras {
-        inset: 22.0 + depth.unwrap_or(0) as f32 * NEST,
+        inset: FILE_INSET + depth.unwrap_or(0) as f32 * NEST,
         note: note.map(|note| (note, color::dirty_fg())),
         // Comments on this file.
         badge: project
@@ -490,8 +490,7 @@ fn review_file_row(
     };
     let response = file_row(ui, &file.change, selected == Some(path.as_str()), extras);
     let rect = response.rect;
-    let y = rect.center().y;
-    let check = Rect::from_center_size(pos2(rect.left() + 12.0, y), vec2(14.0, 14.0));
+    let check = viewed_box(rect);
     let check_response = ui.interact(
         check.expand(4.0),
         ui.scope_id().with(("viewed", path)),
@@ -859,6 +858,100 @@ fn file_note(
 mod tests {
     use super::*;
     use crate::testing::{git, open};
+
+    /// A click on a folder's Viewed box marks its files and leaves the
+    /// folder open; a click on its arrow folds it and marks nothing.
+    #[test]
+    fn the_folder_box_marks_and_the_arrow_folds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("app");
+        std::fs::create_dir(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        std::fs::write(
+            root.join("a.txt"),
+            "a
+",
+        )
+        .unwrap();
+        git(&root, &["add", "a.txt"]);
+        git(&root, &["commit", "-q", "-m", "first"]);
+        let project = open(&root);
+        let head = project.worktree().unwrap().head.unwrap();
+        let file = |path: &str| ReviewFile {
+            change: graft_core::changes::FileChange {
+                path: path.to_owned(),
+                orig_path: None,
+                change: Change::Added,
+                added: Some(1),
+                removed: Some(0),
+            },
+            untracked: false,
+            uncommitted: false,
+            content: String::new(),
+        };
+        let review = Review {
+            base: "main".to_owned(),
+            merge_base: head,
+            head,
+            commits: 1,
+            files: vec![file("dir/b.txt"), file("dir/c.txt")],
+        };
+
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx, &crate::fonts::Loaded::default());
+        theme::apply(&ctx, egui::ThemePreference::Dark);
+        // The actions of one frame, and where the tree starts.
+        let frame = |events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 400.0))),
+                events,
+                ..Default::default()
+            };
+            let mut actions = Actions::default();
+            let mut origin = pos2(0.0, 0.0);
+            let output = ctx.run_ui(input, |ui| {
+                origin = ui.max_rect().min;
+                file_tree(ui, &project, &review, None, &mut actions);
+            });
+            output.drop_without_applying_deltas();
+            (actions.project, origin)
+        };
+        let click = |at: egui::Vec2| {
+            let (_, origin) = frame(Vec::new());
+            let pos = origin + at;
+            let button = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frame(vec![egui::Event::PointerMoved(pos)]);
+            let (mut actions, _) = frame(vec![button(true)]);
+            actions.extend(frame(vec![button(false)]).0);
+            actions
+        };
+        let open_folder = || {
+            let id = Id::unique(("review-folder", &project.root, "dir"));
+            ctx.data_mut(|d| d.get_persisted::<bool>(id))
+                .unwrap_or(true)
+        };
+
+        let actions = click(vec2(12.0, 12.0));
+        assert!(
+            matches!(
+                actions.as_slice(),
+                [Action::SetViewed { paths, viewed: true, .. }] if paths == &["dir/b.txt", "dir/c.txt"]
+            ),
+            "{actions:?}"
+        );
+        assert!(open_folder(), "the box folded the folder");
+
+        // The arrow's left edge (`folder_row` draws it from the indent + 2),
+        // right next to the box.
+        let actions = click(vec2(FILE_INSET + 2.0, 12.0));
+        assert!(actions.is_empty(), "{actions:?}");
+        assert!(!open_folder(), "the arrow did not fold the folder");
+    }
 
     /// The header measures what one line needs alike on one line and on
     /// two: it neither flickers between them nor stays on two lines once

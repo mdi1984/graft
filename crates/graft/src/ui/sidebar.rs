@@ -377,7 +377,9 @@ fn grouped<'a, T>(
             level.indent,
             has_mark,
             level.open_all,
-        ) {
+        )
+        .0
+        {
             let inner = Level {
                 skip: prefix.len(),
                 indent: level.indent + NEST,
