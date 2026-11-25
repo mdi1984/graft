@@ -60,18 +60,33 @@ pub struct Answer {
     /// Its Cancel button, or (after [`Shown::answer`]) Escape or a click
     /// outside the dialog.
     pub cancel: bool,
-    /// Enter may submit: the main button is enabled and not destructive.
+    /// Enter may submit: the main button is enabled and not destructive
+    /// (see [`Shown::enter_confirms`]).
     enter_submits: bool,
+    /// The main button is enabled.
+    enabled: bool,
 }
 
 impl Shown<Answer> {
     /// The footer's answer with the keys and outside clicks merged in.
     pub fn answer(&self) -> Answer {
+        // Enter on a focused Cancel button clicks it, and Escape or an
+        // outside click may come in the same frame: cancelling wins.
+        let cancel = self.inner.cancel || self.cancel;
         Answer {
-            submit: self.inner.submit || (self.enter && self.inner.enter_submits),
-            cancel: self.inner.cancel || self.cancel,
+            submit: !cancel && (self.inner.submit || (self.enter && self.inner.enter_submits)),
+            cancel,
             enter_submits: self.inner.enter_submits,
+            enabled: self.inner.enabled,
         }
+    }
+
+    /// Let Enter answer a [`ButtonKind::Danger`] action too, if enabled:
+    /// for a question the user just asked for (see
+    /// [`crate::project::Confirm::enter_confirms`]).
+    pub fn enter_confirms(mut self) -> Self {
+        self.inner.enter_submits = self.inner.enabled;
+        self
     }
 }
 
@@ -94,7 +109,8 @@ pub fn footer(
 }
 
 /// The main action and Cancel, right to left, for the right side of a
-/// [`footer_row`]. Enter never answers a [`ButtonKind::Danger`] action.
+/// [`footer_row`]. Enter never answers a [`ButtonKind::Danger`] action,
+/// unless the dialog asks for it with [`Shown::enter_confirms`].
 pub fn main_buttons(
     ui: &mut Ui,
     primary: &str,
@@ -108,6 +124,7 @@ pub fn main_buttons(
         submit: button(ui, primary, kind, enabled).clicked(),
         cancel: button(ui, "Cancel", ButtonKind::Secondary, !busy).clicked(),
         enter_submits: enabled && kind != ButtonKind::Danger,
+        enabled,
     };
     if busy {
         inline_spinner(ui);
@@ -133,4 +150,28 @@ pub fn footer_row<L, R>(
         (left, right.inner)
     })
     .inner
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Escape or an outside click in the same frame as a click (or Enter)
+    /// on the main button cancels: never both, and cancelling wins.
+    #[test]
+    fn cancelling_wins_over_the_main_button() {
+        let shown = Shown {
+            inner: Answer {
+                submit: true,
+                cancel: false,
+                enter_submits: true,
+                enabled: true,
+            },
+            cancel: true,
+            enter: true,
+        };
+        let answer = shown.answer();
+        assert!(answer.cancel);
+        assert!(!answer.submit);
+    }
 }

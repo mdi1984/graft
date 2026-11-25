@@ -34,7 +34,7 @@ use graft_core::stash::{Stash, StashFile};
 use graft_core::watch::Watcher;
 use graft_core::{CancelToken, Git, JobPool, Oid, Operation, RepoSnapshot, Worktree, snapshot};
 
-pub use changes::{CommitForm, DiffOwner, DiffView, FileKey, LineChange, Staging};
+pub use changes::{CommitForm, DiffOwner, DiffView, FileKey, FilePicks, LineChange, Staging};
 pub use conflicts::{ConflictView, merge_dialog};
 pub use file_history::{FileHistoryMode, FileHistoryView};
 pub use preview::LeavePreview;
@@ -117,6 +117,13 @@ pub enum Action {
 
     // File status
     SelectFile(FileKey),
+    /// Add `key` of `list` to the selected files, or take it out (Ctrl+click);
+    /// with `range`, select from the last picked file to it (Shift+click).
+    PickFile {
+        list: graft_core::FileList,
+        key: FileKey,
+        range: bool,
+    },
     /// Toggle a changed line; with shift, select the range from the anchor.
     ClickLine {
         hunk: usize,
@@ -145,11 +152,10 @@ pub enum Action {
         tracked: Vec<String>,
         untracked: Vec<String>,
     },
-    /// Ask before discarding a whole file, see [`Action::discard_file`].
+    /// Ask before discarding whole files, see [`Action::discard_files`].
     AskDiscard {
         worktree: PathBuf,
-        source: graft_core::diff::Source,
-        path: String,
+        files: Vec<FileKey>,
     },
     Commit,
     ToggleAmend,
@@ -485,6 +491,8 @@ pub struct Project {
 
     /// File status: the selected file's diff.
     pub diff_view: Option<DiffView>,
+    /// File status: files selected with Ctrl or Shift besides it.
+    pub file_picks: Option<FilePicks>,
     /// History: the open file of the selected commit.
     pub commit_diff: Option<DiffView>,
     /// `None` until the Stashes tab was opened.
@@ -578,6 +586,7 @@ impl Project {
             details_error: None,
             scroll_request: 0,
             diff_view: None,
+            file_picks: None,
             commit_diff: None,
             stashes: None,
             selected_stash: None,
@@ -940,6 +949,7 @@ impl Project {
     fn set_worktree(&mut self, path: PathBuf) {
         self.nav.worktree = path;
         self.diff_view = None;
+        self.file_picks = None;
         self.conflict = None;
         self.commit_form = self.commit_form.cleared();
         if let Some(snap) = &self.snapshot {
@@ -1052,6 +1062,7 @@ impl Project {
             Action::Refresh => self.refresh(),
 
             Action::SelectFile(key) => self.select_file(key),
+            Action::PickFile { list, key, range } => self.pick_file(list, key, range),
             Action::ClickLine { hunk, line, shift } => self.click_line(hunk, line, shift),
             Action::DragLine { hunk, line } => self.drag_line(hunk, line),
             Action::ClearLines => self.clear_lines(),
@@ -1065,11 +1076,7 @@ impl Project {
             Action::StageFiles(paths) => self.stage_files(paths),
             Action::UnstageFiles(paths) => self.unstage_files(paths),
             Action::Discard { tracked, untracked } => self.discard(tracked, untracked),
-            Action::AskDiscard {
-                worktree,
-                source,
-                path,
-            } => self.ask_discard(&worktree, &source, path),
+            Action::AskDiscard { worktree, files } => self.ask_discard(&worktree, &files),
             Action::Commit => self.commit(),
             Action::ToggleAmend => self.toggle_amend(),
             Action::WriteCommitMessage => self.write_commit_message(),

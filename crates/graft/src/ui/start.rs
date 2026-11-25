@@ -420,7 +420,7 @@ impl StartPage {
             let body = "Only the group goes away: its repositories are not touched, and \
                         open tabs stay open.";
             let title = format!("Delete group {name}?");
-            match confirm::ask(ui.ctx(), &title, body, "Delete group") {
+            match confirm::ask(ui.ctx(), &title, body, "Delete group", false) {
                 Some(true) => {
                     action = Some(StartAction::DeleteGroup(*id));
                     self.delete_group = None;

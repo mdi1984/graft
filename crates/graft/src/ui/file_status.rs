@@ -99,7 +99,7 @@ fn keyboard(ui: &Ui, project: &Project, status: &WorktreeStatus, actions: &mut A
     if keys.pressed(ctx, Command::StageFile)
         && let Some((key, list)) = current.map(|i| &rows[i])
     {
-        actions.extend(toggle_action(*list, vec![key.path.clone()]));
+        actions.extend(project.toggle_files(*list, key));
     }
     if keys.pressed(ctx, Command::StageAll) {
         let paths: Vec<String> = status.unstaged().map(|e| e.path.clone()).collect();
@@ -114,13 +114,9 @@ fn keyboard(ui: &Ui, project: &Project, status: &WorktreeStatus, actions: &mut A
         }
     }
     if keys.pressed(ctx, Command::DiscardFile)
-        && let Some((key, FileList::Unstaged)) = current.map(|i| &rows[i])
+        && let Some((key, list)) = current.map(|i| &rows[i])
     {
-        actions.push(Action::discard_file(
-            &project.nav.worktree,
-            &key.source,
-            key.path.clone(),
-        ));
+        actions.extend(project.discard_files(*list, key));
     }
 }
 
@@ -146,7 +142,7 @@ fn file_lists(ui: &mut Ui, project: &Project, status: &WorktreeStatus, actions: 
                         let tip = keys.tip("Unstage every staged file", Command::UnstageAll);
                         let link = Some(("Unstage all", tip.as_str()));
                         if section(ui, "STAGED", entries.len(), link, &can) {
-                            actions.extend(toggle_action(list, paths()));
+                            actions.extend(Action::toggle_files(list, paths()));
                         }
                         if entries.is_empty() {
                             list_hint(ui, "Stage files, hunks or lines to commit them.");
@@ -156,7 +152,7 @@ fn file_lists(ui: &mut Ui, project: &Project, status: &WorktreeStatus, actions: 
                         let tip = keys.tip("Stage every changed file", Command::StageAll);
                         let link = Some(("Stage all", tip.as_str()));
                         if section(ui, "UNSTAGED", entries.len(), link, &can) {
-                            actions.extend(toggle_action(list, paths()));
+                            actions.extend(Action::toggle_files(list, paths()));
                         }
                         if entries.is_empty() {
                             list_hint(ui, "No unstaged changes.");
@@ -165,7 +161,7 @@ fn file_lists(ui: &mut Ui, project: &Project, status: &WorktreeStatus, actions: 
                 }
                 for entry in &entries {
                     let key = FileKey::of(entry, list == FileList::Staged);
-                    let selected = selected == Some(&key);
+                    let selected = selected == Some(&key) || project.is_picked(list, &key);
                     file_row(ui, entry, list, &key, selected, &can, project, actions);
                 }
                 if list != FileList::Unstaged {
@@ -189,17 +185,9 @@ fn list_hint(ui: &mut Ui, text: &str) {
     ui.add_space(2.0);
 }
 
-/// Moving `paths` of `list` to the other list: unstaged files are staged,
-/// staged ones unstaged. Conflicts move by being resolved instead.
-fn toggle_action(list: FileList, paths: Vec<String>) -> Option<Action> {
-    match list {
-        FileList::Unstaged => Some(Action::StageFiles(paths)),
-        FileList::Staged => Some(Action::UnstageFiles(paths)),
-        FileList::Conflicts => None,
-    }
-}
-
 /// One file of `list`: staged files offer unstaging, unstaged ones staging.
+/// Ctrl+click and Shift+click select more files of the list; the menu's
+/// Stage, Unstage and Discard act on all of them.
 #[allow(clippy::too_many_arguments)]
 fn file_row(
     ui: &mut Ui,
@@ -213,7 +201,7 @@ fn file_row(
 ) {
     let keys = &project.settings().keys;
     let change = list.change(entry);
-    let toggle = toggle_action(list, vec![entry.path.clone()]);
+    let toggle = Action::toggle_files(list, vec![entry.path.clone()]);
     let (rect, response) = file_row::allocate(ui, selected, Sense::click());
     let y = rect.center().y;
     let button_rect = Rect::from_center_size(pos2(rect.right() - 14.0, y), vec2(20.0, 20.0));
@@ -249,9 +237,20 @@ fn file_row(
         }
     }
     if !button_clicked {
-        if response.double_clicked() && can.ok {
+        let modifiers = ui.input(|i| i.modifiers);
+        let pick = |range| Action::PickFile {
+            list,
+            key: key.clone(),
+            range,
+        };
+        if response.clicked() && modifiers.command {
+            actions.push(pick(false));
+        } else if response.clicked() && modifiers.shift {
+            actions.push(pick(true));
+        } else if response.double_clicked() && can.ok {
             actions.extend(toggle.clone());
-        } else if response.clicked() {
+        } else if response.clicked() || (response.secondary_clicked() && !selected) {
+            // A right-click selects the file its menu is for.
             actions.push(Action::SelectFile(key.clone()));
         }
     }
@@ -260,27 +259,47 @@ fn file_row(
         egui::Button::new(label).shortcut_text(keys.text(command).unwrap_or_default())
     };
     response.context_menu(|ui| {
-        if let Some(toggle) = &toggle
+        // The picked files if this is one of them (a right-click on
+        // another selects it alone).
+        let targets = project.file_targets(list, key);
+        let many = targets.len() > 1;
+        let files = plural(targets.len(), "file", "files");
+        let toggle = project.toggle_files(list, key);
+        let label = if many {
+            format!("{label} {files}")
+        } else {
+            label.to_owned()
+        };
+        if let Some(toggle) = toggle
             && can
-                .why_not(ui.add_enabled(can.ok, item(label, Command::StageFile)))
+                .why_not(ui.add_enabled(can.ok, item(&label, Command::StageFile)))
                 .clicked()
         {
-            actions.push(toggle.clone());
+            actions.push(toggle);
             ui.close();
         }
-        if list == FileList::Unstaged
+        let discard = if many {
+            format!("Discard changes to {files}…")
+        } else {
+            "Discard changes…".to_owned()
+        };
+        if let Some(discard_files) = project.discard_files(list, key)
             && can
-                .why_not(ui.add_enabled(can.ok, item("Discard changes…", Command::DiscardFile)))
+                .why_not(ui.add_enabled(can.ok, item(&discard, Command::DiscardFile)))
                 .clicked()
         {
-            actions.push(Action::discard_file(
-                &project.nav.worktree,
-                &key.source,
-                entry.path.clone(),
-            ));
+            actions.push(discard_files);
             ui.close();
         }
         ui.separator();
+        if many {
+            if ui.button("Copy paths").clicked() {
+                let paths: Vec<&str> = targets.iter().map(|k| k.path.as_str()).collect();
+                ui.ctx().copy_text(paths.join("\n"));
+                ui.close();
+            }
+            return;
+        }
         file_row::menu_items(ui, &entry.path, actions);
         if ui.button("Open file").clicked() {
             actions.push(Action::OpenPath(entry.path.clone()));
