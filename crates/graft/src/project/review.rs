@@ -306,17 +306,24 @@ impl Project {
     /// Mark or unmark a file as viewed; marking the open file moves on to the
     /// next file not viewed yet.
     pub(super) fn toggle_viewed(&mut self, path: String) {
-        let Some(file) = self.review.as_ref().and_then(|v| v.file(&path)) else {
+        let Some(file) = self.review.as_ref().and_then(|v| v.file(&path)).cloned() else {
             return;
         };
-        let viewed = !self.is_viewed(file);
-        let worktree = self.nav.worktree.clone();
-        self.set_viewed(&worktree, vec![path], viewed);
+        let key = file.viewed_key();
+        let state = self.review_state_mut();
+        let now_viewed = !state.viewed.remove(&key);
+        if now_viewed {
+            state.viewed.insert(key);
+            if self.review.as_ref().and_then(|v| v.selected.as_deref()) == Some(path.as_str()) {
+                self.open_next_unviewed(&path);
+            }
+        }
     }
 
     /// Mark (or unmark) the files at `paths` as viewed in the review of
-    /// `worktree`, e.g. all files of a folder. Like [`Self::toggle_viewed`],
-    /// marking the open file moves on to the next file not viewed yet.
+    /// `worktree`, e.g. all files of a folder: every entry at a path. Like
+    /// [`Self::toggle_viewed`], marking the open file moves on to the next
+    /// file not viewed yet.
     pub(super) fn set_viewed(&mut self, worktree: &Path, paths: Vec<String>, viewed: bool) {
         let Some(view) = self.review.as_ref().filter(|v| {
             same_path(&v.worktree, worktree) && same_path(&self.nav.worktree, worktree)
@@ -336,7 +343,13 @@ impl Project {
         if keys.is_empty() {
             return;
         }
-        let open = view.selected.clone().filter(|o| paths.contains(o.as_str()));
+        // Moves on only when the open file was not viewed before: else it
+        // stays, with a comment being written on it.
+        let open = view
+            .selected
+            .clone()
+            .filter(|o| paths.contains(o.as_str()))
+            .filter(|o| view.file(o).is_some_and(|f| !self.is_viewed(f)));
         let state = self.review_state_mut();
         for key in keys {
             if viewed {
@@ -676,7 +689,15 @@ mod tests {
         assert_eq!(viewed(&project), folder);
         assert_eq!(open_file(&project), Some("z.txt"));
 
+        // The open file was viewed already: it stays open.
+        project.apply(Action::SelectReviewFile("dir/b.txt".to_owned()));
+        project.apply(Action::ToggleViewed("dir/c.txt".to_owned()));
+        set_viewed(&mut project, &folder, true);
+        assert_eq!(viewed(&project), folder);
+        assert_eq!(open_file(&project), Some("dir/b.txt"));
+
         // One file moves on as before, past the viewed ones.
+        project.apply(Action::SelectReviewFile("z.txt".to_owned()));
         project.apply(Action::ToggleViewed("z.txt".to_owned()));
         assert_eq!(open_file(&project), Some("a.txt"));
         set_viewed(&mut project, &folder, false);
@@ -705,6 +726,10 @@ mod tests {
         );
         set_viewed(&mut project, &["a.txt"], true);
         assert_eq!(viewed(&project), ["a.txt", "a.txt"]);
+        // One file's box marks only the entry it belongs to.
+        set_viewed(&mut project, &["a.txt"], false);
+        project.apply(Action::ToggleViewed("a.txt".to_owned()));
+        assert_eq!(viewed(&project), ["a.txt"]);
     }
 
     /// A mark made for another worktree's review does nothing here.

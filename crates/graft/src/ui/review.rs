@@ -867,12 +867,7 @@ mod tests {
         let root = tmp.path().join("app");
         std::fs::create_dir(&root).unwrap();
         git(&root, &["init", "-q", "-b", "main"]);
-        std::fs::write(
-            root.join("a.txt"),
-            "a
-",
-        )
-        .unwrap();
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
         git(&root, &["add", "a.txt"]);
         git(&root, &["commit", "-q", "-m", "first"]);
         let project = open(&root);
